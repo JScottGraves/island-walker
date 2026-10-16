@@ -22,9 +22,11 @@ constant float kCloudExtinction = 0.025;
 constant float kCloudShapeTile = 4000.0;
 constant float kCloudDetailTile = 700.0;
 // The edge detail fades out where a cloud texel spans more than this (its finest Worley
-// cells are ~90 m), and the light march, which needs only bulk density, skips it.
+// cells are ~90 m). The light march and shadow map sample at kCloudLightScale: past the
+// detail, but fine enough that the shape keeps its gaps (a blurred, uniform shape lets
+// less light into the cloud, since transmittance is convex in density).
 constant float kCloudDetailScale = 45.0;
-constant float kCloudLightScale = 250.0;
+constant float kCloudLightScale = 100.0;
 // Angle one cloud texel subtends (≤360 rows over a 60° view), for footprints.
 constant float kCloudPixelAngle = 0.003;
 
@@ -193,9 +195,12 @@ float cloudDensity(constant Uniforms &u, texture2d<float> cloudMap, texture3d<fl
         d = saturate(remapRange(d, 0.45 * detail * erosion, 1.0, 0.0, 1.0));
     }
     // Real cumulus edges are abrupt: liquid water appears within metres of the boundary.
-    // Raise thin density so an edge goes from clear to solid quickly instead of through a
-    // few hundred metres of haze (Nubis³ sharpens low densities the same way).
-    return pow(d, 0.6);
+    // Seen from outside, raise thin density so an edge goes from clear to solid quickly
+    // instead of through a few hundred metres of haze (Nubis³ sharpens low densities the
+    // same way). Not within ~1 km of the camera, where a walker in the cloud should still
+    // see through its thin parts, nor in the light march.
+    float sharpen = detail * smoothstep(3.0, 9.0, scale);
+    return d > 0.0 ? pow(d, mix(1.0, 0.6, sharpen)) : 0.0;
 }
 
 float henyeyGreenstein(float c, float g) {
