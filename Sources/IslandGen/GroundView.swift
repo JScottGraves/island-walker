@@ -34,6 +34,13 @@ public enum GroundView {
         let sun = normalize((-0.4, 0.5, 0.6))
         let fogColor = (0.62, 0.72, 0.85)
         let sea = Double(seaLevel)
+        // Keep the eye above the surface as rendered (bicubic + detail), which can sit higher
+        // than the raw cell height the camera was placed from.
+        var c = c
+        let ex = c.x / h.cellSize - 0.5, ey = c.y / h.cellSize - 0.5
+        let under = Double(h.sampleCubic(x: ex, y: ey))
+        let rendered = Swift.max(under + detail(c.x, c.y, ground: under, sea: sea, distance: 0), sea)
+        c.z = Swift.max(c.z, rendered + 1.7)
 
         func put(_ col: Int, _ row: Int, _ color: (Double, Double, Double)) {
             var r = color.0, g = color.1, b = color.2
@@ -181,17 +188,35 @@ public enum Viewpoints {
         func position(_ i: Int) -> (Double, Double) {
             ((Double(i % h.width) + 0.5) * h.cellSize, (Double(i / h.width) + 0.5) * h.cellSize)
         }
-        func camera(from i: Int, to t: Int, pitchOffset: Double = 0) -> GroundView.Camera {
-            let (x, y) = position(i), (tx, ty) = position(t)
-            let z = Double(h.values[i]) + 1.7
+        /// Looks from `i` toward `t`. With `brink`, first walks from `i` toward `t` to the
+        /// edge where the ground starts falling away, so a broad summit or ridge top doesn't
+        /// fill the frame with foreground.
+        func camera(from i: Int, to t: Int, brink: Bool = false, pitchOffset: Double = 0) -> GroundView.Camera {
+            var (x, y) = position(i)
+            let (tx, ty) = position(t)
+            let total = Swift.max(1, ((tx - x) * (tx - x) + (ty - y) * (ty - y)).squareRoot())
+            let ux = (tx - x) / total, uy = (ty - y) / total
+            if brink {
+                let start = Double(h.values[i])
+                var d = 0.0
+                while d < total * 0.6 {
+                    let ahead = Double(h.sampleCubic(x: (x + ux * (d + h.cellSize)) / h.cellSize - 0.5,
+                                                     y: (y + uy * (d + h.cellSize)) / h.cellSize - 0.5))
+                    if start - ahead > 40 { break }
+                    d += h.cellSize / 2
+                }
+                x += ux * d
+                y += uy * d
+            }
+            let z = Double(h.sampleCubic(x: x / h.cellSize - 0.5, y: y / h.cellSize - 0.5)) + 1.7
             let dist = Swift.max(1, ((tx - x) * (tx - x) + (ty - y) * (ty - y)).squareRoot())
-            let pitch = atan((Double(Swift.max(h.values[t], seaLevel)) - z) / dist) * 0.5 + pitchOffset
-            return GroundView.Camera(x: x, y: y, z: z, yaw: atan2(tx - x, ty - y), pitch: pitch)
+            let pitch = atan((Double(Swift.max(h.values[t], seaLevel)) - z) / dist) + pitchOffset
+            return GroundView.Camera(x: x, y: y, z: z, yaw: atan2(ux, uy), pitch: pitch)
         }
 
         var views: [Named] = []
         if coast >= 0 {
-            views.append(Named(name: "summit", camera: camera(from: summit, to: coast)))
+            views.append(Named(name: "summit", camera: camera(from: summit, to: coast, brink: true, pitchOffset: 0.05)))
         }
         if valley >= 0 {
             // Highest cell 1.5–4 km from the valley floor: a ridge overlooking it.
@@ -207,7 +232,7 @@ public enum Viewpoints {
                     if d >= 1500 && d <= 4000 && (ridge < 0 || h.values[i] > h.values[ridge]) { ridge = i }
                 }
             }
-            if ridge >= 0 { views.append(Named(name: "ridge", camera: camera(from: ridge, to: valley))) }
+            if ridge >= 0 { views.append(Named(name: "ridge", camera: camera(from: ridge, to: valley, brink: true, pitchOffset: 0.05))) }
         }
         if coast >= 0 {
             views.append(Named(name: "coast", camera: camera(from: coast, to: summit, pitchOffset: 0.02)))

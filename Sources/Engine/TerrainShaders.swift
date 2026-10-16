@@ -45,8 +45,6 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
     if (h < 0.0) {
         float d = saturate(-h / 400.0);
         albedo = mix(float3(0.20, 0.55, 0.60), float3(0.02, 0.10, 0.25), d);
-    } else if (h < 4.0) {
-        albedo = float3(0.76, 0.70, 0.55);                       // beach
     } else {
         float t = saturate(h / max(u.maxHeight, 1.0));
         float3 grass = mix(float3(0.20, 0.36, 0.14), float3(0.30, 0.38, 0.20), t);
@@ -54,6 +52,9 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
         float3 soil = float3(0.45, 0.25, 0.15);                  // red lateritic soil
         albedo = mix(grass, soil, smoothstep(0.15, 0.30, slope));
         albedo = mix(albedo, rock, smoothstep(0.35, 0.55, slope));
+        // Beach: narrow band just above the waterline on gentle slopes (matches GroundView).
+        float land = max(smoothstep(1.0, 3.0, h), smoothstep(0.1, 0.25, slope));
+        albedo = mix(float3(0.76, 0.70, 0.55), albedo, land);
     }
 
     float3 sunColor = float3(1.0, 0.95, 0.85) * 2.2;
