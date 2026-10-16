@@ -94,7 +94,7 @@ final class IslandGenTests: XCTestCase {
         XCTAssertGreaterThan(h[10, 1], 11, "low ground is buried")
         XCTAssertEqual(hardness[10, 1], p.pondHardness, "ponded lava is harder")
         let buried = (0..<100).filter { h[$0, 2] > Float($0) + 1 }.count
-        XCTAssertEqual(buried, 50, accuracy: 2)
+        XCTAssertEqual(Double(buried), 50, accuracy: 2)
     }
 
     func testPNGChecksumsMatchKnownValues() {
