@@ -10,7 +10,9 @@ import Walker
 // Launch with `swift run -c release IslandApp [path/to/height.r32]`.
 // With a .r32 from islandgen it shows that island; otherwise it bakes a quick 512² one.
 // `--snapshot DIR` renders the automatic viewpoints offscreen to DIR/app-*.png and exits.
-// Controls: WASD walk, Shift run, drag to look, F toggles fly mode, Space/C up/down in fly mode.
+// Controls: WASD walk, Shift run, drag to look, F toggles fly mode, Space/C up/down in fly mode,
+// [ and ] move the time of day, T lets time run (an hour every 20 s). `--time 16.5` starts at
+// 16:30 local solar time, `--day N` picks the day of year, `--shadows horizon` skips ray tracing.
 
 @main
 struct IslandApp: App {
@@ -71,18 +73,29 @@ final class Coordinator: NSObject, MTKViewDelegate {
     var flyHeight = 0.0
     var lastTime = CACurrentMediaTime()
     var fWasDown = false
+    var tWasDown = false
+    /// Local solar time of day and day of year; the sun follows them.
+    var hour = 9.5
+    var day = SunPath.defaultDay
+    var timeRuns = false
+    var shownMinute = -1
 
     // macOS virtual key codes
     let kW: UInt16 = 13, kA: UInt16 = 0, kS: UInt16 = 1, kD: UInt16 = 2
     let kF: UInt16 = 3, kSpace: UInt16 = 49, kC: UInt16 = 8
+    let kT: UInt16 = 17, kLeftBracket: UInt16 = 33, kRightBracket: UInt16 = 30
 
     func attach(_ view: InputMTKView) {
         view.delegate = self
         guard let device = view.device else { return }
         let grid = IslandSource.load()
         height = grid
+        let requested: TerrainRenderer.Shadows = Snapshots.option("--shadows") == "horizon" ? .horizonMap : .rayTraced
         renderer = try? TerrainRenderer(device: device, colorFormat: view.colorPixelFormat,
-                                        depthFormat: view.depthStencilPixelFormat, height: grid, seaLevel: 0)
+                                        depthFormat: view.depthStencilPixelFormat, height: grid, seaLevel: 0,
+                                        shadows: requested)
+        hour = Snapshots.option("--time").flatMap { Double($0) } ?? hour
+        day = Snapshots.option("--day").flatMap { Int($0) } ?? day
         // Start at the highest point so the whole island is in view.
         var best = 0
         for i in 0..<grid.count where grid.values[i] > grid.values[best] { best = i }
@@ -114,6 +127,20 @@ final class Coordinator: NSObject, MTKViewDelegate {
             flyHeight = w.z + 50
         }
         fWasDown = fDown
+
+        let tDown = view.keys.contains(kT)
+        if tDown && !tWasDown { timeRuns.toggle() }
+        tWasDown = tDown
+        // Brackets scrub 1.5 hours a second; running time is an hour every 20 s.
+        let scrub = (view.keys.contains(kRightBracket) ? 1.0 : 0) - (view.keys.contains(kLeftBracket) ? 1.0 : 0)
+        hour += scrub * 1.5 * dt + (timeRuns ? dt / 20 : 0)
+        hour = (hour + 24).truncatingRemainder(dividingBy: 24)
+        renderer.light = SunPath.light(hour: hour, day: day)
+        let minute = Int(hour * 60)
+        if minute != shownMinute {
+            shownMinute = minute
+            view.window?.title = String(format: "Island Walker · %02d:%02d", minute / 60, minute % 60)
+        }
 
         let forward = (view.keys.contains(kW) ? 1.0 : 0) - (view.keys.contains(kS) ? 1.0 : 0)
         let strafe = (view.keys.contains(kD) ? 1.0 : 0) - (view.keys.contains(kA) ? 1.0 : 0)

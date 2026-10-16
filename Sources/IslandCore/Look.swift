@@ -157,9 +157,9 @@ public enum Look {
     }
 
     /// The same constants and tone mapper as Metal source, prepended to the terrain shader.
+    /// Sun and sky light come from `SunLight` through the shader's uniforms instead.
     public static var metalPrelude: String {
-        let s = sunDirection
-        return """
+        """
         constant float3 kGrassLow = \(grassLow.msl);
         constant float3 kGrassHigh = \(grassHigh.msl);
         constant float3 kCliffGreen = \(cliffGreen.msl);
@@ -168,11 +168,8 @@ public enum Look {
         constant float3 kSand = \(sand.msl);
         constant float3 kShallowWater = \(shallowWater.msl);
         constant float3 kDeepWater = \(deepWater.msl);
-        constant float3 kSun = \(sun.msl);
-        constant float3 kSky = \(sky.msl);
         constant float3 kHaze = \(haze.msl);
         constant float3 kZenith = \(zenith.msl);
-        constant float3 kSunDirection = \(RGB(s.x, s.y, s.z).msl);
         constant float kHazeDistance = \(hazeDistance);
         constant float kHazeMax = \(hazeMax);
         constant float kBounce = \(bounce);
@@ -215,8 +212,9 @@ public enum Look {
             return mix(kShallowWater, kDeepWater, smoothstep(0.0, 40.0, depth));
         }
 
-        float3 skyColor(float sinElevation) {
-            return mix(kHaze, kZenith, 1.0 - exp(-3.0 * max(0.0, sinElevation)));
+        // haze and zenith arrive pre-tinted for the sun's height (SunLight).
+        float3 skyColor(float sinElevation, float3 haze, float3 zenith) {
+            return mix(haze, zenith, 1.0 - exp(-3.0 * max(0.0, sinElevation)));
         }
 
         float waterReflectance(float cosView, float dist) {
