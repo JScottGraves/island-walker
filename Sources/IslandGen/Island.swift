@@ -29,6 +29,7 @@ public enum Island {
     /// Generates an island. `progress` is called with values in 0...1.
     public static func generate(_ p: Params, progress: ((Double) -> Void)? = nil) -> Result {
         var erosion = p.erosion
+        erosion.seed = Hash.mix(p.seed ^ 0x524F_5554_45)
         // Keep diffusion stable at coarse and fine resolutions alike.
         let cell = p.domainSize / Double(p.size)
         let maxDt = 0.2 * cell * cell / Swift.max(erosion.diffusivity, 1e-9)
@@ -39,11 +40,17 @@ public enum Island {
         var rain = Climate.precipitation(height: height, seaLevel: erosion.seaLevel, params: p.climate)
         var area = Grid(width: p.size, height: p.size, cellSize: cell)
 
+        // Random routing makes any single step's drainage area noisy, so the reported
+        // area is the mean over the last few steps.
+        let averaged = Swift.min(20, p.steps)
         for s in 0..<p.steps {
             if s > 0 && s % p.rainInterval == 0 {
                 rain = Climate.precipitation(height: height, seaLevel: erosion.seaLevel, params: p.climate)
             }
-            area = StreamPower.step(&height, rain: rain, hardness: base.hardness, params: erosion).area
+            let stepArea = StreamPower.step(&height, rain: rain, hardness: base.hardness, params: erosion, stepIndex: s).area
+            if s >= p.steps - averaged {
+                for i in 0..<area.count { area.values[i] += stepArea.values[i] / Float(averaged) }
+            }
             progress?(Double(s + 1) / Double(p.steps))
         }
         if p.steps == 0 {

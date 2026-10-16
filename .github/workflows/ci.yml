@@ -21,6 +21,10 @@ jobs:
         run: |
           .build/release/islandgen --seed 42 --size 512 --steps 150 --out out
           echo "::notice title=Baked island::$(tr -d '\n ' < out/info.json)"
+      - name: Render app snapshots
+        # Hosted runners' virtual GPUs may not support everything; don't fail CI on it.
+        continue-on-error: true
+        run: .build/release/IslandApp out/height.r32 --snapshot out
       - uses: actions/upload-artifact@v4
         with:
           name: island-preview

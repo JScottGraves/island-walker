@@ -27,6 +27,11 @@ swift build -c release
 .build/release/islandgen --seed 42 --size 1024 --steps 400 --out out
 # Walk it (WASD, Shift to run, drag to look, F to fly, Space/C up/down while flying)
 swift run -c release IslandApp out/height.r32
+# Or render the app's view from the summit, a ridge and the coast to out/app-*.png and exit
+swift run -c release IslandApp out/height.r32 --snapshot out
 ```
+
+`islandgen` also writes `view-summit.png`, `view-ridge.png` and `view-coast.png`: CPU-rendered
+pictures from a walker's eye height, so terrain can be judged on foot without a GPU.
 
 `--size 512` is quick for iterating on look; `--size 2048` is the review resolution.

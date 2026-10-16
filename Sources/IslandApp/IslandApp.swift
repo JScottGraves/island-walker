@@ -9,11 +9,16 @@ import Walker
 
 // Launch with `swift run -c release IslandApp [path/to/height.r32]`.
 // With a .r32 from islandgen it shows that island; otherwise it bakes a quick 512² one.
+// `--snapshot DIR` renders the automatic viewpoints offscreen to DIR/app-*.png and exits.
 // Controls: WASD walk, Shift run, drag to look, F toggles fly mode, Space/C up/down in fly mode.
 
 @main
 struct IslandApp: App {
     init() {
+        if let i = CommandLine.arguments.firstIndex(of: "--snapshot"), i + 1 < CommandLine.arguments.count {
+            Snapshots.run(outDir: CommandLine.arguments[i + 1])
+            exit(0)
+        }
         NSApplication.shared.setActivationPolicy(.regular)
         NSApplication.shared.activate(ignoringOtherApps: true)
     }

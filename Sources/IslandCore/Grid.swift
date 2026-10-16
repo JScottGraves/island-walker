@@ -57,6 +57,28 @@ public struct Grid: Sendable, Equatable {
         let b = self[x0, y1] + (self[x1, y1] - self[x0, y1]) * fx
         return a + (b - a) * fy
     }
+
+    /// Bicubic (Catmull-Rom) sample at continuous cell coordinates, clamped to the grid edge.
+    /// Smooth first derivatives, so close-up terrain shows no bilinear creases.
+    public func sampleCubic(x: Double, y: Double) -> Float {
+        let cx = Swift.min(Swift.max(x, 0), Double(width - 1))
+        let cy = Swift.min(Swift.max(y, 0), Double(height - 1))
+        let x1 = Int(cx), y1 = Int(cy)
+        let tx = Float(cx - Double(x1)), ty = Float(cy - Double(y1))
+        @inline(__always) func at(_ x: Int, _ y: Int) -> Float {
+            self[Swift.min(Swift.max(x, 0), width - 1), Swift.min(Swift.max(y, 0), height - 1)]
+        }
+        @inline(__always) func cr(_ p0: Float, _ p1: Float, _ p2: Float, _ p3: Float, _ t: Float) -> Float {
+            let a = -0.5 * p0 + 1.5 * p1 - 1.5 * p2 + 0.5 * p3
+            let b = p0 - 2.5 * p1 + 2 * p2 - 0.5 * p3
+            let c = -0.5 * p0 + 0.5 * p2
+            return ((a * t + b) * t + c) * t + p1
+        }
+        @inline(__always) func row(_ yy: Int) -> Float {
+            cr(at(x1 - 1, yy), at(x1, yy), at(x1 + 1, yy), at(x1 + 2, yy), tx)
+        }
+        return cr(row(y1 - 1), row(y1), row(y1 + 1), row(y1 + 2), ty)
+    }
 }
 
 /// The eight D8 neighbour offsets and their distances in cell units.
