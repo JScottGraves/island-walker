@@ -64,12 +64,23 @@ public enum PriorityFlood {
         var visited = [Bool](repeating: false, count: n)
         var heap = MinHeap(reserve: n / 4)
 
-        for i in 0..<n where h.isBoundary(i) || h.values[i] <= seaLevel {
-            visited[i] = true
-            heap.push(h.values[i], i)
+        let w = h.width
+        for i in 0..<n where h.isBoundary(i) || h.values[i] <= seaLevel { visited[i] = true }
+        // Seed the heap only with outlets that touch land. Open sea (outlets surrounded
+        // by outlets) can never raise anything, and on an island it is most of the grid,
+        // so leaving it out shrinks the heap several-fold. The pop order of the remaining
+        // cells, and so the result, is unchanged.
+        for i in 0..<n where visited[i] {
+            let x = i % w, y = i / w
+            for k in 0..<8 {
+                let nx = x + D8.dx[k], ny = y + D8.dy[k]
+                if h.contains(nx, ny) && !visited[ny * w + nx] {
+                    heap.push(h.values[i], i)
+                    break
+                }
+            }
         }
 
-        let w = h.width
         while !heap.isEmpty {
             let c = heap.pop()
             let cx = c % w, cy = c / w
