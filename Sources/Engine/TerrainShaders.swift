@@ -69,7 +69,7 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
     if (h < 0.0) {
         // Flat water mirrors the sky at the view ray's depression angle.
         float cosView = toEye.z / max(dist, 1e-3);
-        color = mix(color, skyColor(cosView), waterReflectance(cosView));
+        color = mix(color, skyColor(cosView), waterReflectance(cosView, dist));
     }
     color = mix(color, kHaze, kHazeMax * (1.0 - exp(-dist / kHazeDistance)));
 

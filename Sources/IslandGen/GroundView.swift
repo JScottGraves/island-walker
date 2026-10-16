@@ -121,7 +121,7 @@ public enum GroundView {
         if depthBelow > 0 {
             // Flat water mirrors the sky at the reflected elevation, which equals the
             // view ray's depression angle.
-            surface = color.mix(Look.skyColor(sinElevation: cosView), Look.waterReflectance(cosView: cosView))
+            surface = color.mix(Look.skyColor(sinElevation: cosView), Look.waterReflectance(cosView: cosView, distance: distance))
         }
         return surface.mix(Look.haze, Look.hazeAmount(distance: distance))
     }

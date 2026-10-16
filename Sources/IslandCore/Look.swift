@@ -40,7 +40,7 @@ public enum Look {
     public static let sand = RGB.srgb(175, 165, 140)
     /// Water over a sandy bottom a few metres down, and open ocean.
     public static let shallowWater = RGB.srgb(35, 150, 145)
-    public static let deepWater = RGB.srgb(8, 38, 78)
+    public static let deepWater = RGB.srgb(8, 58, 92)
 
     /// Direction towards the sun (x east, y north, z up): mid-morning, high in the sky.
     public static let sunDirection: (x: Double, y: Double, z: Double) = {
@@ -76,12 +76,17 @@ public enum Look {
         return sand.mix(a, Swift.max(smoothstep(1, 3, above), smoothstep(0.1, 0.25, slope)))
     }
 
-    /// 0…1 patches a few hundred metres across where bare ground shows through vegetation.
-    /// Plain sines so the Metal shader computes the identical pattern.
+    /// 0…1 patches from a few hundred metres to over a kilometre across where bare ground
+    /// shows through vegetation: two scales of warped sines, so the Metal shader computes
+    /// the identical pattern.
     public static func exposure(x: Double, y: Double) -> Double {
-        let a = sin(x / 170 + 1.7 * sin(y / 230))
-        let b = sin(y / 190 + 1.3 * sin(x / 260))
-        return smoothstep(-0.2, 0.6, a * b)
+        func blobs(_ x: Double, _ y: Double) -> Double {
+            let a = sin(x / 170 + 1.7 * sin(y / 230))
+            let b = sin(y / 190 + 1.3 * sin(x / 260))
+            return smoothstep(-0.2, 0.6, a * b)
+        }
+        return Swift.max(blobs(x, y) * (0.4 + 0.6 * blobs(y / 3.1 + 900, x / 3.1 + 400)),
+                         0.8 * blobs(x / 2.7 + 500, y / 2.7 + 300))
     }
 
     /// Water colour by depth below the sea surface (metres).
@@ -95,12 +100,15 @@ public enum Look {
     }
 
     /// Fraction of the sky a water surface reflects (Schlick, F0 = 0.02), given the cosine
-    /// between the view ray and the water's normal. High at grazing angles, which is what
-    /// makes distant sea meet the sky without a dark seam; looking down, the water's own
-    /// colour shows. Capped below 1 because waves tilt part of the surface toward the viewer.
-    public static func waterReflectance(cosView: Double) -> Double {
-        let m = 1 - Swift.min(1, Swift.max(0, cosView))
-        return 0.02 + 0.83 * m * m * m * m * m
+    /// between the view ray and the mean water surface and the distance to it. Nearby,
+    /// waves tilt the surface toward the viewer (an effective cosine of at least ~0.3), so
+    /// bays keep their own colour; far out the waves blur into a flat grazing mirror, which
+    /// is what lets the distant sea meet the sky without a dark seam.
+    public static func waterReflectance(cosView: Double, distance: Double) -> Double {
+        let c = Swift.min(1, Swift.max(0, cosView))
+        let roughness = 0.3 * (1 - smoothstep(4000, 30_000, distance))
+        let m = 1 - (c * c + roughness * roughness).squareRoot()
+        return 0.02 + 0.9 * m * m * m * m * m
     }
 
     static func smoothstep(_ e0: Double, _ e1: Double, _ x: Double) -> Double {
@@ -183,10 +191,15 @@ public enum Look {
         }
 
         // Mirrors Look.albedo, Look.skyColor and Look.waterReflectance.
-        float exposure(float2 p) {
+        float exposureBlobs(float2 p) {
             float a = sin(p.x / 170.0 + 1.7 * sin(p.y / 230.0));
             float b = sin(p.y / 190.0 + 1.3 * sin(p.x / 260.0));
             return smoothstep(-0.2, 0.6, a * b);
+        }
+
+        float exposure(float2 p) {
+            return max(exposureBlobs(p) * (0.4 + 0.6 * exposureBlobs(p.yx / 3.1 + float2(900.0, 400.0))),
+                       0.8 * exposureBlobs(p / 2.7 + float2(500.0, 300.0)));
         }
 
         float3 terrainAlbedo(float2 p, float above, float slope, float maxHeight) {
@@ -206,9 +219,11 @@ public enum Look {
             return mix(kHaze, kZenith, 1.0 - exp(-3.0 * max(0.0, sinElevation)));
         }
 
-        float waterReflectance(float cosView) {
-            float m = 1.0 - saturate(cosView);
-            return 0.02 + 0.83 * m * m * m * m * m;
+        float waterReflectance(float cosView, float dist) {
+            float c = saturate(cosView);
+            float roughness = 0.3 * (1.0 - smoothstep(4000.0, 30000.0, dist));
+            float m = 1.0 - sqrt(c * c + roughness * roughness);
+            return 0.02 + 0.9 * m * m * m * m * m;
         }
 
         """
