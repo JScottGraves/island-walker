@@ -5,6 +5,7 @@ import SwiftUI
 import simd
 import Engine
 import IslandCore
+import IslandGen
 import Walker
 
 // Launch with `swift run -c release IslandApp [path/to/island.bundle | path/to/height.r32]`.
@@ -12,7 +13,8 @@ import Walker
 // `--snapshot DIR` renders the automatic viewpoints offscreen to DIR/app-*.png and exits.
 // Controls: WASD walk, Shift run, drag to look, F toggles fly mode, Space/C up/down in fly mode,
 // [ and ] move the time of day, T lets time run (an hour every 20 s). `--time 16.5` starts at
-// 16:30 local solar time, `--day N` picks the day of year, `--shadows horizon` skips ray tracing.
+// 16:30 local solar time, `--day N` picks the day of year, `--shadows horizon` skips ray tracing,
+// `--view coast` starts at that snapshot viewpoint (summit, ridge, coast, pali).
 
 @main
 struct IslandApp: App {
@@ -104,8 +106,18 @@ final class Coordinator: NSObject, MTKViewDelegate {
         }
         hour = Snapshots.option("--time").flatMap { Double($0) } ?? hour
         day = Snapshots.option("--day").flatMap { Int($0) } ?? day
-        // Start at the highest point so the whole island is in view.
         guard let overview = try? tiles.grid(level: tiles.overviewLevel()) else { return }
+        // `--view coast` (or summit, ridge, pali…) starts at that snapshot viewpoint, facing
+        // the same way; otherwise at the highest point so the whole island is in view.
+        if let name = Snapshots.option("--view"),
+           let view = Snapshots.viewpoints(overview).first(where: { $0.name == name }) {
+            renderer?.prepareGround(x: view.camera.x, y: view.camera.y)
+            var w = Walker(x: view.camera.x, y: view.camera.y, ground: ground)
+            w.yaw = view.camera.yaw
+            w.pitch = view.camera.pitch
+            walker = w
+            return
+        }
         var best = 0
         for i in 0..<overview.count where overview.values[i] > overview.values[best] { best = i }
         let sx = (Double(best % overview.width) + 0.5) * overview.cellSize

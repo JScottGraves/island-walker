@@ -23,6 +23,30 @@ enum Snapshots {
         return args[i + 1]
     }
 
+    /// The automatic viewpoints (summit, ridge, coast, pali…) picked on `height`.
+    static func viewpoints(_ height: Grid) -> [Viewpoints.Named] {
+        // Viewpoint picking needs drainage area; one routing step on a copy gives it.
+        var copy = height
+        var params = StreamPower.Params()
+        params.randomRouting = false
+        params.erodibility = 0
+        params.diffusivity = 0
+        let area = StreamPower.step(&copy, params: params).area
+
+        // islandgen writes the flank collapse's scarp next to height.r32.
+        var scarp: FlankCollapse.Scarp?
+        if let dir = IslandSource.inputDirectory {
+            let url = dir.appendingPathComponent("scarp.json")
+            if let data = try? Data(contentsOf: url),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Double],
+               let x = json["x"], let y = json["y"], let direction = json["direction"] {
+                scarp = FlankCollapse.Scarp(x: x, y: y, direction: direction)
+                scarp?.halfLength = json["halfLength"] ?? 9000
+            }
+        }
+        return Viewpoints.automatic(height: height, drainageArea: area, scarp: scarp)
+    }
+
     static func run(outDir: String) {
         let out = URL(fileURLWithPath: outDir, isDirectory: true)
         do {
@@ -43,27 +67,7 @@ enum Snapshots {
             var timings = "view,time,gpu_ms,depth_ms,clouds_ms,shade_ms,nodes,tiles\n"
             let day = option("--day").flatMap { Int($0) } ?? SunPath.defaultDay
             let hours = option("--time")?.split(separator: ",").compactMap { Double($0) } ?? []
-            // Viewpoint picking needs drainage area; one routing step on a copy gives it.
-            var copy = height
-            var params = StreamPower.Params()
-            params.randomRouting = false
-            params.erodibility = 0
-            params.diffusivity = 0
-            let area = StreamPower.step(&copy, params: params).area
-
-            // islandgen writes the flank collapse's scarp next to height.r32.
-            var scarp: FlankCollapse.Scarp?
-            if let dir = IslandSource.inputDirectory {
-                let url = dir.appendingPathComponent("scarp.json")
-                if let data = try? Data(contentsOf: url),
-                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Double],
-                   let x = json["x"], let y = json["y"], let direction = json["direction"] {
-                    scarp = FlankCollapse.Scarp(x: x, y: y, direction: direction)
-                    scarp?.halfLength = json["halfLength"] ?? 9000
-                }
-            }
-
-            for view in Viewpoints.automatic(height: height, drainageArea: area, scarp: scarp) {
+            for view in viewpoints(height) {
                 var c = view.camera
                 renderer.prepareGround(x: c.x, y: c.y)
                 c.z = renderer.groundHeight(x: c.x, y: c.y) + 1.7
