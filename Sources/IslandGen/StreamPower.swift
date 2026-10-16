@@ -76,6 +76,11 @@ public enum StreamPower {
         /// Share of `waveRetreat` that coasts facing away from the wind still get (swell
         /// wraps around an island).
         public var leewardWaves: Double = 0.2
+        /// Depth in metres that waves cut the shore platform down to. A cell is cut towards
+        /// it while it stands above it and has sea next to it, so the platform in front of
+        /// the cliffs is planed to wave base instead of left as a dead-flat skirt just
+        /// under sea level.
+        public var waveBase: Double = 0
         /// Direction the wind blows towards, in radians (Climate.Params.windDirection).
         public var windDirection: Double = 5 * Double.pi / 4
         /// Time step in years.
@@ -402,7 +407,8 @@ public enum StreamPower {
             let rate = params.waveRetreat * dt / cell
             let upwind = (-cos(params.windDirection), -sin(params.windDirection))
             let leeward = params.leewardWaves
-            let floor = sea - 1
+            let floor = sea - Float(Swift.max(1, params.waveBase))
+            let planeShelf = params.waveBase > 1
             phase("waves") {
                 let old = h.values
                 h.values.withUnsafeMutableBufferPointer { hBuf in
@@ -411,7 +417,7 @@ public enum StreamPower {
                         for y in (rowRange.lowerBound + 1)..<(rowRange.upperBound + 1) {
                             for x in 1..<(w - 1) {
                                 let i = y * w + x
-                                if old[i] <= sea { continue }
+                                if old[i] <= (planeShelf ? floor : sea) { continue }
                                 var fraction = 0.0
                                 for k in 0..<8 where old[(y + D8.dy[k]) * w + (x + D8.dx[k])] <= sea {
                                     let facing = (Double(D8.dx[k]) * upwind.0 + Double(D8.dy[k]) * upwind.1) / D8.distance[k]
