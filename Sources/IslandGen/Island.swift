@@ -23,6 +23,11 @@ public enum Island {
         /// 0.3 and 0.4 score closest to Oahu with wave retreat on (realism sweep, 2026-10-16).
         public var coastSlope: Double = 0.3
         public var riftDescent: Double = 0.4
+        /// Metres the sea falls relative to the island after erosion. Oahu's coastal plains
+        /// (Ewa, the north shore) are reef and wave-cut benches from Pleistocene high sea
+        /// stands, left dry when the sea dropped; a small fall here lifts the bench the waves
+        /// cut in front of the cliffs out of the water as a flat coastal plain. 0 disables it.
+        public var emergence: Double = 0
         public init() {}
     }
 
@@ -73,7 +78,11 @@ public enum Island {
             }
             progress?(Double(s + 1) / Double(p.steps))
         }
-        if p.steps == 0 {
+        if p.emergence > 0 {
+            let lift = Float(p.emergence)
+            for i in 0..<height.count { height.values[i] += lift }
+        }
+        if p.steps == 0 || p.emergence > 0 {
             PriorityFlood.fill(&height, seaLevel: erosion.seaLevel)
         }
         return Result(height: height, hardness: base.hardness, rain: rain, drainageArea: area, params: p, scarp: scarp)
