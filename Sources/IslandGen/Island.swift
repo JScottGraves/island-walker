@@ -41,6 +41,7 @@ public enum Island {
         func phase<T>(_ name: String, _ body: () -> T) -> T { timer?.measure(name, body) ?? body() }
         var erosion = p.erosion
         erosion.seed = Hash.mix(p.seed ^ 0x524F_5554_45)
+        erosion.windDirection = p.climate.windDirection
         // Keep diffusion stable at coarse and fine resolutions alike.
         let cell = p.domainSize / Double(p.size)
         let maxDt = 0.2 * cell * cell / Swift.max(erosion.diffusivity, 1e-9)
