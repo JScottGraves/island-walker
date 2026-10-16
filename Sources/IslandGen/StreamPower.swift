@@ -48,6 +48,15 @@ public enum StreamPower {
         /// collapses back to it each step. Retreating headwalls then widen valley heads into
         /// bowls instead of narrow slots. 0 disables it.
         public var criticalSlope: Double = 0
+        /// Waterfall retreat (Lamb et al. 2007): ground standing steeper than `waterfallSlope`
+        /// above a channel cell carrying at least `waterfallMinDischarge` (rain-weighted
+        /// area, m³/yr) retreats horizontally at this rate in m/yr, scaled by
+        /// sqrt(discharge / referenceDischarge). The lip at the head of a waterfall and the
+        /// walls around its plunge pool both retreat, so heads cut back along the biggest
+        /// streams and widen into amphitheaters. 0 disables it.
+        public var waterfallRetreat: Double = 0
+        public var waterfallSlope: Double = 0.6
+        public var waterfallMinDischarge: Double = 1e6
         /// Uplift (positive) or subsidence (negative) in m / yr, applied to land and sea floor.
         public var uplift: Double = 0
         /// Time step in years.
@@ -250,6 +259,43 @@ public enum StreamPower {
                                 x = next
                             }
                             hv[i] = Float(x)
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4a. Waterfall retreat. A cell retreats if it stands steeper than waterfallSlope
+        //     above a neighbouring channel cell with enough discharge; it is lowered toward
+        //     that cell by the fraction of a cell width the face retreats this step. Every
+        //     cell reads the pre-pass heights, so rows run in parallel.
+        if params.waterfallRetreat > 0 {
+            let minQ = Float(params.waterfallMinDischarge)
+            let sw = params.waterfallSlope
+            let rate = params.waterfallRetreat * dt / cell
+            let qRef = params.referenceDischarge
+            phase("waterfalls") {
+                let old = h.values
+                h.values.withUnsafeMutableBufferPointer { hBuf in
+                    let hv = SharedBuffer(hBuf)
+                    Parallel.forRanges(rows - 2) { rowRange in
+                        for y in (rowRange.lowerBound + 1)..<(rowRange.upperBound + 1) {
+                            for x in 1..<(w - 1) {
+                                let i = y * w + x
+                                if old[i] <= sea { continue }
+                                var drop: Float = 0
+                                for k in 0..<8 {
+                                    let p = (y + D8.dy[k]) * w + (x + D8.dx[k])
+                                    let q = areaValues[p]
+                                    guard q >= minQ else { continue }
+                                    let base = Swift.max(old[p], sea)
+                                    let rise = Double(old[i] - base)
+                                    guard rise > sw * D8.distance[k] * cell else { continue }
+                                    let fraction = Swift.min(1, rate * (Double(q) / qRef).squareRoot() / D8.distance[k])
+                                    drop = Swift.max(drop, Float(rise * fraction))
+                                }
+                                if drop > 0 { hv[i] = old[i] - drop }
+                            }
                         }
                     }
                 }
