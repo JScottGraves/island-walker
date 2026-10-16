@@ -10,9 +10,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build
-        run: swift build -c release
+        run: |
+          set -o pipefail
+          swift build -c release 2>&1 | tee build.log || { scripts/annotate-errors.sh build.log; exit 1; }
       - name: Test
-        run: swift test
+        run: |
+          set -o pipefail
+          swift test 2>&1 | tee test.log || { scripts/annotate-errors.sh test.log; exit 1; }
       - name: Bake a small island
         run: .build/release/islandgen --seed 42 --size 512 --steps 150 --out out
       - uses: actions/upload-artifact@v4

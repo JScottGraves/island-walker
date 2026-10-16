@@ -14,7 +14,7 @@ enum IslandSource {
                 let domain = args.count > 2 ? Double(args[2]) ?? 80_000 : 80_000
                 var grid = Grid(width: side, height: side, cellSize: domain / Double(side))
                 data.withUnsafeBytes { raw in
-                    for i in 0..<count { grid.values[i] = raw.load(fromByteOffset: i * 4, as: Float.self) }
+                    for i in 0..<count { grid.values[i] = raw.loadUnaligned(fromByteOffset: i * 4, as: Float.self) }
                 }
                 return grid
             }
