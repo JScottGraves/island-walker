@@ -218,12 +218,10 @@ float rayTracedSun(float3 p, float3 n, float3 l, float2 pixel, float distance, p
 // horizon map interpolated at the sun's azimuth. `bounds` gets the margin against the
 // higher and the lower of the two sectors either side: where even the higher one leaves
 // the sun clear, or even the lower one hides it, the answer can't be in doubt.
-float horizonMargin(VOut in, float3 l, thread float2 &bounds) {
+float horizonMargin(float4 h0, float4 h1, float4 h2, float4 h3, float3 l, thread float2 &bounds) {
     float h[16] = {
-        in.horizon0.x, in.horizon0.y, in.horizon0.z, in.horizon0.w,
-        in.horizon1.x, in.horizon1.y, in.horizon1.z, in.horizon1.w,
-        in.horizon2.x, in.horizon2.y, in.horizon2.z, in.horizon2.w,
-        in.horizon3.x, in.horizon3.y, in.horizon3.z, in.horizon3.w };
+        h0.x, h0.y, h0.z, h0.w, h1.x, h1.y, h1.z, h1.w,
+        h2.x, h2.y, h2.z, h2.w, h3.x, h3.y, h3.z, h3.w };
     float azimuth = atan2(l.y, l.x);
     if (azimuth < 0.0) azimuth += 6.2831853;
     float f = azimuth / (6.2831853 / 16.0) - 0.5;
@@ -239,7 +237,7 @@ float horizonMargin(VOut in, float3 l, thread float2 &bounds) {
 // Sun visibility from the horizon map, with the same soft edge as the CPU bake.
 float horizonSun(VOut in, float3 l) {
     float2 bounds;
-    float margin = horizonMargin(in, l, bounds);
+    float margin = horizonMargin(in.horizon0, in.horizon1, in.horizon2, in.horizon3, l, bounds);
     return smoothstep(0.0, 1.0, saturate((margin + 0.01) / 0.02));
 }
 
@@ -251,7 +249,7 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
                                 texture2d<float> clouds [[texture(2)]],
                                 texture2d<float> cloudDistance [[texture(3)]],
                                 texture2d<float> cloudShadows [[texture(4)]],
-                                primitive_acceleration_structure terrain [[buffer(2), function_constant(kRayTraced)]]) {
+                                texture2d<float, access::read> tracedSun [[texture(5), function_constant(kRayTraced)]]) {
     float3 n = normalize(in.normal);
     float slope = 1.0 - n.z;
     float h = in.world.z - u.seaLevel;
@@ -273,15 +271,9 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
     float cloudSun = cloudSunlight(u, cloudShadows, surface);
     float sunVisibility = 0.0;
     if (nDotL > 0.0 && l.z > -0.01 && cloudSun > 0.01) {
-        // The horizon map comes from the same mesh the rays trace, so where it puts the sun
-        // well clear of every nearby horizon, or well below them all, the rays would only
-        // agree with it; the slack covers the drawn surface sitting off the coarse mesh.
+        // Traced per pixel by sunShadow, over the surface this pixel shows.
         if (kRayTraced) {
-            float2 bounds;
-            horizonMargin(in, l, bounds);
-            if (bounds.x > 0.05) sunVisibility = 1.0;
-            else if (bounds.y < -0.05) sunVisibility = 0.0;
-            else sunVisibility = rayTracedSun(surface, n, l, in.position.xy, length(u.cameraPosition - in.world), terrain);
+            sunVisibility = tracedSun.read(uint2(in.position.xy)).r;
         } else {
             sunVisibility = horizonSun(in, l);
         }
@@ -314,6 +306,65 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
     color = pbrNeutral(color * u.exposure);
     // The render target is an _srgb format, which applies the sRGB encoding on write.
     return float4(color, 1.0);
+}
+
+// Depth prepass with ray-traced shadows: the surface each pixel shows (world position,
+// and its normal as a packed octahedral pair) for sunShadow. Water shows its surface.
+float2 octEncode(float3 n) {
+    n /= abs(n.x) + abs(n.y) + abs(n.z);
+    float2 o = n.xy;
+    if (n.z < 0.0) o = (1.0 - abs(n.yx)) * select(float2(-1.0), float2(1.0), n.xy >= 0.0);
+    return o;
+}
+
+float3 octDecode(float2 o) {
+    float3 n = float3(o, 1.0 - abs(o.x) - abs(o.y));
+    if (n.z < 0.0) n.xy = (1.0 - abs(n.yx)) * select(float2(-1.0), float2(1.0), n.xy >= 0.0);
+    return normalize(n);
+}
+
+fragment uint4 terrainSurface(VOut in [[stage_in]], constant Uniforms &u [[buffer(1)]]) {
+    float3 n = normalize(in.normal);
+    float3 p = in.world;
+    if (p.z < u.seaLevel) {
+        n = float3(0.0, 0.0, 1.0);
+        p.z = u.seaLevel;  // shadows fall on the water, not the sea floor
+    }
+    return uint4(as_type<uint>(p.x), as_type<uint>(p.y), as_type<uint>(p.z), pack_float_to_snorm2x16(octEncode(n)));
+}
+
+// Sun visibility (without cloud) for every terrain pixel, traced in a compute pass over the
+// prepass surface rather than in the shading pass: there, tiny distant triangles leave
+// most of each 2×2 quad as helper lanes that trace rays too.
+kernel void sunShadow(constant Uniforms &u [[buffer(0)]],
+                      primitive_acceleration_structure terrain [[buffer(1)]],
+                      texture2d<uint, access::read> surface [[texture(0)]],
+                      depth2d<float, access::read> depth [[texture(1)]],
+                      texture2d_array<float, access::read> horizons [[texture(2)]],
+                      texture2d<float> cloudShadows [[texture(3)]],
+                      texture2d<float, access::write> out [[texture(4)]],
+                      uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= out.get_width() || gid.y >= out.get_height()) return;
+    if (depth.read(gid) >= 1.0) { out.write(float4(1.0), gid); return; }  // sky
+    uint4 s = surface.read(gid);
+    float3 p = float3(as_type<float>(s.x), as_type<float>(s.y), as_type<float>(s.z));
+    float3 n = octDecode(unpack_snorm2x16_to_float(s.w));
+    float3 l = normalize(u.sunDirection);
+    float visibility = 0.0;
+    if (dot(n, l) > 0.0 && l.z > -0.01 && cloudSunlight(u, cloudShadows, p) > 0.01) {
+        // The horizon map comes from the same mesh the rays trace, so where it puts the sun
+        // well clear of every nearby horizon, or well below them all, the rays would only
+        // agree with it; the slack covers the drawn surface sitting off the coarse mesh.
+        int side = int(horizons.get_width());
+        uint2 cell = uint2(clamp(int2(p.xy / u.cloudLayer.w * float(side)), int2(0), int2(side - 1)));
+        float2 bounds;
+        horizonMargin(horizons.read(cell, 0) * M_PI_2_F, horizons.read(cell, 1) * M_PI_2_F,
+                      horizons.read(cell, 2) * M_PI_2_F, horizons.read(cell, 3) * M_PI_2_F, l, bounds);
+        if (bounds.x > 0.05) visibility = 1.0;
+        else if (bounds.y < -0.05) visibility = 0.0;
+        else visibility = rayTracedSun(p, n, l, float2(gid) + 0.5, length(u.cameraPosition - p), terrain);
+    }
+    out.write(float4(visibility), gid);
 }
 
 // Sky: one full-screen triangle at the far plane, drawn after the terrain's depth prepass

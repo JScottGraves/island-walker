@@ -64,6 +64,8 @@ public final class TerrainRenderer {
     let cloudMarch: MTLComputePipelineState
     let cloudResolve: MTLComputePipelineState
     let cloudShadowPipeline: MTLComputePipelineState
+    /// Ray-traced sun visibility per pixel, from the prepass surface (nil without ray tracing).
+    let sunShadowPipeline: MTLComputePipelineState?
     /// Sunlight through the cloud layer over the island, from the cloud base up (r16Float).
     let cloudShadows: MTLTexture
     /// Tiling cloud noise baked at start: Perlin–Worley shapes (128³) and Worley edge
@@ -75,6 +77,8 @@ public final class TerrainRenderer {
     struct Targets {
         let width: Int, height: Int
         let depth: MTLTexture
+        /// With ray tracing: each pixel's surface position and normal, and its sun visibility.
+        let surface: MTLTexture?, sun: MTLTexture?
         let clouds: MTLTexture, cloudDistance: MTLTexture
         let history: [MTLTexture], historyDistance: [MTLTexture]
     }
@@ -174,8 +178,17 @@ public final class TerrainRenderer {
         pipeline = try device.makeRenderPipelineState(descriptor: desc)
         // Depth only: the terrain is shaded (with its cloud march) once per pixel, not once
         // per overlapping triangle, and the sky only where the terrain leaves it uncovered.
-        desc.fragmentFunction = nil
-        desc.colorAttachments[0].pixelFormat = .invalid  // a pass of its own, with no colour target
+        // With ray tracing it also records each pixel's surface for the sun rays.
+        if shadows == .rayTraced {
+            desc.fragmentFunction = library.makeFunction(name: "terrainSurface")
+            desc.colorAttachments[0].pixelFormat = .rgba32Uint
+            guard let sun = library.makeFunction(name: "sunShadow") else { throw RendererError.setup("sun shadow kernel") }
+            sunShadowPipeline = try device.makeComputePipelineState(function: sun)
+        } else {
+            desc.fragmentFunction = nil
+            desc.colorAttachments[0].pixelFormat = .invalid  // a pass of its own, with no colour target
+            sunShadowPipeline = nil
+        }
         depthPipeline = try device.makeRenderPipelineState(descriptor: desc)
         desc.colorAttachments[0].pixelFormat = colorFormat
         desc.vertexFunction = library.makeFunction(name: "skyVertex")
@@ -551,12 +564,24 @@ public final class TerrainRenderer {
             d.storageMode = .private
             return device.makeTexture(descriptor: d)
         }
+        var surface: MTLTexture?, sun: MTLTexture?
+        if sunShadowPipeline != nil {
+            let surfaceDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba32Uint, width: width, height: height, mipmapped: false)
+            surfaceDesc.usage = [.renderTarget, .shaderRead]
+            surfaceDesc.storageMode = .private
+            let sunDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r8Unorm, width: width, height: height, mipmapped: false)
+            sunDesc.usage = [.shaderRead, .shaderWrite]
+            sunDesc.storageMode = .private
+            surface = device.makeTexture(descriptor: surfaceDesc)
+            sun = device.makeTexture(descriptor: sunDesc)
+            if surface == nil || sun == nil { return nil }
+        }
         guard let depth = device.makeTexture(descriptor: depthDesc),
               let clouds = reduced(.rgba16Float), let cloudDistance = reduced(.rg32Float),
               let h0 = reduced(.rgba16Float), let h1 = reduced(.rgba16Float),
               let d0 = reduced(.rg32Float), let d1 = reduced(.rg32Float) else { return nil }
-        return Targets(width: width, height: height, depth: depth, clouds: clouds, cloudDistance: cloudDistance,
-                       history: [h0, h1], historyDistance: [d0, d1])
+        return Targets(width: width, height: height, depth: depth, surface: surface, sun: sun,
+                       clouds: clouds, cloudDistance: cloudDistance, history: [h0, h1], historyDistance: [d0, d1])
     }
 
     struct FrameTerrain {
@@ -691,6 +716,11 @@ public final class TerrainRenderer {
         depthPass.depthAttachment.loadAction = .clear
         depthPass.depthAttachment.storeAction = .store
         depthPass.depthAttachment.clearDepth = 1
+        if let surface = targets.surface {
+            depthPass.colorAttachments[0].texture = surface
+            depthPass.colorAttachments[0].loadAction = .dontCare  // read only where depth < 1
+            depthPass.colorAttachments[0].storeAction = .store
+        }
         guard let enc = cmd.makeRenderCommandEncoder(descriptor: depthPass) else { return }
         enc.label = "depth"
         enc.setRenderPipelineState(depthPipeline)
@@ -724,7 +754,20 @@ public final class TerrainRenderer {
         compute.dispatchThreads(grid, threadsPerThreadgroup: group)
         compute.endEncoding()
 
-        // 3. Sky where nothing covers it, then the terrain's nearest surface, both with clouds.
+        // 3. Sun rays from every terrain pixel (after the cloud shadow map, which skips them
+        // under thick cloud).
+        if let sunShadowPipeline, let terrainAccel, let surface = targets.surface, let sun = targets.sun,
+           let rays = shadeCmd.makeComputeCommandEncoder() {
+            rays.label = "sun rays"
+            rays.setComputePipelineState(sunShadowPipeline)
+            rays.setBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 0)
+            rays.setAccelerationStructure(terrainAccel, bufferIndex: 1)
+            rays.setTextures([surface, targets.depth, horizons, cloudShadows, sun], range: 0..<5)
+            rays.dispatchThreads(MTLSize(width: width, height: height, depth: 1), threadsPerThreadgroup: group)
+            rays.endEncoding()
+        }
+
+        // 4. Sky where nothing covers it, then the terrain's nearest surface, both with clouds.
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = color
         pass.colorAttachments[0].loadAction = .clear
@@ -747,10 +790,7 @@ public final class TerrainRenderer {
         shade.setDepthStencilState(depthState)
         shade.setVertexBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 1)
         bindTerrain(shade, frame: frameTerrain)
-        if let terrainAccel {
-            shade.setFragmentAccelerationStructure(terrainAccel, bufferIndex: 2)
-            shade.useResource(terrainAccel, usage: .read, stages: .fragment)
-        }
+        if let sun = targets.sun { shade.setFragmentTexture(sun, index: 5) }
         drawTerrain(shade, frame: frameTerrain)
         shade.endEncoding()
 
