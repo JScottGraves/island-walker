@@ -625,6 +625,7 @@ public final class TerrainRenderer {
         depthPass.depthAttachment.storeAction = .store
         depthPass.depthAttachment.clearDepth = 1
         guard let enc = cmd.makeRenderCommandEncoder(descriptor: depthPass) else { return }
+        enc.label = "depth"
         enc.setRenderPipelineState(depthPipeline)
         enc.setDepthStencilState(prepassDepthState)
         enc.setCullMode(.none)
@@ -637,6 +638,7 @@ public final class TerrainRenderer {
         // and blended into the history.
         let previous = historyIndex, next = 1 - historyIndex
         guard let compute = cloudCmd.makeComputeCommandEncoder() else { return }
+        compute.label = "clouds"
         let group = MTLSize(width: 8, height: 8, depth: 1)
         compute.setComputePipelineState(cloudShadowPipeline)
         compute.setBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 0)
@@ -664,6 +666,7 @@ public final class TerrainRenderer {
         pass.depthAttachment.loadAction = .load
         pass.depthAttachment.storeAction = .dontCare
         guard let shade = shadeCmd.makeRenderCommandEncoder(descriptor: pass) else { return }
+        shade.label = "shade"
         shade.setRenderPipelineState(skyPipeline)
         shade.setDepthStencilState(skyDepthState)
         shade.setCullMode(.none)

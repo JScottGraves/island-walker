@@ -212,9 +212,9 @@ float rayTracedSun(float3 p, float3 n, float3 l, float2 pixel, float distance, p
     return 0.25 * (hits[0] + hits[1] + hits[2] + hits[3]);
 }
 
-// Sun visibility from the 16-sector horizon map: interpolate the horizon at the sun's
-// azimuth and compare elevations, with the same soft edge as the CPU bake.
-float horizonSun(VOut in, float3 l) {
+// How far the sun stands above the terrain's horizon (radians), from the 16-sector
+// horizon map interpolated at the sun's azimuth.
+float horizonMargin(VOut in, float3 l) {
     float h[16] = {
         in.horizon0.x, in.horizon0.y, in.horizon0.z, in.horizon0.w,
         in.horizon1.x, in.horizon1.y, in.horizon1.z, in.horizon1.w,
@@ -227,7 +227,12 @@ float horizonSun(VOut in, float3 l) {
     int a = (int(f0) + 16) % 16;
     int b = (a + 1) % 16;
     float horizonAngle = mix(h[a], h[b], f - f0);
-    float margin = asin(clamp(l.z, -1.0, 1.0)) - horizonAngle;
+    return asin(clamp(l.z, -1.0, 1.0)) - horizonAngle;
+}
+
+// Sun visibility from the horizon map, with the same soft edge as the CPU bake.
+float horizonSun(VOut in, float3 l) {
+    float margin = horizonMargin(in, l);
     return smoothstep(0.0, 1.0, saturate((margin + 0.01) / 0.02));
 }
 
@@ -261,8 +266,13 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
     float cloudSun = cloudSunlight(u, cloudShadows, surface);
     float sunVisibility = 0.0;
     if (nDotL > 0.0 && l.z > -0.01 && cloudSun > 0.01) {
-        if (kRayTraced) {
+        // The horizon map comes from the same mesh the rays trace, so where it puts the sun
+        // well clear of the horizon, or well below it, the rays would only agree with it.
+        float margin = horizonMargin(in, l);
+        if (kRayTraced && abs(margin) < 0.05) {
             sunVisibility = rayTracedSun(surface, n, l, in.position.xy, length(u.cameraPosition - in.world), terrain);
+        } else if (kRayTraced) {
+            sunVisibility = margin > 0.0 ? 1.0 : 0.0;
         } else {
             sunVisibility = horizonSun(in, l);
         }
