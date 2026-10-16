@@ -51,11 +51,10 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
 
     float3 albedo;
     if (h < 0.0) {
-        float d = saturate(-h / 400.0);
-        albedo = mix(kShallowWater, kDeepWater, d);
+        albedo = waterAlbedo(-h);
         n = float3(0.0, 0.0, 1.0);
     } else {
-        albedo = terrainAlbedo(h, slope, u.maxHeight);
+        albedo = terrainAlbedo(in.world.xy, h, slope, u.maxHeight);
     }
 
     float skyVisibility = saturate(in.light.x);

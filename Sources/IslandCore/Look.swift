@@ -38,8 +38,9 @@ public enum Look {
     public static let soil = RGB.srgb(140, 72, 46)
     public static let rock = RGB.srgb(62, 60, 58)
     public static let sand = RGB.srgb(175, 165, 140)
-    public static let shallowWater = RGB.srgb(40, 110, 115)
-    public static let deepWater = RGB.srgb(10, 30, 60)
+    /// Water over a sandy bottom a few metres down, and open ocean.
+    public static let shallowWater = RGB.srgb(35, 150, 145)
+    public static let deepWater = RGB.srgb(8, 38, 78)
 
     /// Direction towards the sun (x east, y north, z up): mid-morning, high in the sky.
     public static let sunDirection: (x: Double, y: Double, z: Double) = {
@@ -62,16 +63,30 @@ public enum Look {
     public static let hazeDistance = 45_000.0
     public static let hazeMax = 0.85
 
-    /// Land albedo from height above the sea, slope (1 − normal.z) and the island's top.
-    /// Pali stay green up to about 60°: soil shows through in streaks on the steepest walls
-    /// and bare basalt only past about 70°.
-    public static func albedo(above: Double, slope: Double, maxHeight: Double) -> RGB {
+    /// Land albedo from world position (metres), height above the sea, slope (1 − normal.z)
+    /// and the island's top. Steep pali are mostly green, with red soil streaks and black
+    /// basalt breaking through in patches (`exposure`) on the steeper spurs and flute walls.
+    public static func albedo(x: Double, y: Double, above: Double, slope: Double, maxHeight: Double) -> RGB {
         let grass = grassLow.mix(grassHigh, Swift.min(1, Swift.max(0, above / Swift.max(maxHeight, 1))))
+        let bare = exposure(x: x, y: y)
         var a = grass.mix(cliffGreen, smoothstep(0.2, 0.45, slope))
-        a = a.mix(soil, 0.5 * smoothstep(0.45, 0.65, slope))
-        a = a.mix(rock, smoothstep(0.65, 0.85, slope))
+        a = a.mix(soil, smoothstep(0.15, 0.35, slope) * (0.15 + 0.6 * bare))
+        a = a.mix(rock, smoothstep(0.4, 0.7, slope) * (0.2 + 0.6 * (1 - bare)))
         // Beach: a narrow band just above the waterline on gentle slopes only.
         return sand.mix(a, Swift.max(smoothstep(1, 3, above), smoothstep(0.1, 0.25, slope)))
+    }
+
+    /// 0…1 patches a few hundred metres across where bare ground shows through vegetation.
+    /// Plain sines so the Metal shader computes the identical pattern.
+    public static func exposure(x: Double, y: Double) -> Double {
+        let a = sin(x / 170 + 1.7 * sin(y / 230))
+        let b = sin(y / 190 + 1.3 * sin(x / 260))
+        return smoothstep(-0.2, 0.6, a * b)
+    }
+
+    /// Water colour by depth below the sea surface (metres).
+    public static func waterAlbedo(depth: Double) -> RGB {
+        shallowWater.mix(deepWater, smoothstep(0, 40, depth))
     }
 
     /// Sky radiance along a view ray: haze at the horizon, deepening to the zenith colour.
@@ -80,11 +95,12 @@ public enum Look {
     }
 
     /// Fraction of the sky a water surface reflects (Schlick, F0 = 0.02), given the cosine
-    /// between the view ray and the water's normal. Near 1 at grazing angles, which is
-    /// what makes distant sea meet the sky without a dark seam.
+    /// between the view ray and the water's normal. High at grazing angles, which is what
+    /// makes distant sea meet the sky without a dark seam; looking down, the water's own
+    /// colour shows. Capped below 1 because waves tilt part of the surface toward the viewer.
     public static func waterReflectance(cosView: Double) -> Double {
         let m = 1 - Swift.min(1, Swift.max(0, cosView))
-        return 0.02 + 0.98 * m * m * m * m * m
+        return 0.02 + 0.83 * m * m * m * m * m
     }
 
     static func smoothstep(_ e0: Double, _ e1: Double, _ x: Double) -> Double {
@@ -167,12 +183,23 @@ public enum Look {
         }
 
         // Mirrors Look.albedo, Look.skyColor and Look.waterReflectance.
-        float3 terrainAlbedo(float above, float slope, float maxHeight) {
+        float exposure(float2 p) {
+            float a = sin(p.x / 170.0 + 1.7 * sin(p.y / 230.0));
+            float b = sin(p.y / 190.0 + 1.3 * sin(p.x / 260.0));
+            return smoothstep(-0.2, 0.6, a * b);
+        }
+
+        float3 terrainAlbedo(float2 p, float above, float slope, float maxHeight) {
             float3 grass = mix(kGrassLow, kGrassHigh, saturate(above / max(maxHeight, 1.0)));
+            float bare = exposure(p);
             float3 a = mix(grass, kCliffGreen, smoothstep(0.2, 0.45, slope));
-            a = mix(a, kSoil, 0.5 * smoothstep(0.45, 0.65, slope));
-            a = mix(a, kRock, smoothstep(0.65, 0.85, slope));
+            a = mix(a, kSoil, smoothstep(0.15, 0.35, slope) * (0.15 + 0.6 * bare));
+            a = mix(a, kRock, smoothstep(0.4, 0.7, slope) * (0.2 + 0.6 * (1.0 - bare)));
             return mix(kSand, a, max(smoothstep(1.0, 3.0, above), smoothstep(0.1, 0.25, slope)));
+        }
+
+        float3 waterAlbedo(float depth) {
+            return mix(kShallowWater, kDeepWater, smoothstep(0.0, 40.0, depth));
         }
 
         float3 skyColor(float sinElevation) {
@@ -181,7 +208,7 @@ public enum Look {
 
         float waterReflectance(float cosView) {
             float m = 1.0 - saturate(cosView);
-            return 0.02 + 0.98 * m * m * m * m * m;
+            return 0.02 + 0.83 * m * m * m * m * m;
         }
 
         """

@@ -98,7 +98,7 @@ public enum GroundView {
         var n = (0.0, 0.0, 1.0)
         let depthBelow = sea - ground
         if depthBelow > 0 {
-            albedo = Look.shallowWater.mix(Look.deepWater, Swift.min(1, depthBelow / 400))
+            albedo = Look.waterAlbedo(depth: depthBelow)
         } else {
             let e = 1.0
             var hx = Double(h.sampleCubic(x: gx + e, y: gy) - h.sampleCubic(x: gx - e, y: gy)) / (2 * e * h.cellSize)
@@ -111,7 +111,7 @@ public enum GroundView {
                 hy += (detailNoise(px, py + de) - detailNoise(px, py - de)) / (2 * de) * fade
             }
             n = normalize((-hx, -hy, 1))
-            albedo = Look.albedo(above: ground - sea, slope: 1 - n.2, maxHeight: maxHeight)
+            albedo = Look.albedo(x: px, y: py, above: ground - sea, slope: 1 - n.2, maxHeight: maxHeight)
         }
         let s = Look.sunDirection
         let color = Look.lit(albedo: albedo, normalZ: n.2, nDotL: n.0 * s.x + n.1 * s.y + n.2 * s.z,
