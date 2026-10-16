@@ -79,15 +79,21 @@ public struct IslandBundle: Sendable {
     /// One tile's values, `tileSize`² row-major, row 0 south.
     public func tile(_ name: String, level: Int, tx: Int, ty: Int) throws -> [Float] {
         let c = try channel(name)
+        let offset = Float(c.offset), scale = Float(c.scale)
+        return try rawTile(name, level: level, tx: tx, ty: ty).map { offset + scale * Float($0) }
+    }
+
+    /// One tile's quantised samples (value = offset + scale × sample), `tileSize`² row-major,
+    /// row 0 south: what the renderer uploads to the GPU as is.
+    public func rawTile(_ name: String, level: Int, tx: Int, ty: Int) throws -> [UInt16] {
         let path = Self.tilePath(name, level: level, tx: tx, ty: ty)
         let packed = try Data(contentsOf: url.appendingPathComponent(path))
         let raw: Data
         do { raw = try (packed as NSData).decompressed(using: .lz4) as Data } catch { throw Failure.badTile(path) }
         let n = manifest.tileSize * manifest.tileSize
         guard raw.count == n * 2 else { throw Failure.badTile(path) }
-        let offset = Float(c.offset), scale = Float(c.scale)
         return raw.withUnsafeBytes { bytes in
-            (0..<n).map { i in offset + scale * Float(UInt16(littleEndian: bytes.load(fromByteOffset: i * 2, as: UInt16.self))) }
+            (0..<n).map { i in UInt16(littleEndian: bytes.load(fromByteOffset: i * 2, as: UInt16.self)) }
         }
     }
 

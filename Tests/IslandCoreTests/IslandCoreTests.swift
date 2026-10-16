@@ -173,4 +173,52 @@ final class IslandCoreTests: XCTestCase {
         let patch = Look.albedo(x: bare.x, y: bare.y, above: 400, slope: slope, maxHeight: 1000)
         XCTAssertGreaterThan(patch.r, patch.g)
     }
+
+    func testGridTerrainServesItsHeightsAsTiles() throws {
+        var g = Grid(width: 300, height: 300, cellSize: 10)
+        for y in 0..<300 { for x in 0..<300 { g[x, y] = Float(x) * 2 - Float(y) + 0.37 } }
+        let tiles = GridTerrain(height: g, seaLevel: 0, tileSize: 128)
+        XCTAssertEqual(tiles.levels, 3, "300 → 150 → 75")
+        let back = try tiles.grid(level: 0)
+        for i in stride(from: 0, to: g.count, by: 97) {
+            XCTAssertEqual(back.values[i], g.values[i], accuracy: tiles.scale, "quantised to one step")
+        }
+        XCTAssertEqual(tiles.overviewLevel(maxSide: 100), 2)
+        // The walker's ground: exact at sample centres, linear between them.
+        let heights = TerrainHeights(tiles: tiles, capacity: 2)
+        XCTAssertEqual(heights.height(x: 205, y: 105), Double(g[20, 10]), accuracy: Double(tiles.scale))
+        XCTAssertEqual(heights.height(x: 210, y: 105), Double(g[20, 10] + g[21, 10]) / 2, accuracy: Double(tiles.scale))
+        // Across tiles and past the cache's capacity.
+        XCTAssertEqual(heights.height(x: 2905, y: 1505), Double(g[290, 150]), accuracy: Double(tiles.scale))
+        XCTAssertEqual(heights.height(x: 5, y: 2905), Double(g[0, 290]), accuracy: Double(tiles.scale))
+    }
+
+    func testQuadtreeTilesTheIslandWithFinerNodesNearTheCamera() {
+        // 81.92 km at 10 m, like an 8192² bundle; flat overview so bounds don't matter.
+        let overview = Grid(width: 1024, height: 1024, cellSize: 80, fill: 100)
+        let tree = TerrainQuadtree(quads: 64, cellMetres: 10, domain: 81_920, overview: overview)
+        XCTAssertEqual(tree.lodCount, 8, "640 m leaves up to an 81.92 km root")
+        let eye = (x: 30_000.0, y: 40_000.0, z: 102.0)
+        let nodes = tree.select(eye: eye) { _, _ in true }
+        // Every square metre of the domain is drawn exactly once.
+        var area = 0.0
+        for n in nodes {
+            area += (Swift.min(n.x + n.size, 81_920) - n.x) * (Swift.min(n.y + n.size, 81_920) - n.y)
+            XCTAssertLessThan(n.x, 81_920)
+            XCTAssertLessThan(n.y, 81_920)
+        }
+        XCTAssertEqual(area, 81_920 * 81_920, accuracy: 1)
+        // The node under the camera is the finest; far ones are coarse.
+        let under = nodes.first { eye.x >= $0.x && eye.x < $0.x + $0.size && eye.y >= $0.y && eye.y < $0.y + $0.size }
+        XCTAssertEqual(under?.lod, 0)
+        XCTAssertGreaterThanOrEqual(nodes.map(\.lod).max() ?? 0, 5)
+        XCTAssertLessThan(nodes.count, 1000, "hundreds of nodes, not thousands")
+        // Culling everything draws nothing.
+        XCTAssertTrue(tree.select(eye: eye) { _, _ in false }.isEmpty)
+        // Morph ranges: each LOD starts morphing before its ring ends.
+        for k in 0..<(tree.lodCount - 1) {
+            XCTAssertLessThan(tree.morphStart[k], tree.morphEnd[k])
+            XCTAssertLessThan(tree.morphEnd[k], tree.morphStart[k + 1])
+        }
+    }
 }
