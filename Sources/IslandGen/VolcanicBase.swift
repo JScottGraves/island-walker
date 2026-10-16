@@ -102,6 +102,10 @@ public enum VolcanicBase {
         /// Relative rock resistance to erosion; 1 is average, higher is harder.
         public var hardness: Grid
         public var shields: [ShieldVolcano]
+        /// Surface of the lava that later ponds in the saddles between shields (see
+        /// `saddleFill`), or −∞ where the fill adds less than a metre. Not part of `height`:
+        /// the pipeline floods it in late in erosion.
+        public var ponded: Grid
     }
 
     /// - Parameters:
@@ -122,11 +126,11 @@ public enum VolcanicBase {
     ///   - riftDescent: how far each rift crest drops from the summit to its tip, as a share of
     ///     the summit height. 0 keeps the crest level along the whole rift, which leaves long
     ///     broad summits; real rift ridges fall away from the caldera.
-    ///   - saddleFill: blends neighbouring shields with a soft maximum of this width in
-    ///     metres instead of a hard one, so the V between two cones fills by up to
+    ///   - saddleFill: soft-maximum width in metres for `Output.ponded`: blending the shields
+    ///     softly instead of by a hard maximum fills the V between two cones by up to
     ///     0.69 × saddleFill. That stands in for the younger volcano's lava ponding against
     ///     the older one, which built Oahu's Schofield plateau between the Waianae and
-    ///     Koolau ranges. 0 keeps the hard maximum.
+    ///     Koolau ranges. 0 ponds nothing.
     public static func generate(seed: UInt64, size: Int, domainSize: Double, seaFloor: Double = -1800,
                                 shields: [ShieldVolcano]? = nil, landExponent: Double = 2,
                                 submarineSlope: Double = 0.15, coastSlope: Double = 0,
@@ -135,6 +139,7 @@ public enum VolcanicBase {
         let volcanoes = shields ?? randomShields(seed: seed, domainSize: domainSize)
         var height = Grid(width: size, height: size, cellSize: cell)
         var hardness = Grid(width: size, height: size, cellSize: cell, fill: 1)
+        var ponded = Grid(width: size, height: size, cellSize: cell, fill: -.infinity)
         let noiseSeed = Hash.mix(seed ^ 0x4E4F_4953_45)
         let hardSeed = Hash.mix(seed ^ 0x4841_5244)
 
@@ -183,7 +188,8 @@ public enum VolcanicBase {
                 if saddleFill > 0 && softSum > 1 {
                     // The soft maximum is never below the hard one; it adds most where
                     // two shields stand at the same height, i.e. in the saddle between them.
-                    h = Swift.max(h, softMax + saddleFill * log(softSum))
+                    let soft = softMax + saddleFill * log(softSum)
+                    if soft - h >= 1 { ponded[x, y] = Float(soft) }
                 }
                 // Lava-flow scale roughness (tens of metres). With the concave profile the coastal
                 // plain sits only metres above the sea, so the roughness fades out near sea level
@@ -200,7 +206,7 @@ public enum VolcanicBase {
                 hardness[x, y] = Float(Swift.max(0.4, 0.9 + 0.35 * dike + variation))
             }
         }
-        return Output(height: height, hardness: hardness, shields: volcanoes)
+        return Output(height: height, hardness: hardness, shields: volcanoes, ponded: ponded)
     }
 
     /// Depth below sea level `offshore` metres out from the shoreline: a shelf that steepens
