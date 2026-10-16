@@ -10,7 +10,7 @@ func usage() -> Never {
     print("""
     usage: islandgen --score HEIGHT.r32 --cell METRES [--width N] [--sea-level M]
              score an existing float32 heightfield (square unless --width; pits are filled first) and print realism metrics
-           islandgen [--seed N] [--size N] [--steps N] [--domain METRES] [--deposition G] [--slope-exponent N] [--reference-slope S] [--critical-slope S] [--knickpoint-slope S] [--waterfall-retreat R] [--headwall-retreat R] [--waterfall-min-q Q] [--land-exponent P] [--coast-slope A] [--rift-descent D] [--wave-retreat R] [--leeward-waves S] [--uplift U] [--profile] [--out DIR]
+           islandgen [--seed N] [--size N] [--steps N] [--domain METRES] [--deposition G] [--slope-exponent N] [--reference-slope S] [--critical-slope S] [--knickpoint-slope S] [--waterfall-retreat R] [--headwall-retreat R] [--waterfall-min-q Q] [--land-exponent P] [--coast-slope A] [--rift-descent D] [--wave-retreat R] [--leeward-waves S] [--uplift U] [--flexure M] [--flexure-distance M] [--profile] [--out DIR]
       --seed    random seed (default 1)
       --size    grid samples per side (default 1024)
       --steps   erosion time steps (default 400)
@@ -28,6 +28,8 @@ func usage() -> Never {
       --wave-retreat       sea-cliff retreat in m/yr on coasts facing the wind (default 0.004)
       --leeward-waves      share of wave retreat on coasts facing away from the wind (default 0.2)
       --uplift             uplift in m/yr, negative for subsidence (default 0)
+      --flexure            flexural uplift in metres after erosion, growing inland from the coast (default 20)
+      --flexure-distance   distance inland in metres at which flexure reaches its full height (default 1500)
       --headwall-retreat   retreat of every face steeper than 0.6, m/yr at 3 m/yr rain; 0 disables (default 0)
       --profile print time spent in each pipeline phase
       --out     output directory (default ./out)
@@ -100,6 +102,8 @@ while let flag = args.popFirst() {
     case "--wave-retreat": params.erosion.waveRetreat = parsed(Double(value))
     case "--leeward-waves": params.erosion.leewardWaves = parsed(Double(value))
     case "--uplift": params.erosion.uplift = parsed(Double(value))
+    case "--flexure": params.flexure = parsed(Double(value))
+    case "--flexure-distance": params.flexureDistance = parsed(Double(value))
     case "--out": outDir = value
     default: usage()
     }
@@ -213,6 +217,8 @@ let info: [String: Any] = [
     "waveRetreat": params.erosion.waveRetreat,
     "leewardWaves": params.erosion.leewardWaves,
     "uplift": params.erosion.uplift,
+    "flexure": params.flexure,
+    "flexureDistance": params.flexureDistance,
     "landAreaKm2": (landKm2 * 10).rounded() / 10,
     "maxHeightMetres": Double(island.height.range.max),
     "steepFraction": rounded(Double(steep) / Double(Swift.max(land, 1)), 10000),

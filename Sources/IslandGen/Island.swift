@@ -23,6 +23,14 @@ public enum Island {
         /// 0.3 and 0.4 score closest to Oahu with wave retreat on (realism sweep, 2026-10-16).
         public var coastSlope: Double = 0.3
         public var riftDescent: Double = 0.4
+        /// Flexural uplift after erosion, in metres, reached `flexureDistance` inland and
+        /// held beyond it. Oahu rides the bulge raised by the Big Island's weight, which has
+        /// lifted its old reefs and lowland a few tens of metres; tilting the coastal fringe
+        /// this way gives the plains that erosion grades flat to sea level a gentle seaward
+        /// slope instead. 20 m brings the 600 m coastal belt to about 4.2° (Oahu 4.8°) on
+        /// seeds 7, 42 and 123. 0 disables it.
+        public var flexure: Double = 20
+        public var flexureDistance: Double = 1500
         public init() {}
     }
 
@@ -73,9 +81,48 @@ public enum Island {
             }
             progress?(Double(s + 1) / Double(p.steps))
         }
-        if p.steps == 0 {
+        if p.flexure > 0 {
+            phase("flexure") { Self.flex(&height, seaLevel: erosion.seaLevel, lift: p.flexure, distance: p.flexureDistance) }
+        }
+        if p.steps == 0 || p.flexure > 0 {
             PriorityFlood.fill(&height, seaLevel: erosion.seaLevel)
         }
         return Result(height: height, hardness: base.hardness, rain: rain, drainageArea: area, params: p, scarp: scarp)
+    }
+
+    /// Raises land by `lift` × min(1, distance to the sea / `distance`), using a chamfer
+    /// distance transform from the sea cells.
+    static func flex(_ h: inout Grid, seaLevel: Float, lift: Double, distance: Double) {
+        let w = h.width, rows = h.height
+        var d = [Double](repeating: .infinity, count: h.count)
+        for i in 0..<h.count where h.values[i] <= seaLevel { d[i] = 0 }
+        let diagonal = 2.0.squareRoot()
+        for _ in 0..<2 {
+            for y in 0..<rows {
+                for x in 0..<w {
+                    let i = y * w + x
+                    if x > 0 { d[i] = Swift.min(d[i], d[i - 1] + 1) }
+                    if y > 0 {
+                        d[i] = Swift.min(d[i], d[i - w] + 1)
+                        if x > 0 { d[i] = Swift.min(d[i], d[i - w - 1] + diagonal) }
+                        if x < w - 1 { d[i] = Swift.min(d[i], d[i - w + 1] + diagonal) }
+                    }
+                }
+            }
+            for y in stride(from: rows - 1, through: 0, by: -1) {
+                for x in stride(from: w - 1, through: 0, by: -1) {
+                    let i = y * w + x
+                    if x < w - 1 { d[i] = Swift.min(d[i], d[i + 1] + 1) }
+                    if y < rows - 1 {
+                        d[i] = Swift.min(d[i], d[i + w] + 1)
+                        if x < w - 1 { d[i] = Swift.min(d[i], d[i + w + 1] + diagonal) }
+                        if x > 0 { d[i] = Swift.min(d[i], d[i + w - 1] + diagonal) }
+                    }
+                }
+            }
+        }
+        for i in 0..<h.count where h.values[i] > seaLevel && d[i].isFinite {
+            h.values[i] += Float(lift * Swift.min(1, d[i] * h.cellSize / distance))
+        }
     }
 }
