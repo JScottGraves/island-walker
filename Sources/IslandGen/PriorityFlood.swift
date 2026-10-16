@@ -2,55 +2,60 @@ import IslandCore
 
 /// Binary min-heap keyed on (height, index). Ties break on index so the
 /// processing order, and therefore the output, is fully deterministic.
+/// Each entry packs an order-preserving encoding of the height above the cell index
+/// into one UInt64, so comparing entries is a single integer compare.
 struct MinHeap {
-    private var keys: [Float] = []
-    private var items: [Int32] = []
+    private var items: [UInt64] = []
 
     var isEmpty: Bool { items.isEmpty }
 
     init(reserve: Int) {
-        keys.reserveCapacity(reserve)
         items.reserveCapacity(reserve)
     }
 
+    /// Maps a Float to a UInt32 whose unsigned order matches the Float's order.
     @inline(__always)
-    private func less(_ a: Int, _ b: Int) -> Bool {
-        keys[a] < keys[b] || (keys[a] == keys[b] && items[a] < items[b])
+    private static func orderedBits(_ f: Float) -> UInt32 {
+        let b = f.bitPattern
+        return b & 0x8000_0000 != 0 ? ~b : b | 0x8000_0000
     }
 
     mutating func push(_ key: Float, _ item: Int) {
-        keys.append(key)
-        items.append(Int32(item))
-        var c = items.count - 1
-        while c > 0 {
-            let p = (c - 1) / 2
-            guard less(c, p) else { break }
-            keys.swapAt(c, p)
-            items.swapAt(c, p)
-            c = p
+        // -0 and +0 compare equal as Floats; give them one encoding so ties still break on index.
+        let entry = UInt64(Self.orderedBits(key == 0 ? 0 : key)) << 32 | UInt64(UInt32(item))
+        items.append(entry)
+        items.withUnsafeMutableBufferPointer { a in
+            var c = a.count - 1
+            while c > 0 {
+                let p = (c - 1) / 2
+                guard entry < a[p] else { break }
+                a[c] = a[p]
+                c = p
+            }
+            a[c] = entry
         }
     }
 
     mutating func pop() -> Int {
-        let top = Int(items[0])
-        let last = items.count - 1
-        keys.swapAt(0, last)
-        items.swapAt(0, last)
-        keys.removeLast()
-        items.removeLast()
-        var p = 0
-        let n = items.count
-        while true {
-            let l = 2 * p + 1, r = l + 1
-            var m = p
-            if l < n && less(l, m) { m = l }
-            if r < n && less(r, m) { m = r }
-            if m == p { break }
-            keys.swapAt(p, m)
-            items.swapAt(p, m)
-            p = m
+        let top = items[0]
+        let last = items.removeLast()
+        if !items.isEmpty {
+            items.withUnsafeMutableBufferPointer { a in
+                let n = a.count
+                var p = 0
+                while true {
+                    let l = 2 * p + 1
+                    if l >= n { break }
+                    var m = l
+                    if l + 1 < n && a[l + 1] < a[l] { m = l + 1 }
+                    guard a[m] < last else { break }
+                    a[p] = a[m]
+                    p = m
+                }
+                a[p] = last
+            }
         }
-        return top
+        return Int(UInt32(truncatingIfNeeded: top))
     }
 }
 
