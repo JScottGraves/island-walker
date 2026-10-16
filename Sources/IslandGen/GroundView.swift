@@ -214,6 +214,35 @@ public enum Viewpoints {
             return GroundView.Camera(x: x, y: y, z: z, yaw: atan2(ux, uy), pitch: pitch)
         }
 
+        /// The lowland spot with the most relief 1.2–2.5 km away: standing on a coastal plain
+        /// looking up at a cliff (a pali). Searches a coarse lattice in 24 directions.
+        func cliff() -> (Int, Int)? {
+            let stride = 4, directions = 24
+            var bestFoot = -1, bestTop = -1, bestRelief: Float = 150
+            for cy in Swift.stride(from: 0, to: h.height, by: stride) {
+                for cx in Swift.stride(from: 0, to: h.width, by: stride) {
+                    let i = cy * h.width + cx
+                    let z = h.values[i] - seaLevel
+                    guard z > 5 && z < 80 else { continue }
+                    for k in 0..<directions {
+                        let a = Double(k) * 2 * Double.pi / Double(directions)
+                        var d = 1200.0
+                        while d <= 2500 {
+                            let tx = cx + Int((cos(a) * d / h.cellSize).rounded())
+                            let ty = cy + Int((sin(a) * d / h.cellSize).rounded())
+                            if h.contains(tx, ty) {
+                                let j = ty * h.width + tx
+                                let relief = h.values[j] - h.values[i]
+                                if relief > bestRelief { bestRelief = relief; bestFoot = i; bestTop = j }
+                            }
+                            d += h.cellSize
+                        }
+                    }
+                }
+            }
+            return bestFoot >= 0 ? (bestFoot, bestTop) : nil
+        }
+
         var views: [Named] = []
         if coast >= 0 {
             views.append(Named(name: "summit", camera: camera(from: summit, to: coast, brink: true, pitchOffset: 0.05)))
@@ -236,6 +265,9 @@ public enum Viewpoints {
         }
         if coast >= 0 {
             views.append(Named(name: "coast", camera: camera(from: coast, to: summit, pitchOffset: 0.02)))
+        }
+        if let (foot, top) = cliff() {
+            views.append(Named(name: "pali", camera: camera(from: foot, to: top, pitchOffset: 0.03)))
         }
         return views
     }
