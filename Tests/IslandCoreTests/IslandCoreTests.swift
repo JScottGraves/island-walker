@@ -23,4 +23,32 @@ final class IslandCoreTests: XCTestCase {
         XCTAssertEqual(g.sample(x: 1.5, y: 0), 1.5, accuracy: 1e-6)
         XCTAssertEqual(g.sample(x: -5, y: 99), g[0, 3])
     }
+
+    func testGreyCardUnderHighSunLooksMidGrey() {
+        // An 18% grey card facing a high sun on open ground should come out near sRGB 118.
+        let s = Look.sunDirection
+        let lit = Look.lit(albedo: RGB(0.18, 0.18, 0.18), normalZ: 1, nDotL: s.z, sunVisibility: 1, skyVisibility: 1)
+        let srgb = Look.encode(Look.toneMap(lit).g) * 255
+        XCTAssert((100...140).contains(srgb), "grey card came out at sRGB \(srgb)")
+    }
+
+    func testToneMapIsMonotoneAndBounded() {
+        var previous = -1.0
+        for k in 0...200 {
+            let v = Double(k) / 20
+            let out = Look.toneMap(RGB(v, v, v)).r
+            XCTAssertGreaterThanOrEqual(out, previous)
+            XCTAssertLessThanOrEqual(out, 1)
+            previous = out
+        }
+    }
+
+    func testTerrainLightingShadesAValleyFloor() {
+        // A trench: its floor sees less sky than the open plateau beside it.
+        var g = Grid(width: 64, height: 64, cellSize: 50)
+        for y in 0..<64 { for x in 0..<64 { g[x, y] = abs(x - 32) < 3 ? 10 : 400 } }
+        let light = TerrainLighting.bake(height: g, seaLevel: 0)
+        XCTAssertLessThan(light.sky[32, 32], light.sky[10, 32] - 0.2)
+        XCTAssertGreaterThan(light.sky[10, 32], 0.9)
+    }
 }

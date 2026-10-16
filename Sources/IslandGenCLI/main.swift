@@ -71,8 +71,10 @@ if let scarp = island.scarp {
 }
 
 // Ground-level pictures from a walker's eye height, rendered on the CPU.
+let lighting = timer?.measure("lighting") { TerrainLighting.bake(height: island.height, seaLevel: sea) }
+    ?? TerrainLighting.bake(height: island.height, seaLevel: sea)
 for view in Viewpoints.automatic(height: island.height, drainageArea: island.drainageArea, seaLevel: sea, scarp: island.scarp) {
-    let image = GroundView.render(island.height, camera: view.camera, seaLevel: sea)
+    let image = GroundView.render(island.height, camera: view.camera, seaLevel: sea, lighting: lighting)
     try Preview.write(image, to: out.appendingPathComponent("view-\(view.name).png"))
 }
 
