@@ -195,10 +195,10 @@ public enum StreamPower {
         let beforeIncision = params.deposition > 0 ? h.values : []
         let hardnessValues = hardness?.values
         let areaValues = area.values
-        let n = params.slopeExponent
-        let linear = n == 1 && params.areaExponent == 0.5
+        let slopeN = params.slopeExponent
+        let linear = slopeN == 1 && params.areaExponent == 0.5
         let areaScale = pow(params.referenceDischarge, 0.5)
-        let slopeScale = pow(params.referenceSlope, 1 - n)
+        let slopeScale = pow(params.referenceSlope, 1 - slopeN)
         phase("incision") {
             h.values.withUnsafeMutableBufferPointer { hBuf in
                 let hv = SharedBuffer(hBuf)
@@ -218,14 +218,14 @@ public enum StreamPower {
                             guard h0 > b else { continue }
                             let a = Double(areaValues[i]) / params.referenceDischarge
                             let f = k * dt * areaScale * pow(Swift.max(a, 0), params.areaExponent)
-                                * slopeScale / pow(distances[i], n)
+                                * slopeScale / pow(distances[i], slopeN)
                             // Solve x − h0 + f · (x − b)^n = 0 for x in (b, h0]; the function is
                             // increasing and convex there, so Newton from h0 converges from above.
                             var x = h0
                             for _ in 0..<20 {
                                 let d = x - b
-                                let g = x - h0 + f * pow(d, n)
-                                let dg = 1 + n * f * pow(d, n - 1)
+                                let g = x - h0 + f * pow(d, slopeN)
+                                let dg = 1 + slopeN * f * pow(d, slopeN - 1)
                                 let next = Swift.max(b + 1e-9, x - g / dg)
                                 if abs(next - x) < 1e-4 { x = next; break }
                                 x = next
