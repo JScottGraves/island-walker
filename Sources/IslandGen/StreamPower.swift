@@ -29,6 +29,11 @@ public enum StreamPower {
         public var areaExponent: Double = 0.5
         /// Slope exponent n. 1 is linear; 1.5–2 keeps knickpoints sharp.
         public var slopeExponent: Double = 1
+        /// When > 0, incision is K·A^0.5·S·(1 + (S / knickpointSlope)^(n−1)) instead of a
+        /// pure power law: gentle reaches (coastal plains, valley floors) erode as at n = 1,
+        /// and only reaches steeper than this slope get the extra nonlinear boost that keeps
+        /// waterfalls sharp. referenceDischarge/referenceSlope and areaExponent are unused then.
+        public var knickpointSlope: Double = 0
         /// Rain-weighted drainage area (m³/yr) and slope at which m and n leave the rate unchanged.
         public var referenceDischarge: Double = 1e7
         public var referenceSlope: Double = 0.1
@@ -200,6 +205,7 @@ public enum StreamPower {
         let hardnessValues = hardness?.values
         let areaValues = area.values
         let slopeN = params.slopeExponent
+        let hybrid = params.knickpointSlope > 0 && slopeN != 1
         let linear = slopeN == 1 && params.areaExponent == 0.5
         let areaScale = pow(params.referenceDischarge, 0.5)
         let slopeScale = pow(params.referenceSlope, 1 - slopeN)
@@ -220,16 +226,25 @@ public enum StreamPower {
                         } else {
                             let h0 = Double(hv[i]), b = Double(base)
                             guard h0 > b else { continue }
-                            let a = Double(areaValues[i]) / params.referenceDischarge
-                            let f = k * dt * areaScale * pow(Swift.max(a, 0), params.areaExponent)
-                                * slopeScale / pow(distances[i], slopeN)
-                            // Solve x − h0 + f · (x − b)^n = 0 for x in (b, h0]; the function is
-                            // increasing and convex there, so Newton from h0 converges from above.
+                            // g(x) = x − h0 + f1 · (x − b) + f · (x − b)^n, with f1 = 0 for the
+                            // pure power law.
+                            let f1: Double, f: Double
+                            if hybrid {
+                                f1 = k * dt * pow(Double(areaValues[i]), 0.5) / distances[i]
+                                f = f1 / pow(params.knickpointSlope * distances[i], slopeN - 1)
+                            } else {
+                                let a = Double(areaValues[i]) / params.referenceDischarge
+                                f1 = 0
+                                f = k * dt * areaScale * pow(Swift.max(a, 0), params.areaExponent)
+                                    * slopeScale / pow(distances[i], slopeN)
+                            }
+                            // Solve g(x) = 0 for x in (b, h0]; g is increasing and convex there,
+                            // so Newton from h0 converges from above.
                             var x = h0
                             for _ in 0..<20 {
                                 let d = x - b
-                                let g = x - h0 + f * pow(d, slopeN)
-                                let dg = 1 + slopeN * f * pow(d, slopeN - 1)
+                                let g = x - h0 + f1 * d + f * pow(d, slopeN)
+                                let dg = 1 + f1 + slopeN * f * pow(d, slopeN - 1)
                                 let next = Swift.max(b + 1e-9, x - g / dg)
                                 if abs(next - x) < 1e-4 { x = next; break }
                                 x = next

@@ -8,7 +8,7 @@ import IslandGen
 
 func usage() -> Never {
     print("""
-    usage: islandgen [--seed N] [--size N] [--steps N] [--domain METRES] [--deposition G] [--slope-exponent N] [--reference-slope S] [--critical-slope S] [--profile] [--out DIR]
+    usage: islandgen [--seed N] [--size N] [--steps N] [--domain METRES] [--deposition G] [--slope-exponent N] [--reference-slope S] [--critical-slope S] [--knickpoint-slope S] [--profile] [--out DIR]
       --seed    random seed (default 1)
       --size    grid samples per side (default 1024)
       --steps   erosion time steps (default 400)
@@ -17,6 +17,7 @@ func usage() -> Never {
       --slope-exponent  stream power slope exponent n, area exponent follows as n/2 (default 1)
       --reference-slope  slope at which n leaves erosion rates unchanged (default 0.1)
       --critical-slope   steepest stable wall, rise over run; 0 disables (default 0)
+      --knickpoint-slope  with n > 1: erode as n = 1 below this slope, boosted above it (default 0 = pure power law)
       --profile print time spent in each pipeline phase
       --out     output directory (default ./out)
     """)
@@ -46,6 +47,7 @@ while let flag = args.popFirst() {
         params.erosion.areaExponent = params.erosion.slopeExponent / 2
     case "--reference-slope": params.erosion.referenceSlope = parsed(Double(value))
     case "--critical-slope": params.erosion.criticalSlope = parsed(Double(value))
+    case "--knickpoint-slope": params.erosion.knickpointSlope = parsed(Double(value))
     case "--out": outDir = value
     default: usage()
     }
@@ -123,6 +125,7 @@ let info: [String: Any] = [
     "deposition": params.erosion.deposition,
     "referenceSlope": params.erosion.referenceSlope,
     "criticalSlope": params.erosion.criticalSlope,
+    "knickpointSlope": params.erosion.knickpointSlope,
     "landAreaKm2": (landKm2 * 10).rounded() / 10,
     "maxHeightMetres": Double(island.height.range.max),
     "steepFraction": rounded(Double(steep) / Double(Swift.max(land, 1)), 10000),
