@@ -11,9 +11,11 @@ public struct TerrainLighting: Sendable {
     public var sky: Grid
     /// 1 where the sun is visible, 0 in terrain shadow, soft in between.
     public var sun: Grid
-    /// Optional horizon map: for each cell, `sectors` bytes, the horizon's elevation angle
-    /// in each azimuth sector out to `sunRange` (0 = flat, 255 = straight up). Sector k is
-    /// centred on the direction (k + 0.5) · 360° / sectors, counter-clockwise from east.
+    /// Optional horizon map: for each cell, `sectors` bytes, the highest horizon elevation
+    /// angle across each azimuth sector out to `sunRange` (0 = flat, 255 = straight up),
+    /// from marches through the sector's centre and either side, so a narrow ridge between
+    /// sector centres still counts. Sector k is centred on the direction
+    /// (k + 0.5) · 360° / sectors, counter-clockwise from east.
     /// Lets a renderer without ray tracing shadow terrain for any sun position.
     public var horizon: [UInt8]
 
@@ -37,6 +39,11 @@ public struct TerrainLighting: Sendable {
         let directions = (0..<sectors).map { k -> (Double, Double) in
             let a = (Double(k) + 0.5) * 2 * Double.pi / Double(sectors)
             return (cos(a), sin(a))
+        }
+        // Either side of each sector's centre, a third of the way to its edges.
+        let sides = (0..<sectors).map { k -> [(Double, Double)] in
+            let a = (Double(k) + 0.5) * 2 * Double.pi / Double(sectors), w = Double.pi / Double(sectors) * 2 / 3
+            return [(cos(a - w), sin(a - w)), (cos(a + w), sin(a + w))]
         }
 
         @inline(__always) func ground(_ x: Double, _ y: Double) -> Double {
@@ -79,7 +86,11 @@ public struct TerrainLighting: Sendable {
                                               range: horizons ? sunRange : skyRange)
                                 visible += 1 / (1 + t.near * t.near) // cos² of the horizon angle
                                 if let out = horizonOut {
-                                    out[i * sectors + k] = UInt8((atan(t.far) / (.pi / 2) * 255).rounded())
+                                    var far = t.far
+                                    for side in sides[k] {
+                                        far = Swift.max(far, march(gx, gy, z0, side, near: 0, range: sunRange).far)
+                                    }
+                                    out[i * sectors + k] = UInt8((atan(far) / (.pi / 2) * 255).rounded(.up))
                                 }
                             }
                             skyOut[i] = Float(visible / Double(sectors))
