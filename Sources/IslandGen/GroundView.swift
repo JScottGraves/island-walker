@@ -4,7 +4,8 @@ import IslandCore
 /// CPU-rendered first-person pictures of a heightfield, for checking what terrain looks
 /// like on foot without a GPU (CI, Linux). Column ray-marching ("voxel space"): each
 /// screen column marches one ray outward and draws terrain front to back.
-/// Colours and fog follow the Metal terrain shader so the two read alike.
+/// Materials, light, haze and tone mapping come from `Look`, shared with the Metal
+/// terrain shader, so the two read alike.
 public enum GroundView {
     public struct Camera: Sendable {
         /// Eye position in metres; z is height above sea level.
@@ -26,13 +27,16 @@ public enum GroundView {
         }
     }
 
+    /// - Parameter lighting: baked sky and sun visibility for `h`; baked here when nil.
+    ///   Pass one in when rendering several views of the same island.
     public static func render(_ h: Grid, camera c: Camera, width: Int = 1280, height: Int = 720,
-                              seaLevel: Float = 0, maxDistance: Double = 90_000) -> Preview.Image {
+                              seaLevel: Float = 0, maxDistance: Double = 90_000,
+                              lighting: TerrainLighting? = nil) -> Preview.Image {
         var rgb = [UInt8](repeating: 0, count: width * height * 3)
         let focal = Double(width) / 2 / tan(c.horizontalFOV / 2)
         let horizon = Double(height) / 2 + tan(c.pitch) * focal
-        let sun = normalize((-0.4, 0.5, 0.6))
-        let fogColor = (0.62, 0.72, 0.85)
+        let light = lighting ?? TerrainLighting.bake(height: h, seaLevel: seaLevel)
+        let maxHeight = Swift.max(1, Double(h.range.max) - Double(seaLevel))
         let sea = Double(seaLevel)
         // Keep the eye above the surface as rendered (bicubic + detail), which can sit higher
         // than the raw cell height the camera was placed from.
@@ -42,13 +46,12 @@ public enum GroundView {
         let rendered = Swift.max(under + detail(c.x, c.y, ground: under, sea: sea, distance: 0), sea)
         c.z = Swift.max(c.z, rendered + 1.7)
 
-        func put(_ col: Int, _ row: Int, _ color: (Double, Double, Double)) {
-            var r = color.0, g = color.1, b = color.2
-            r = tonemap(r); g = tonemap(g); b = tonemap(b)
+        func put(_ col: Int, _ row: Int, _ color: RGB) {
+            let c = Look.toneMap(color)
             let o = (row * width + col) * 3
-            rgb[o] = byte(pow(r, 1 / 2.2))
-            rgb[o + 1] = byte(pow(g, 1 / 2.2))
-            rgb[o + 2] = byte(pow(b, 1 / 2.2))
+            rgb[o] = byte(Look.encode(c.r))
+            rgb[o + 1] = byte(Look.encode(c.g))
+            rgb[o + 2] = byte(Look.encode(c.b))
         }
 
         for col in 0..<width {
@@ -69,7 +72,10 @@ public enum GroundView {
                 let screenY = horizon - (surface - c.z) * focal / depth
                 let row = Swift.max(0, Int(screenY.rounded(.up)))
                 if row < top {
-                    let color = shade(h, gx: gx, gy: gy, px: px, py: py, ground: ground, sea: sea, distance: d, sun: sun, fog: fogColor)
+                    let drop = c.z - surface
+                    let cosView = drop / (d * d + drop * drop).squareRoot()
+                    let color = shade(h, gx: gx, gy: gy, px: px, py: py, ground: ground, sea: sea, distance: d,
+                                      cosView: cosView, light: light, maxHeight: maxHeight)
                     for r in row..<top { put(col, r, color) }
                     top = row
                 }
@@ -77,21 +83,22 @@ public enum GroundView {
             }
             // Sky above whatever terrain was drawn.
             for r in 0..<top {
-                let t = Swift.min(1, Swift.max(0, (horizon - Double(r)) / Double(height)))
-                put(col, r, (fogColor.0 * (1 - t) + 0.25 * t, fogColor.1 * (1 - t) + 0.42 * t, fogColor.2 * (1 - t) + 0.80 * t))
+                // Elevation of the ray through this pixel (row offset over the focal length,
+                // corrected for the column's distance from the centre).
+                let up = (horizon - (Double(r) + 0.5)) / (focal / depthScale)
+                put(col, r, Look.skyColor(sinElevation: up / (1 + up * up).squareRoot()))
             }
         }
         return Preview.Image(width: width, height: height, rgb: rgb)
     }
 
-    private static func shade(_ h: Grid, gx: Double, gy: Double, px: Double, py: Double, ground: Double, sea: Double, distance: Double,
-                              sun: (Double, Double, Double), fog: (Double, Double, Double)) -> (Double, Double, Double) {
-        var albedo: (Double, Double, Double)
+    private static func shade(_ h: Grid, gx: Double, gy: Double, px: Double, py: Double, ground: Double, sea: Double,
+                              distance: Double, cosView: Double, light: TerrainLighting, maxHeight: Double) -> RGB {
+        var albedo: RGB
         var n = (0.0, 0.0, 1.0)
         let depthBelow = sea - ground
         if depthBelow > 0 {
-            let t = Swift.min(1, depthBelow / 400)
-            albedo = (0.20 + (0.02 - 0.20) * t, 0.55 + (0.10 - 0.55) * t, 0.60 + (0.25 - 0.60) * t)
+            albedo = Look.waterAlbedo(depth: depthBelow)
         } else {
             let e = 1.0
             var hx = Double(h.sampleCubic(x: gx + e, y: gy) - h.sampleCubic(x: gx - e, y: gy)) / (2 * e * h.cellSize)
@@ -104,21 +111,19 @@ public enum GroundView {
                 hy += (detailNoise(px, py + de) - detailNoise(px, py - de)) / (2 * de) * fade
             }
             n = normalize((-hx, -hy, 1))
-            let slope = 1 - n.2
-            let above = ground - sea
-            let grass = (0.20, 0.36, 0.14), soil = (0.45, 0.25, 0.15), rock = (0.32, 0.27, 0.24)
-            albedo = mix(grass, soil, smoothstep(0.15, 0.30, slope))
-            albedo = mix(albedo, rock, smoothstep(0.35, 0.55, slope))
-            // Beach: a narrow band just above the waterline on gentle slopes only.
-            albedo = mix((0.76, 0.70, 0.55), albedo, Swift.max(smoothstep(1, 3, above), smoothstep(0.1, 0.25, slope)))
+            albedo = Look.albedo(x: px, y: py, above: ground - sea, slope: 1 - n.2, maxHeight: maxHeight)
         }
-        let diffuse = Swift.max(0, n.0 * sun.0 + n.1 * sun.1 + n.2 * sun.2)
-        let ambient = 0.5 * (0.5 + 0.5 * n.2)
-        let light = (2.2 * diffuse + 0.45 * ambient, 2.09 * diffuse + 0.6 * ambient, 1.87 * diffuse + 0.85 * ambient)
-        var color = (albedo.0 * light.0, albedo.1 * light.1, albedo.2 * light.2)
-        let f = 0.85 * (1 - exp(-distance / 60_000))
-        color = mix(color, fog, f)
-        return color
+        let s = Look.sunDirection
+        let color = Look.lit(albedo: albedo, normalZ: n.2, nDotL: n.0 * s.x + n.1 * s.y + n.2 * s.z,
+                             sunVisibility: Double(light.sun.sample(x: gx, y: gy)),
+                             skyVisibility: Double(light.sky.sample(x: gx, y: gy)))
+        var surface = color
+        if depthBelow > 0 {
+            // Flat water mirrors the sky at the reflected elevation, which equals the
+            // view ray's depression angle.
+            surface = color.mix(Look.skyColor(sinElevation: cosView), Look.waterReflectance(cosView: cosView, distance: distance))
+        }
+        return surface.mix(Look.haze, Look.hazeAmount(distance: distance))
     }
 
     /// Metre-scale relief the 10–80 m base grid can't hold: hummocks, lava-flow lumps.
@@ -139,18 +144,9 @@ public enum GroundView {
         return detailNoise(x, y) * fade * smoothstep(sea + 1, sea + 6, ground)
     }
 
-    private static func tonemap(_ v: Double) -> Double {
-        let white = 2.5
-        return v * (1 + v / (white * white)) / (1 + v)
-    }
-
     private static func normalize(_ v: (Double, Double, Double)) -> (Double, Double, Double) {
         let l = (v.0 * v.0 + v.1 * v.1 + v.2 * v.2).squareRoot()
         return (v.0 / l, v.1 / l, v.2 / l)
-    }
-
-    private static func mix(_ a: (Double, Double, Double), _ b: (Double, Double, Double), _ t: Double) -> (Double, Double, Double) {
-        (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t, a.2 + (b.2 - a.2) * t)
     }
 
     private static func smoothstep(_ e0: Double, _ e1: Double, _ x: Double) -> Double {
