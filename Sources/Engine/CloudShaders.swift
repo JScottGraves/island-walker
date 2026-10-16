@@ -14,8 +14,10 @@ let cloudShaderSource = """
 constant float kEarthRadius = 6360000.0;
 // Cumulus extinction per metre at full density (~40 m visibility inside a dense cloud core).
 constant float kCloudExtinction = 0.025;
-// Beyond this the march steps are too long for the detail noise: it would only stipple.
+// March steps longer than these skip the detail noise and then the finest shape octave:
+// features smaller than the step only alias into stipple.
 constant float kCloudDetailStep = 250.0;
+constant float kCloudShapeStep = 700.0;
 
 float cloudHash(float3 p) {
     p = fract(p * 0.3183099 + 0.1);
@@ -68,9 +70,10 @@ float altitude(constant Uniforms &u, float3 p) {
     return r - kEarthRadius;
 }
 
-// Cloud density at a world position (0 outside the layer). `detail` adds the small-scale
-// erosion; the light march and shadows leave it out.
-float cloudDensity(constant Uniforms &u, texture2d<float> cloudMap, float3 p, bool detail) {
+// Cloud density at a world position (0 outside the layer), with noise detail matched to
+// `stepLength`, the length of the march step that samples it. The detail erosion fades
+// out over a range of step lengths rather than at one, which would draw a seam.
+float cloudDensity(constant Uniforms &u, texture2d<float> cloudMap, float3 p, float stepLength) {
     float base = u.cloudLayer.x, top = u.cloudLayer.y;
     float h = altitude(u, p);
     if (h < base || h > top) return 0.0;
@@ -83,11 +86,12 @@ float cloudDensity(constant Uniforms &u, texture2d<float> cloudMap, float3 p, bo
     float profile = saturate(hn / 0.12) * saturate((1.0 - hn) / 0.3);
     // The air streams through the standing cloud: only the texture moves with the wind.
     float3 q = float3(p.xy - u.cloudWind.xy * u.cloudLayer.z, h) / 1400.0;
-    float shape = fbm3(q, 3) * profile;
+    float shape = fbm3(q, stepLength < kCloudShapeStep ? 3 : 2) * profile;
     float d = saturate(remapRange(shape, 1.0 - coverage, 1.0, 0.0, 1.0));
-    if (detail && d > 0.0) {
+    float detail = 1.0 - smoothstep(0.5 * kCloudDetailStep, kCloudDetailStep, stepLength);
+    if (detail > 0.0 && d > 0.0) {
         float erode = fbm3(q * 7.0 + float3(3.1, 7.7, 1.3), 2);
-        d = saturate(remapRange(d, 0.35 * erode * (1.2 - hn), 1.0, 0.0, 1.0));
+        d = saturate(remapRange(d, 0.35 * detail * erode * (1.2 - hn), 1.0, 0.0, 1.0));
     }
     return d;
 }
@@ -169,7 +173,7 @@ CloudResult marchClouds(constant Uniforms &u, texture2d<float> cloudMap, float3 
         float dt = max(t - tPrevious, 1.0);
         tPrevious = t;
         float3 p = u.cameraPosition + dir * t;
-        float density = cloudDensity(u, cloudMap, p, dt < kCloudDetailStep);
+        float density = cloudDensity(u, cloudMap, p, dt);
         if (density <= 0.0) continue;
         // Thin the cloud right around the camera so a walker inside it still sees the
         // ground at their feet: fog, not a grey wall.
@@ -180,7 +184,7 @@ CloudResult marchClouds(constant Uniforms &u, texture2d<float> cloudMap, float3 
         float lightStep = 50.0;
         for (int j = 0; j < 3; j++) {
             tl += lightStep;
-            tau += cloudDensity(u, cloudMap, p + l * (tl - 0.5 * lightStep), false) * kCloudExtinction * lightStep;
+            tau += cloudDensity(u, cloudMap, p + l * (tl - 0.5 * lightStep), max(lightStep, kCloudDetailStep)) * kCloudExtinction * lightStep;
             lightStep *= 3.0;
         }
         // Sun: dual-lobe phase (silver linings towards the sun, a little back-scatter),
@@ -234,10 +238,10 @@ float cloudShadow(constant Uniforms &u, texture2d<float> cloudMap, float3 p) {
     float dt = (t1 - t0) / float(samples);
     for (int k = 0; k < samples; k++) {
         float3 q = p + l * (t0 + (float(k) + 0.5) * dt);
-        tau += cloudDensity(u, cloudMap, q, false) * kCloudExtinction * dt;
+        tau += cloudDensity(u, cloudMap, q, dt) * kCloudExtinction * dt;
     }
-    // Light scattered forward through thin cloud keeps shadows from going fully black.
-    return mix(0.15, 1.0, exp(-tau));
+    // Light scattered forward through the cloud keeps its shadow from going fully black.
+    return mix(0.3, 1.0, exp(-tau));
 }
 
 """
