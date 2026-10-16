@@ -26,6 +26,8 @@ public enum Island {
         public var rain: Grid
         public var drainageArea: Grid
         public var params: Params
+        /// The flank collapse's headscarp, if one was cut.
+        public var scarp: FlankCollapse.Scarp?
     }
 
     /// Generates an island. `progress` is called with values in 0...1.
@@ -38,9 +40,10 @@ public enum Island {
         erosion.timeStep = Swift.min(erosion.timeStep, maxDt)
 
         var base = VolcanicBase.generate(seed: p.seed, size: p.size, domainSize: p.domainSize)
-        if p.flankCollapse,
-           let scarp = FlankCollapse.choose(shields: base.shields, height: base.height,
-                                            windDirection: p.climate.windDirection, seed: p.seed) {
+        let scarp = p.flankCollapse
+            ? FlankCollapse.choose(shields: base.shields, height: base.height, windDirection: p.climate.windDirection, seed: p.seed)
+            : nil
+        if let scarp {
             FlankCollapse.apply(scarp, height: &base.height, hardness: &base.hardness, seed: p.seed)
         }
         var height = base.height
@@ -63,6 +66,6 @@ public enum Island {
         if p.steps == 0 {
             PriorityFlood.fill(&height, seaLevel: erosion.seaLevel)
         }
-        return Result(height: height, hardness: base.hardness, rain: rain, drainageArea: area, params: p)
+        return Result(height: height, hardness: base.hardness, rain: rain, drainageArea: area, params: p, scarp: scarp)
     }
 }

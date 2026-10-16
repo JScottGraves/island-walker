@@ -25,7 +25,20 @@ enum Snapshots {
             params.diffusivity = 0
             let area = StreamPower.step(&copy, params: params).area
 
-            for view in Viewpoints.automatic(height: height, drainageArea: area) {
+            // islandgen writes the flank collapse's scarp next to height.r32.
+            var scarp: FlankCollapse.Scarp?
+            let args = CommandLine.arguments
+            if args.count > 1, args[1].hasSuffix(".r32") {
+                let url = URL(fileURLWithPath: args[1]).deletingLastPathComponent().appendingPathComponent("scarp.json")
+                if let data = try? Data(contentsOf: url),
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Double],
+                   let x = json["x"], let y = json["y"], let direction = json["direction"] {
+                    scarp = FlankCollapse.Scarp(x: x, y: y, direction: direction)
+                    scarp?.halfLength = json["halfLength"] ?? 9000
+                }
+            }
+
+            for view in Viewpoints.automatic(height: height, drainageArea: area, scarp: scarp) {
                 let c = view.camera
                 let forward = SIMD3<Float>(Float(sin(c.yaw) * cos(c.pitch)), Float(cos(c.yaw) * cos(c.pitch)), Float(sin(c.pitch)))
                 let rgb = try renderer.snapshot(width: 1280, height: 720, eye: SIMD3(c.x, c.y, c.z), forward: forward)

@@ -43,6 +43,12 @@ public enum FlankCollapse {
         /// Amphitheater seeds: positions along the scarp (perpendicular offset from the
         /// summit line, metres), half-widths and set-backs into the flank.
         public var notches: [(perp: Double, width: Double, depth: Double)] = []
+
+        public init(x: Double, y: Double, direction: Double) {
+            self.x = x
+            self.y = y
+            self.direction = direction
+        }
     }
 
     /// Chooses which shield collapses and which way. The collapse faces across the shield's

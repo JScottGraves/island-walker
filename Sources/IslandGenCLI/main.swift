@@ -60,9 +60,14 @@ try Preview.write(Preview.flow(island.drainageArea), to: out.appendingPathCompon
 try Preview.write(Preview.gray(island.rain), to: out.appendingPathComponent("rain.png"))
 try Preview.write(Preview.gray(island.hardness), to: out.appendingPathComponent("hardness.png"))
 try Preview.writeRaw(island.height, to: out.appendingPathComponent("height.r32"))
+if let scarp = island.scarp {
+    // Lets IslandApp's snapshots aim the pali view at the same cliff.
+    let json: [String: Double] = ["x": scarp.x, "y": scarp.y, "direction": scarp.direction, "halfLength": scarp.halfLength]
+    try JSONSerialization.data(withJSONObject: json, options: [.sortedKeys]).write(to: out.appendingPathComponent("scarp.json"))
+}
 
 // Ground-level pictures from a walker's eye height, rendered on the CPU.
-for view in Viewpoints.automatic(height: island.height, drainageArea: island.drainageArea, seaLevel: sea) {
+for view in Viewpoints.automatic(height: island.height, drainageArea: island.drainageArea, seaLevel: sea, scarp: island.scarp) {
     let image = GroundView.render(island.height, camera: view.camera, seaLevel: sea)
     try Preview.write(image, to: out.appendingPathComponent("view-\(view.name).png"))
 }

@@ -171,7 +171,10 @@ public enum Viewpoints {
         public var camera: GroundView.Camera
     }
 
-    public static func automatic(height h: Grid, drainageArea area: Grid, seaLevel: Float = 0) -> [Named] {
+    /// With `scarp`, the pali view looks at that flank-collapse cliff from its plain;
+    /// without it, at the biggest cliff anywhere.
+    public static func automatic(height h: Grid, drainageArea area: Grid, seaLevel: Float = 0,
+                                 scarp: FlankCollapse.Scarp? = nil) -> [Named] {
         var summit = 0
         for i in 0..<h.count where h.values[i] > h.values[summit] { summit = i }
         let maxH = h.values[summit] - seaLevel
@@ -227,8 +230,22 @@ public enum Viewpoints {
                     let i = cy * h.width + cx
                     let z = h.values[i] - seaLevel
                     guard z > 5 && z < 150 else { continue }
+                    if let scarp {
+                        // Only in front of the scarp's middle, on its plain.
+                        let (px, py) = position(i)
+                        let rx = px - scarp.x, ry = py - scarp.y
+                        let along = rx * cos(scarp.direction) + ry * sin(scarp.direction)
+                        let perp = -rx * sin(scarp.direction) + ry * cos(scarp.direction)
+                        guard along > 0 && abs(perp) < 0.5 * scarp.halfLength else { continue }
+                    }
                     for k in 0..<directions {
                         let a = Double(k) * 2 * Double.pi / Double(directions)
+                        if let scarp {
+                            // Facing inland, within 40° of straight at the cliff.
+                            var off = abs(a - (scarp.direction + Double.pi)).truncatingRemainder(dividingBy: 2 * Double.pi)
+                            if off > Double.pi { off = 2 * Double.pi - off }
+                            if off > 40 * Double.pi / 180 { continue }
+                        }
                         var clear = true
                         var near = h.cellSize
                         while near <= 1000 && clear {
