@@ -10,7 +10,7 @@ func usage() -> Never {
     print("""
     usage: islandgen --score HEIGHT.r32 --cell METRES [--width N] [--sea-level M]
              score an existing float32 heightfield (square unless --width; pits are filled first) and print realism metrics
-           islandgen [--seed N] [--size N] [--steps N] [--domain METRES] [--deposition G] [--slope-exponent N] [--reference-slope S] [--critical-slope S] [--knickpoint-slope S] [--waterfall-retreat R] [--headwall-retreat R] [--waterfall-min-q Q] [--profile] [--out DIR]
+           islandgen [--seed N] [--size N] [--steps N] [--domain METRES] [--deposition G] [--slope-exponent N] [--reference-slope S] [--critical-slope S] [--knickpoint-slope S] [--waterfall-retreat R] [--headwall-retreat R] [--waterfall-min-q Q] [--land-exponent P] [--profile] [--out DIR]
       --seed    random seed (default 1)
       --size    grid samples per side (default 1024)
       --steps   erosion time steps (default 400)
@@ -22,6 +22,7 @@ func usage() -> Never {
       --knickpoint-slope  with n > 1: erode as n = 1 below this slope, boosted above it (default 0 = pure power law)
       --waterfall-retreat  headwall retreat in m/yr at the reference discharge; 0 disables (default 0.05)
       --waterfall-min-q    smallest rain-weighted drainage (m³/yr) that drives waterfall retreat (default 3e5)
+      --land-exponent      shield land profile top·(1 − r/shore)^P; 0 keeps the classic shape (default 2)
       --headwall-retreat   retreat of every face steeper than 0.6, m/yr at 3 m/yr rain; 0 disables (default 0)
       --profile print time spent in each pipeline phase
       --out     output directory (default ./out)
@@ -88,6 +89,7 @@ while let flag = args.popFirst() {
     case "--waterfall-retreat": params.erosion.waterfallRetreat = parsed(Double(value))
     case "--headwall-retreat": params.erosion.headwallRetreat = parsed(Double(value))
     case "--waterfall-min-q": params.erosion.waterfallMinDischarge = parsed(Double(value))
+    case "--land-exponent": params.landExponent = parsed(Double(value))
     case "--out": outDir = value
     default: usage()
     }
@@ -195,6 +197,7 @@ let info: [String: Any] = [
     "waterfallRetreat": params.erosion.waterfallRetreat,
     "headwallRetreat": params.erosion.headwallRetreat,
     "waterfallMinDischarge": params.erosion.waterfallMinDischarge,
+    "landExponent": params.landExponent,
     "landAreaKm2": (landKm2 * 10).rounded() / 10,
     "maxHeightMetres": Double(island.height.range.max),
     "steepFraction": rounded(Double(steep) / Double(Swift.max(land, 1)), 10000),
