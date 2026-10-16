@@ -56,6 +56,13 @@ public enum StreamPower {
         /// streams and widen into amphitheaters. 0 disables it.
         public var waterfallRetreat: Double = 0
         public var waterfallSlope: Double = 0.6
+        /// Headwall retreat by seepage and weathering: every face steeper than
+        /// `waterfallSlope` retreats horizontally at this rate in m/yr, scaled by local rain
+        /// over `referenceRain`, whatever its drainage area. Hawaiian amphitheater heads sit
+        /// at the crest where discharge is tiny, so discharge-driven waterfall retreat
+        /// alone barely reaches them. 0 disables it.
+        public var headwallRetreat: Double = 0
+        public var referenceRain: Double = 3
         public var waterfallMinDischarge: Double = 1e6
         /// Uplift (positive) or subsidence (negative) in m / yr, applied to land and sea floor.
         public var uplift: Double = 0
@@ -265,15 +272,20 @@ public enum StreamPower {
             }
         }
 
-        // 4a. Waterfall retreat. A cell retreats if it stands steeper than waterfallSlope
-        //     above a neighbouring channel cell with enough discharge; it is lowered toward
-        //     that cell by the fraction of a cell width the face retreats this step. Every
-        //     cell reads the pre-pass heights, so rows run in parallel.
-        if params.waterfallRetreat > 0 {
+        // 4a. Waterfall and headwall retreat. A cell standing steeper than waterfallSlope
+        //     above a neighbour retreats horizontally: it is lowered by slope × retreat
+        //     distance (never below that neighbour), which moves the whole face back while
+        //     keeping it steep. Waterfall retreat needs a channel neighbour with enough
+        //     discharge; headwall retreat applies to any steep face, scaled by local rain.
+        //     Every cell reads the pre-pass heights, so rows run in parallel.
+        if params.waterfallRetreat > 0 || params.headwallRetreat > 0 {
             let minQ = Float(params.waterfallMinDischarge)
             let sw = params.waterfallSlope
-            let rate = params.waterfallRetreat * dt / cell
+            let waterfallRate = params.waterfallRetreat * dt / cell
+            let headwallRate = params.headwallRetreat * dt / cell
             let qRef = params.referenceDischarge
+            let rainValues = rain?.values
+            let rainRef = params.referenceRain
             phase("waterfalls") {
                 let old = h.values
                 h.values.withUnsafeMutableBufferPointer { hBuf in
@@ -283,15 +295,18 @@ public enum StreamPower {
                             for x in 1..<(w - 1) {
                                 let i = y * w + x
                                 if old[i] <= sea { continue }
+                                let headwall = headwallRate * Double(rainValues?[i] ?? Float(rainRef)) / rainRef
                                 var drop: Float = 0
                                 for k in 0..<8 {
                                     let p = (y + D8.dy[k]) * w + (x + D8.dx[k])
-                                    let q = areaValues[p]
-                                    guard q >= minQ else { continue }
                                     let base = Swift.max(old[p], sea)
                                     let rise = Double(old[i] - base)
                                     guard rise > sw * D8.distance[k] * cell else { continue }
-                                    let fraction = Swift.min(1, rate * (Double(q) / qRef).squareRoot() / D8.distance[k])
+                                    var rate = headwall
+                                    let q = areaValues[p]
+                                    if q >= minQ { rate = Swift.max(rate, waterfallRate * (Double(q) / qRef).squareRoot()) }
+                                    guard rate > 0 else { continue }
+                                    let fraction = Swift.min(1, rate / D8.distance[k])
                                     drop = Swift.max(drop, Float(rise * fraction))
                                 }
                                 if drop > 0 { hv[i] = old[i] - drop }

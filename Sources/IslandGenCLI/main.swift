@@ -8,7 +8,7 @@ import IslandGen
 
 func usage() -> Never {
     print("""
-    usage: islandgen [--seed N] [--size N] [--steps N] [--domain METRES] [--deposition G] [--slope-exponent N] [--reference-slope S] [--critical-slope S] [--knickpoint-slope S] [--waterfall-retreat R] [--profile] [--out DIR]
+    usage: islandgen [--seed N] [--size N] [--steps N] [--domain METRES] [--deposition G] [--slope-exponent N] [--reference-slope S] [--critical-slope S] [--knickpoint-slope S] [--waterfall-retreat R] [--headwall-retreat R] [--profile] [--out DIR]
       --seed    random seed (default 1)
       --size    grid samples per side (default 1024)
       --steps   erosion time steps (default 400)
@@ -19,6 +19,7 @@ func usage() -> Never {
       --critical-slope   steepest stable wall, rise over run; 0 disables (default 0)
       --knickpoint-slope  with n > 1: erode as n = 1 below this slope, boosted above it (default 0 = pure power law)
       --waterfall-retreat  headwall retreat in m/yr at the reference discharge; 0 disables (default 0)
+      --headwall-retreat   retreat of every face steeper than 0.6, m/yr at 3 m/yr rain; 0 disables (default 0)
       --profile print time spent in each pipeline phase
       --out     output directory (default ./out)
     """)
@@ -50,6 +51,7 @@ while let flag = args.popFirst() {
     case "--critical-slope": params.erosion.criticalSlope = parsed(Double(value))
     case "--knickpoint-slope": params.erosion.knickpointSlope = parsed(Double(value))
     case "--waterfall-retreat": params.erosion.waterfallRetreat = parsed(Double(value))
+    case "--headwall-retreat": params.erosion.headwallRetreat = parsed(Double(value))
     case "--out": outDir = value
     default: usage()
     }
@@ -129,6 +131,7 @@ let info: [String: Any] = [
     "criticalSlope": params.erosion.criticalSlope,
     "knickpointSlope": params.erosion.knickpointSlope,
     "waterfallRetreat": params.erosion.waterfallRetreat,
+    "headwallRetreat": params.erosion.headwallRetreat,
     "landAreaKm2": (landKm2 * 10).rounded() / 10,
     "maxHeightMetres": Double(island.height.range.max),
     "steepFraction": rounded(Double(steep) / Double(Swift.max(land, 1)), 10000),
