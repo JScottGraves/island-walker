@@ -117,6 +117,36 @@ final class IslandGenTests: XCTestCase {
         XCTAssertEqual(Double(buried), 50, accuracy: 2)
     }
 
+    /// Milestone 1 acceptance: the same seed bakes a byte-identical bundle on two runs.
+    func testSameSeedBakesAnIdenticalBundle() throws {
+        func bake(_ url: URL) throws {
+            var p = Island.Params()
+            p.size = 64
+            p.steps = 20
+            let island = Island.generate(p)
+            var rp = Refine.Params()
+            rp.factor = 2
+            rp.seed = p.seed
+            let fine = Refine.refine(island.height, drainageArea: island.drainageArea, seaLevel: 0, params: rp)
+            try IslandBundle.write([("height", fine), ("rain", island.rain), ("drainage", island.drainageArea)],
+                                   seaLevel: 0, to: url, tileSize: 32)
+        }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("determinism-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let a = root.appendingPathComponent("a"), b = root.appendingPathComponent("b")
+        try bake(a)
+        try bake(b)
+        let files = FileManager.default.enumerator(atPath: a.path)!.compactMap { $0 as? String }.sorted()
+        let other = FileManager.default.enumerator(atPath: b.path)!.compactMap { $0 as? String }.sorted()
+        XCTAssertEqual(files, other)
+        XCTAssertGreaterThan(files.count, 10)
+        for f in files {
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: a.appendingPathComponent(f).path, isDirectory: &isDir), !isDir.boolValue else { continue }
+            XCTAssertEqual(try Data(contentsOf: a.appendingPathComponent(f)), try Data(contentsOf: b.appendingPathComponent(f)), f)
+        }
+    }
+
     func testPNGChecksumsMatchKnownValues() {
         XCTAssertEqual(PNG.crc32(Array("IEND".utf8)), 0xAE42_6082)
         XCTAssertEqual(PNG.adler32(Array("Wikipedia".utf8)), 0x11E6_0398)

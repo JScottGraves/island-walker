@@ -10,6 +10,8 @@ func usage() -> Never {
     print("""
     usage: islandgen --score HEIGHT.r32 --cell METRES [--width N] [--sea-level M]
              score an existing float32 heightfield (square unless --width; pits are filled first) and print realism metrics
+           islandgen --import HEIGHT.r32 --cell METRES --bundle DIR [--sea-level M]
+             write a square float32 heightfield, such as the real Oahu DEM, as an island bundle (height and rain; heights kept as they are)
            islandgen [--seed N] [--size N] [--steps N] [--domain METRES] [--deposition G] [--slope-exponent N] [--reference-slope S] [--critical-slope S] [--knickpoint-slope S] [--waterfall-retreat R] [--headwall-retreat R] [--waterfall-min-q Q] [--land-exponent P] [--coast-slope A] [--rift-descent D] [--saddle-fill M] [--pond-time F] [--pond-hardness H] [--pond-share S] [--wave-retreat R] [--leeward-waves S] [--uplift U] [--flexure M] [--flexure-distance M] [--refine N] [--bundle DIR] [--profile] [--out DIR]
       --seed    random seed (default 1)
       --size    grid samples per side (default 1024)
@@ -83,6 +85,37 @@ if args.first == "--score" {
     scored["pitsBeforeFill"] = rawPits
     let json = try JSONSerialization.data(withJSONObject: scored, options: [.prettyPrinted, .sortedKeys])
     print(String(decoding: json, as: UTF8.self))
+    exit(0)
+}
+
+// Import mode: a real DEM as an island bundle, to walk next to the generated islands.
+if args.first == "--import" {
+    var path: String?, cellSize: Double?, seaLevel: Float = 0
+    while let flag = args.popFirst() {
+        guard let value = args.popFirst() else { usage() }
+        switch flag {
+        case "--import": path = value
+        case "--cell": cellSize = parsed(Double(value))
+        case "--bundle": bundleDir = value
+        case "--sea-level": seaLevel = parsed(Float(value))
+        default: usage()
+        }
+    }
+    guard let path, let cellSize, let bundleDir, let data = FileManager.default.contents(atPath: path) else { usage() }
+    let values = data.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
+    let w = Int(Double(values.count).squareRoot())
+    guard w > 0, w * w == values.count else { print("\(path) is not a square float32 grid"); exit(1) }
+    var grid = Grid(width: w, height: w, cellSize: cellSize)
+    grid.values = values
+    // Heights stay as surveyed (harbours and flat floors keep their pits), so the walk is
+    // the real island. Rain comes from the same climate model as the generated islands so
+    // moisture-driven materials compare like for like.
+    let start = Date()
+    let rain = Climate.precipitation(height: grid, seaLevel: seaLevel, params: params.climate)
+    let bundle = try IslandBundle.write([("height", grid), ("rain", rain)], seaLevel: Double(seaLevel),
+                                        to: URL(fileURLWithPath: bundleDir, isDirectory: true))
+    let h = try bundle.channel("height")
+    print(String(format: "wrote bundle %@: height %d² at %.2f m in %d levels, in %.1f s", bundleDir, h.size, h.cellMetres, h.levels, Date().timeIntervalSince(start)))
     exit(0)
 }
 
