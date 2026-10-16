@@ -16,13 +16,15 @@ public enum Atmosphere {
 
     static let rayleighScattering = RGB(5.802e-6, 13.558e-6, 33.1e-6)
     static let rayleighHeight = 8000.0
-    /// Mie aerosol: 15× Hillaire's (very clean) default, an aerosol optical depth of
-    /// ~0.08 like humid trade-wind air with sea salt. With his default the sky light on
-    /// open ground was under 10% of the sun's, about half what clear days measure.
-    static let mieScattering = 15 * 3.996e-6
-    static let mieExtinction = 15 * 4.440e-6
+    /// Mie aerosol: 6× Hillaire's (very clean) default, an aerosol optical depth of
+    /// ~0.03 like clear trade-wind air with some sea salt. His default left sky light on
+    /// open ground under 10% of the sun's; 15× (AOD 0.08) gave the right sky light but a
+    /// white aureole tens of degrees around the sun, more like a hazy or cirrus day.
+    static let mieScattering = 6 * 3.996e-6
+    static let mieExtinction = 6 * 4.440e-6
     static let mieHeight = 1200.0
-    static let mieG = 0.8
+    /// Sea-salt aerosol scatters less sharply forward than continental haze.
+    static let mieG = 0.75
     static let ozoneAbsorption = RGB(0.650e-6, 1.881e-6, 0.085e-6)
     /// Ocean around the island, for light the sea bounces back into the sky.
     static let groundAlbedo = 0.1
