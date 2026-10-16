@@ -232,8 +232,8 @@ fragment float4 skyFragment(SkyOut in [[stage_in]], constant Uniforms &u [[buffe
     float cosSun = dot(dir, normalize(u.sunDirection));
     color += u.sunRadiance * (2000.0 * smoothstep(cos(0.0050), cos(0.0042), cosSun));
     // Below the horizon the view ends on the sea; clouds in between still count.
-    float far = dir.z < 0.0 ? max(u.cameraPosition.z - u.seaLevel, 1.0) / max(-dir.z, 1e-5) : 1e9;
-    color = applyClouds(u, cloudMap, skyView, color, dir, far, in.position.xy);
+    float viewEnd = dir.z < 0.0 ? max(u.cameraPosition.z - u.seaLevel, 1.0) / max(-dir.z, 1e-5) : 1e9;
+    color = applyClouds(u, cloudMap, skyView, color, dir, viewEnd, in.position.xy);
     return float4(pbrNeutral(color * u.exposure), 1.0);
 }
 """
