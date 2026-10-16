@@ -60,7 +60,7 @@ final class InputMTKView: MTKView {
 
 final class Coordinator: NSObject, MTKViewDelegate {
     var renderer: TerrainRenderer?
-    var height: Grid?
+    var height: IslandCore.Grid?  // qualified: SwiftUI also has a Grid
     var walker: Walker?
     var flying = false
     var flyHeight = 0.0
