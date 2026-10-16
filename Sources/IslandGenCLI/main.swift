@@ -13,7 +13,7 @@ func usage() -> Never {
       --size    grid samples per side (default 1024)
       --steps   erosion time steps (default 400)
       --domain  domain edge length in metres (default 80000)
-      --deposition  sediment deposition coefficient G, 0 for none (default 1)
+      --deposition  sediment deposition coefficient G, 0 for none (default 0.3)
       --out     output directory (default ./out)
     """)
     exit(2)

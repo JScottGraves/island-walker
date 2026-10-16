@@ -215,8 +215,10 @@ public enum Viewpoints {
         }
 
         /// The lowland spot with the most relief 2–3.5 km away: standing on a coastal plain
-        /// looking up at a cliff (a pali), far enough back to see its brink. Searches a
-        /// coarse lattice in 24 directions.
+        /// looking up at a cliff (a pali), far enough back to see its brink. The first
+        /// kilometre toward the cliff must stay low, so the camera is on open plain rather
+        /// than in a valley or at the foot of a hummock. Searches a coarse lattice in 24
+        /// directions.
         func cliff() -> (Int, Int)? {
             let stride = 4, directions = 24
             var bestFoot = -1, bestTop = -1, bestRelief: Float = 150
@@ -224,9 +226,18 @@ public enum Viewpoints {
                 for cx in Swift.stride(from: 0, to: h.width, by: stride) {
                     let i = cy * h.width + cx
                     let z = h.values[i] - seaLevel
-                    guard z > 5 && z < 80 else { continue }
+                    guard z > 5 && z < 150 else { continue }
                     for k in 0..<directions {
                         let a = Double(k) * 2 * Double.pi / Double(directions)
+                        var clear = true
+                        var near = h.cellSize
+                        while near <= 1000 && clear {
+                            let nx = cx + Int((cos(a) * near / h.cellSize).rounded())
+                            let ny = cy + Int((sin(a) * near / h.cellSize).rounded())
+                            clear = h.contains(nx, ny) && h.values[ny * h.width + nx] - h.values[i] < 60
+                            near += h.cellSize
+                        }
+                        guard clear else { continue }
                         var d = 2000.0
                         while d <= 3500 {
                             let tx = cx + Int((cos(a) * d / h.cellSize).rounded())

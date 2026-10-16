@@ -22,8 +22,10 @@ public enum StreamPower {
         /// Hillslope diffusivity in m² / yr (soil creep).
         public var diffusivity: Double = 0.02
         /// Dimensionless deposition coefficient G (settling velocity over rain rate).
-        /// 0 is detachment-limited (no deposition); Yuan et al. use values around 1.
-        public var deposition: Double = 1
+        /// 0 is detachment-limited (no deposition). 1 raised the islands by ~65 m on
+        /// average and buried the foot of the pali under a 2–3 km ramp; 0.3 keeps the cliff
+        /// and still builds fans and a coastal plain.
+        public var deposition: Double = 0.3
         /// Uplift (positive) or subsidence (negative) in m / yr, applied to land and sea floor.
         public var uplift: Double = 0
         /// Time step in years.
