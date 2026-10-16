@@ -364,4 +364,26 @@ float cloudShadow(constant Uniforms &u, texture2d<float> cloudMap, float3 p) {
     return mix(0.3, 1.0, exp(-tau));
 }
 
+// The cloud shadow map: sunlight through the layer from the cloud base up, over the
+// island. Marched once per texel each frame instead of once per pixel.
+kernel void cloudShadowMap(constant Uniforms &u [[buffer(0)]],
+                           texture2d<float> cloudMap [[texture(0)]],
+                           texture2d<float, access::write> shadows [[texture(1)]],
+                           uint2 g [[thread_position_in_grid]]) {
+    uint side = shadows.get_width();
+    if (g.x >= side || g.y >= side) return;
+    float2 xy = (float2(g) + 0.5) / float(side) * u.cloudLayer.w;
+    shadows.write(float4(cloudShadow(u, cloudMap, float3(xy, u.cloudLayer.x))), g);
+}
+
+// Sunlight reaching a ground point through the clouds, from the shadow map: follow the
+// sun up to the cloud base and read the transmittance there.
+float cloudSunlight(constant Uniforms &u, texture2d<float> shadows, float3 p) {
+    float3 l = normalize(u.sunDirection);
+    if (l.z <= 0.02 || p.z >= u.cloudLayer.y) return 1.0;
+    float2 xy = p.xy + l.xy * (max(u.cloudLayer.x - p.z, 0.0) / l.z);
+    constexpr sampler s(filter::linear, address::clamp_to_edge);
+    return shadows.sample(s, xy / u.cloudLayer.w).r;
+}
+
 """

@@ -232,6 +232,7 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
                                 texture2d<float> cloudMap [[texture(1)]],
                                 texture2d<float> clouds [[texture(2)]],
                                 texture2d<float> cloudDistance [[texture(3)]],
+                                texture2d<float> cloudShadows [[texture(4)]],
                                 primitive_acceleration_structure terrain [[buffer(2), function_constant(kRayTraced)]]) {
     float3 n = normalize(in.normal);
     float slope = 1.0 - n.z;
@@ -259,7 +260,7 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
         }
     }
     // Cloud shadows drifting over the terrain.
-    float cloudSun = cloudShadow(u, cloudMap, surface);
+    float cloudSun = cloudSunlight(u, cloudShadows, surface);
     sunVisibility *= cloudSun;
     float3 direct = u.sunRadiance * (nDotL * sunVisibility);
     // Sky light from the part of the sky the terrain leaves open.

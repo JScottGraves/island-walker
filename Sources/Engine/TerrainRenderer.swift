@@ -63,6 +63,9 @@ public final class TerrainRenderer {
     let depthFormat: MTLPixelFormat
     let cloudMarch: MTLComputePipelineState
     let cloudResolve: MTLComputePipelineState
+    let cloudShadowPipeline: MTLComputePipelineState
+    /// Sunlight through the cloud layer over the island, from the cloud base up (r16Float).
+    let cloudShadows: MTLTexture
     /// Per-size render targets: terrain depth (read by the cloud march), this frame's
     /// half-resolution clouds, and the two cloud histories the resolve ping-pongs between.
     struct Targets {
@@ -100,8 +103,11 @@ public final class TerrainRenderer {
         public var nodes = 0
         public var residentTiles = 0
         public var loadingTiles = 0
-        /// GPU time of the last completed frame drawn with `draw(in:)`, in milliseconds.
+        /// GPU time of the last completed frame drawn with `draw(in:)`, or of a settled frame
+        /// in `snapshot`, in milliseconds.
         public var gpuMilliseconds = 0.0
+        /// `snapshot` only: depth prepass, clouds (shadow map, march, resolve), shading.
+        public var passMilliseconds: [Double] = []
     }
     /// Which shadow path this renderer uses (ray tracing unless unsupported or declined).
     public let shadows: Shadows
@@ -167,9 +173,17 @@ public final class TerrainRenderer {
         desc.fragmentFunction = library.makeFunction(name: "skyFragment")
         skyPipeline = try device.makeRenderPipelineState(descriptor: desc)
         guard let march = library.makeFunction(name: "cloudMarch"),
-              let resolve = library.makeFunction(name: "cloudResolve") else { throw RendererError.setup("cloud kernels") }
+              let resolve = library.makeFunction(name: "cloudResolve"),
+              let shadowMap = library.makeFunction(name: "cloudShadowMap") else { throw RendererError.setup("cloud kernels") }
         cloudMarch = try device.makeComputePipelineState(function: march)
         cloudResolve = try device.makeComputePipelineState(function: resolve)
+        cloudShadowPipeline = try device.makeComputePipelineState(function: shadowMap)
+        // ~160 m texels over an 80 km island: finer than the cloud shapes.
+        let shadowDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r16Float, width: 512, height: 512, mipmapped: false)
+        shadowDesc.usage = [.shaderRead, .shaderWrite]
+        shadowDesc.storageMode = .private
+        guard let shadowTexture = device.makeTexture(descriptor: shadowDesc) else { throw RendererError.setup("cloud shadow map") }
+        cloudShadows = shadowTexture
 
         let prepassDesc = MTLDepthStencilDescriptor()
         prepassDesc.depthCompareFunction = .less
@@ -402,7 +416,7 @@ public final class TerrainRenderer {
     /// Renders one frame into the view's drawable.
     public func draw(in view: MTKView, eye: SIMD3<Double>, forward: SIMD3<Float>) {
         guard let drawable = view.currentDrawable, let cmd = queue.makeCommandBuffer() else { return }
-        encode(cmd, color: drawable.texture, eye: eye, forward: forward)
+        encode([cmd], color: drawable.texture, eye: eye, forward: forward)
         cmd.present(drawable)
         cmd.addCompletedHandler { [weak self] done in
             let ms = (done.gpuEndTime - done.gpuStartTime) * 1000
@@ -423,20 +437,32 @@ public final class TerrainRenderer {
         colorDesc.usage = [.renderTarget]
         colorDesc.storageMode = .shared
         guard let color = device.makeTexture(descriptor: colorDesc), let cmd = queue.makeCommandBuffer(),
-              let last = queue.makeCommandBuffer()
+              let timed = queue.makeCommandBuffer()
         else { throw RendererError.setup("snapshot targets") }
         // A fresh history, then enough frames at this camera for it to settle.
         historyValid = false
-        for k in 0..<(TerrainRenderer.snapshotFrames - 1) {
+        for k in 0..<TerrainRenderer.snapshotFrames {
             // Load every tile the view needs before the first frame: snapshots don't stream.
-            encode(cmd, color: color, eye: eye, forward: forward, synchronousStreaming: k == 0)
+            encode([cmd], color: color, eye: eye, forward: forward, synchronousStreaming: k == 0)
         }
         cmd.commit()
-        // The last frame on its own, timed: one settled frame, as the app would draw it.
-        encode(last, color: color, eye: eye, forward: forward)
-        last.commit()
-        last.waitUntilCompleted()
-        stats.gpuMilliseconds = (last.gpuEndTime - last.gpuStartTime) * 1000
+        cmd.waitUntilCompleted()
+        // Timing, on an idle GPU: settled frames back to back as the app draws them, then
+        // one frame split into its passes, each run alone.
+        let timedFrames = 8
+        for _ in 0..<timedFrames { encode([timed], color: color, eye: eye, forward: forward) }
+        timed.commit()
+        timed.waitUntilCompleted()
+        stats.gpuMilliseconds = (timed.gpuEndTime - timed.gpuStartTime) * 1000 / Double(timedFrames)
+        let passes = (0..<3).compactMap { _ in queue.makeCommandBuffer() }
+        if passes.count == 3 {
+            encode(passes, color: color, eye: eye, forward: forward)
+            stats.passMilliseconds = passes.map { pass in
+                pass.commit()
+                pass.waitUntilCompleted()
+                return (pass.gpuEndTime - pass.gpuStartTime) * 1000
+            }
+        }
 
         var bgra = [UInt8](repeating: 0, count: width * height * 4)
         bgra.withUnsafeMutableBytes { buf in
@@ -545,8 +571,12 @@ public final class TerrainRenderer {
         }
     }
 
-    private func encode(_ cmd: MTLCommandBuffer, color: MTLTexture, eye: SIMD3<Double>, forward: SIMD3<Float>,
+    /// Encodes one frame. With three command buffers, the depth prepass, the cloud passes and
+    /// the shading pass go one into each, so each can be timed on its own.
+    private func encode(_ cmds: [MTLCommandBuffer], color: MTLTexture, eye: SIMD3<Double>, forward: SIMD3<Float>,
                         synchronousStreaming: Bool = false) {
+        let cmd = cmds[0]
+        let cloudCmd = cmds[Swift.min(1, cmds.count - 1)], shadeCmd = cmds[Swift.min(2, cmds.count - 1)]
         let width = color.width, height = color.height
         if targets?.width != width || targets?.height != height {
             targets = makeTargets(width: width, height: height)
@@ -595,11 +625,17 @@ public final class TerrainRenderer {
         drawTerrain(enc, frame: frameTerrain)
         enc.endEncoding()
 
-        // 2. Clouds at half resolution, marched up to that depth, then blended into the history.
+        // 2. The cloud shadow map, then clouds at half resolution, marched up to that depth
+        // and blended into the history.
         let previous = historyIndex, next = 1 - historyIndex
-        guard let compute = cmd.makeComputeCommandEncoder() else { return }
-        let grid = MTLSize(width: targets.clouds.width, height: targets.clouds.height, depth: 1)
+        guard let compute = cloudCmd.makeComputeCommandEncoder() else { return }
         let group = MTLSize(width: 8, height: 8, depth: 1)
+        compute.setComputePipelineState(cloudShadowPipeline)
+        compute.setBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 0)
+        compute.setTextures([cloudMap, cloudShadows], range: 0..<2)
+        compute.dispatchThreads(MTLSize(width: cloudShadows.width, height: cloudShadows.height, depth: 1),
+                                threadsPerThreadgroup: group)
+        let grid = MTLSize(width: targets.clouds.width, height: targets.clouds.height, depth: 1)
         compute.setComputePipelineState(cloudMarch)
         compute.setBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 0)
         compute.setTextures([targets.depth, skyView, cloudMap, targets.clouds, targets.cloudDistance], range: 0..<5)
@@ -619,12 +655,13 @@ public final class TerrainRenderer {
         pass.depthAttachment.texture = targets.depth
         pass.depthAttachment.loadAction = .load
         pass.depthAttachment.storeAction = .dontCare
-        guard let shade = cmd.makeRenderCommandEncoder(descriptor: pass) else { return }
+        guard let shade = shadeCmd.makeRenderCommandEncoder(descriptor: pass) else { return }
         shade.setRenderPipelineState(skyPipeline)
         shade.setDepthStencilState(skyDepthState)
         shade.setCullMode(.none)
         shade.setFragmentBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 1)
-        shade.setFragmentTextures([skyView, cloudMap, targets.history[next], targets.historyDistance[next]], range: 0..<4)
+        shade.setFragmentTextures([skyView, cloudMap, targets.history[next], targets.historyDistance[next], cloudShadows],
+                                  range: 0..<5)
         shade.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
 
         shade.setRenderPipelineState(pipeline)

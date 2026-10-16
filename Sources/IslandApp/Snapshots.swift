@@ -36,7 +36,7 @@ enum Snapshots {
             let height = try tiles.grid(level: tiles.overviewLevel())
             let dims = option("--size")?.split(separator: "x").compactMap { Int($0) } ?? []
             let (width, rows) = dims.count == 2 ? (dims[0], dims[1]) : (1280, 720)
-            var timings = "view,time,gpu_ms,nodes,tiles\n"
+            var timings = "view,time,gpu_ms,depth_ms,clouds_ms,shade_ms,nodes,tiles\n"
             let day = option("--day").flatMap { Int($0) } ?? SunPath.defaultDay
             let hours = option("--time")?.split(separator: ",").compactMap { Double($0) } ?? []
             // Viewpoint picking needs drainage area; one routing step on a copy gives it.
@@ -80,9 +80,11 @@ enum Snapshots {
                     let url = out.appendingPathComponent(name + ".png")
                     try Data(PNG.encode(rgb: rgb, width: width, height: rows)).write(to: url)
                     let s = renderer.stats
-                    print(String(format: "wrote %@ (GPU %.1f ms, %d nodes, %d tiles)", url.path, s.gpuMilliseconds, s.nodes, s.residentTiles))
-                    timings += String(format: "%@,%@,%.2f,%d,%d\n", view.name, hour.map { String($0) } ?? "reference",
-                                      s.gpuMilliseconds, s.nodes, s.residentTiles)
+                    let passes = s.passMilliseconds.count == 3 ? s.passMilliseconds : [0, 0, 0]
+                    print(String(format: "wrote %@ (GPU %.1f ms: depth %.1f, clouds %.1f, shading %.1f; %d nodes, %d tiles)",
+                                 url.path, s.gpuMilliseconds, passes[0], passes[1], passes[2], s.nodes, s.residentTiles))
+                    timings += String(format: "%@,%@,%.2f,%.2f,%.2f,%.2f,%d,%d\n", view.name, hour.map { String($0) } ?? "reference",
+                                      s.gpuMilliseconds, passes[0], passes[1], passes[2], s.nodes, s.residentTiles)
                 }
             }
             try timings.write(to: out.appendingPathComponent("timings.csv"), atomically: true, encoding: .utf8)
