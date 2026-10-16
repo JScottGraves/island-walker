@@ -103,7 +103,7 @@ public enum VolcanicBase {
         public var hardness: Grid
         public var shields: [ShieldVolcano]
         /// Surface of the lava that later ponds in the saddles between shields (see
-        /// `saddleFill`), or −∞ where the fill adds less than a metre. Not part of `height`:
+        /// `saddleFill`), or −∞ outside the saddle. Not part of `height`:
         /// the pipeline floods it in late in erosion.
         public var ponded: Grid
     }
@@ -189,7 +189,10 @@ public enum VolcanicBase {
                     // The soft maximum is never below the hard one; it adds most where
                     // two shields stand at the same height, i.e. in the saddle between them.
                     let soft = softMax + saddleFill * log(softSum)
-                    if soft - h >= 1 { ponded[x, y] = Float(soft) }
+                    // Only the true saddle, where the blend adds at least a quarter of its
+                    // maximum (0.69 × saddleFill between two equal shields). A looser test
+                    // caught every flank within a kilometre of another shield.
+                    if soft - h >= 0.25 * log(2) * saddleFill { ponded[x, y] = Float(soft) }
                 }
                 // Lava-flow scale roughness (tens of metres). With the concave profile the coastal
                 // plain sits only metres above the sea, so the roughness fades out near sea level
