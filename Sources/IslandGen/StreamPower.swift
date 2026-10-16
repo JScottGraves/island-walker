@@ -68,6 +68,16 @@ public enum StreamPower {
         public var waterfallMinDischarge: Double = 3e5
         /// Uplift (positive) or subsidence (negative) in m / yr, applied to land and sea floor.
         public var uplift: Double = 0
+        /// Sea-cliff retreat by wave attack in m / yr on a coast facing straight into the
+        /// wind. Without it, every coast grades down to a near-flat fringe at sea level,
+        /// where Oahu's coast rises at about 5° (6° on the windward side). 0.004 gives the
+        /// 600 m coastal belt Oahu's 4.8° mean slope on seeds 7, 42 and 123. 0 disables it.
+        public var waveRetreat: Double = 0.004
+        /// Share of `waveRetreat` that coasts facing away from the wind still get (swell
+        /// wraps around an island).
+        public var leewardWaves: Double = 0.2
+        /// Direction the wind blows towards, in radians (Climate.Params.windDirection).
+        public var windDirection: Double = 5 * Double.pi / 4
         /// Time step in years.
         public var timeStep: Double = 2000
         public var seaLevel: Float = 0
@@ -377,6 +387,38 @@ public enum StreamPower {
                                     cap = Swift.min(cap, Swift.max(old[j], sea) + sc * Float(D8.distance[k]))
                                 }
                                 hv[i] = cap
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4d. Wave-cut retreat: a land cell next to the sea is cut down towards just below
+        //     sea level by retreat distance over cell spacing, faster where its sea
+        //     neighbour lies upwind. The coast steps back as a cliff, and the cut material
+        //     is carried off by longshore currents rather than deposited.
+        if params.waveRetreat > 0 {
+            let rate = params.waveRetreat * dt / cell
+            let upwind = (-cos(params.windDirection), -sin(params.windDirection))
+            let leeward = params.leewardWaves
+            let floor = sea - 1
+            phase("waves") {
+                let old = h.values
+                h.values.withUnsafeMutableBufferPointer { hBuf in
+                    let hv = SharedBuffer(hBuf)
+                    Parallel.forRanges(rows - 2) { rowRange in
+                        for y in (rowRange.lowerBound + 1)..<(rowRange.upperBound + 1) {
+                            for x in 1..<(w - 1) {
+                                let i = y * w + x
+                                if old[i] <= sea { continue }
+                                var fraction = 0.0
+                                for k in 0..<8 where old[(y + D8.dy[k]) * w + (x + D8.dx[k])] <= sea {
+                                    let facing = (Double(D8.dx[k]) * upwind.0 + Double(D8.dy[k]) * upwind.1) / D8.distance[k]
+                                    let exposure = leeward + (1 - leeward) * Swift.max(0, facing)
+                                    fraction = Swift.max(fraction, Swift.min(1, rate * exposure / D8.distance[k]))
+                                }
+                                if fraction > 0 { hv[i] = old[i] - Float(fraction) * (old[i] - floor) }
                             }
                         }
                     }

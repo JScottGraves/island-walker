@@ -37,6 +37,19 @@ public struct ShieldVolcano: Sendable {
         return best
     }
 
+    /// Distances to the summit point and to each rift segment, with how far along its rift
+    /// the nearest point of each segment lies (0 at the summit, 1 at the rift's tip).
+    func skeletonParts(_ px: Double, _ py: Double) -> [(distance: Double, along: Double)] {
+        var parts = [(((px - x) * (px - x) + (py - y) * (py - y)).squareRoot(), 0.0)]
+        for (a, len) in zip(riftAngles, riftLengths) {
+            let dx = cos(a), dy = sin(a)
+            let t = Swift.min(Swift.max((px - x) * dx + (py - y) * dy, 0), len)
+            let qx = x + dx * t, qy = y + dy * t
+            parts.append((((px - qx) * (px - qx) + (py - qy) * (py - qy)).squareRoot(), len > 0 ? t / len : 0))
+        }
+        return parts
+    }
+
     /// Distance to the rift segments alone (not the summit). Dikes cluster here.
     func riftDistance(_ px: Double, _ py: Double) -> Double {
         var best = Double.infinity
@@ -102,9 +115,17 @@ public enum VolcanicBase {
     ///     and coastal plains, like Oahu (2 gives a hypsometric integral near Oahu's 0.18).
     ///     The coastline sits where the classic profile put it, and below sea level the flank
     ///     drops at `submarineSlope` to the sea floor.
+    ///   - coastSlope: share of a straight cone mixed into the concave land profile. 0 leaves
+    ///     the land flattening to nothing at the shore, a ring of near-flat coastal plain;
+    ///     above 0 the land still rises from the sea at a few degrees, as Oahu's does, and the
+    ///     flat ground is left in the saddles between shields.
+    ///   - riftDescent: how far each rift crest drops from the summit to its tip, as a share of
+    ///     the summit height. 0 keeps the crest level along the whole rift, which leaves long
+    ///     broad summits; real rift ridges fall away from the caldera.
     public static func generate(seed: UInt64, size: Int, domainSize: Double, seaFloor: Double = -1800,
                                 shields: [ShieldVolcano]? = nil, landExponent: Double = 2,
-                                submarineSlope: Double = 0.15) -> Output {
+                                submarineSlope: Double = 0.15, coastSlope: Double = 0,
+                                riftDescent: Double = 0) -> Output {
         let cell = domainSize / Double(size)
         let volcanoes = shields ?? randomShields(seed: seed, domainSize: domainSize)
         var height = Grid(width: size, height: size, cellSize: cell)
@@ -122,17 +143,20 @@ public enum VolcanicBase {
                 var h = seaFloor
                 var riftNear = Double.infinity
                 for v in volcanoes {
-                    let d = v.skeletonDistance(wx, wy) / v.radius
                     if landExponent > 0 {
                         // Same coastline as the classic profile, a concave land surface above it.
                         let top = v.summitHeight + seaFloor
                         let shore = v.radius * pow(log(v.summitHeight / -seaFloor) / 3, 1 / 1.4)
-                        let r = d * v.radius
-                        let shield = r < shore
-                            ? top * pow(1 - r / shore, landExponent)
-                            : Swift.max(seaFloor, submarineDepth(r - shore, slope: submarineSlope))
-                        h = Swift.max(h, shield)
+                        for (r, along) in v.skeletonParts(wx, wy) {
+                            let crest = top * (1 - riftDescent * along)
+                            let u = r / shore
+                            let shield = u < 1
+                                ? crest * ((1 - coastSlope) * pow(1 - u, landExponent) + coastSlope * (1 - u))
+                                : Swift.max(seaFloor, submarineDepth(r - shore, slope: submarineSlope))
+                            h = Swift.max(h, shield)
+                        }
                     } else {
+                        let d = v.skeletonDistance(wx, wy) / v.radius
                         // Shield profile: convex near the summit, long gentle apron at the base.
                         let profile = exp(-3.0 * pow(d, 1.4))
                         h = Swift.max(h, seaFloor + v.summitHeight * profile)
