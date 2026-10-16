@@ -21,6 +21,9 @@ public final class TerrainRenderer {
                     SIMD4<Float>, SIMD4<Float>, SIMD4<Float>, SIMD4<Float>)
         var cloudLayer: SIMD4<Float>
         var cloudWind: SIMD4<Float>
+        var previousViewProjection: simd_float4x4
+        var previousCamera: SIMD4<Float>
+        var frame: SIMD4<Float>
     }
 
     /// How terrain casts sun shadows.
@@ -40,6 +43,23 @@ public final class TerrainRenderer {
     let depthPipeline: MTLRenderPipelineState
     let prepassDepthState: MTLDepthStencilState
     let skyDepthState: MTLDepthStencilState
+    let depthFormat: MTLPixelFormat
+    let cloudMarch: MTLComputePipelineState
+    let cloudResolve: MTLComputePipelineState
+    /// Per-size render targets: terrain depth (read by the cloud march), this frame's
+    /// half-resolution clouds, and the two cloud histories the resolve ping-pongs between.
+    struct Targets {
+        let width: Int, height: Int
+        let depth: MTLTexture
+        let clouds: MTLTexture, cloudDistance: MTLTexture
+        let history: [MTLTexture], historyDistance: [MTLTexture]
+    }
+    var targets: Targets?
+    var historyIndex = 0
+    var historyValid = false
+    var frameNumber = 0
+    var previousViewProjection = matrix_identity_float4x4
+    var previousCamera = SIMD3<Float>(0, 0, 0)
     let vertices: MTLBuffer
     let indices: MTLBuffer
     let indexCount: Int
@@ -81,6 +101,7 @@ public final class TerrainRenderer {
         self.queue = queue
         self.seaLevel = seaLevel
         self.maxHeight = height.range.max
+        self.depthFormat = depthFormat
 
         let shadows: Shadows = requested == .rayTraced && device.supportsRaytracingFromRender ? .rayTraced : .horizonMap
         self.shadows = shadows
@@ -99,12 +120,16 @@ public final class TerrainRenderer {
         // Depth only: the terrain is shaded (with its cloud march) once per pixel, not once
         // per overlapping triangle, and the sky only where the terrain leaves it uncovered.
         desc.fragmentFunction = nil
-        desc.colorAttachments[0].writeMask = []
+        desc.colorAttachments[0].pixelFormat = .invalid  // a pass of its own, with no colour target
         depthPipeline = try device.makeRenderPipelineState(descriptor: desc)
-        desc.colorAttachments[0].writeMask = .all
+        desc.colorAttachments[0].pixelFormat = colorFormat
         desc.vertexFunction = library.makeFunction(name: "skyVertex")
         desc.fragmentFunction = library.makeFunction(name: "skyFragment")
         skyPipeline = try device.makeRenderPipelineState(descriptor: desc)
+        guard let march = library.makeFunction(name: "cloudMarch"),
+              let resolve = library.makeFunction(name: "cloudResolve") else { throw RendererError.setup("cloud kernels") }
+        cloudMarch = try device.makeComputePipelineState(function: march)
+        cloudResolve = try device.makeComputePipelineState(function: resolve)
 
         let prepassDesc = MTLDepthStencilDescriptor()
         prepassDesc.depthCompareFunction = .less
@@ -267,37 +292,30 @@ public final class TerrainRenderer {
 
     /// Renders one frame into the view's drawable.
     public func draw(in view: MTKView, eye: SIMD3<Double>, forward: SIMD3<Float>) {
-        guard let pass = view.currentRenderPassDescriptor, let drawable = view.currentDrawable,
-              let cmd = queue.makeCommandBuffer() else { return }
-        let size = view.drawableSize
-        encode(cmd, pass: pass, aspect: Float(size.width / Swift.max(size.height, 1)), eye: eye, forward: forward)
+        guard let drawable = view.currentDrawable, let cmd = queue.makeCommandBuffer() else { return }
+        encode(cmd, color: drawable.texture, eye: eye, forward: forward)
         cmd.present(drawable)
         cmd.commit()
     }
 
-    /// Renders one frame offscreen and returns it as 8-bit RGB, top row first.
+    /// Number of frames a snapshot renders at one camera so the cloud history converges.
+    public static let snapshotFrames = 24
+
+    /// Renders a view offscreen and returns it as 8-bit RGB, top row first: `snapshotFrames`
+    /// frames at the same camera, so the clouds look as they do in the running app.
     /// Lets tools and CI inspect what the app draws without a window or screen capture.
     public func snapshot(width: Int, height: Int, eye: SIMD3<Double>, forward: SIMD3<Float>,
                          colorFormat: MTLPixelFormat = .bgra8Unorm_srgb) throws -> [UInt8] {
         let colorDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: colorFormat, width: width, height: height, mipmapped: false)
         colorDesc.usage = [.renderTarget]
         colorDesc.storageMode = .shared
-        let depthDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .depth32Float, width: width, height: height, mipmapped: false)
-        depthDesc.usage = [.renderTarget]
-        depthDesc.storageMode = .private
-        guard let color = device.makeTexture(descriptor: colorDesc), let depth = device.makeTexture(descriptor: depthDesc),
-              let cmd = queue.makeCommandBuffer() else { throw RendererError.setup("snapshot targets") }
-
-        let pass = MTLRenderPassDescriptor()
-        pass.colorAttachments[0].texture = color
-        pass.colorAttachments[0].loadAction = .clear
-        pass.colorAttachments[0].storeAction = .store
-        pass.colorAttachments[0].clearColor = TerrainRenderer.skyClearColor
-        pass.depthAttachment.texture = depth
-        pass.depthAttachment.loadAction = .clear
-        pass.depthAttachment.storeAction = .dontCare
-        pass.depthAttachment.clearDepth = 1
-        encode(cmd, pass: pass, aspect: Float(width) / Float(height), eye: eye, forward: forward)
+        guard let color = device.makeTexture(descriptor: colorDesc), let cmd = queue.makeCommandBuffer()
+        else { throw RendererError.setup("snapshot targets") }
+        // A fresh history, then enough frames at this camera for it to settle.
+        historyValid = false
+        for _ in 0..<TerrainRenderer.snapshotFrames {
+            encode(cmd, color: color, eye: eye, forward: forward)
+        }
         cmd.commit()
         cmd.waitUntilCompleted()
 
@@ -314,9 +332,33 @@ public final class TerrainRenderer {
         return rgb
     }
 
-    private func encode(_ cmd: MTLCommandBuffer, pass: MTLRenderPassDescriptor, aspect: Float,
-                        eye: SIMD3<Double>, forward: SIMD3<Float>) {
-        guard let enc = cmd.makeRenderCommandEncoder(descriptor: pass) else { return }
+    func makeTargets(width: Int, height: Int) -> Targets? {
+        let depthDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: depthFormat, width: width, height: height, mipmapped: false)
+        depthDesc.usage = [.renderTarget, .shaderRead]
+        depthDesc.storageMode = .private
+        let halfWidth = (width + 1) / 2, halfHeight = (height + 1) / 2
+        func half(_ format: MTLPixelFormat) -> MTLTexture? {
+            let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: format, width: halfWidth, height: halfHeight, mipmapped: false)
+            d.usage = [.shaderRead, .shaderWrite]
+            d.storageMode = .private
+            return device.makeTexture(descriptor: d)
+        }
+        guard let depth = device.makeTexture(descriptor: depthDesc),
+              let clouds = half(.rgba16Float), let cloudDistance = half(.rg32Float),
+              let h0 = half(.rgba16Float), let h1 = half(.rgba16Float),
+              let d0 = half(.rg32Float), let d1 = half(.rg32Float) else { return nil }
+        return Targets(width: width, height: height, depth: depth, clouds: clouds, cloudDistance: cloudDistance,
+                       history: [h0, h1], historyDistance: [d0, d1])
+    }
+
+    private func encode(_ cmd: MTLCommandBuffer, color: MTLTexture, eye: SIMD3<Double>, forward: SIMD3<Float>) {
+        let width = color.width, height = color.height
+        if targets?.width != width || targets?.height != height {
+            targets = makeTargets(width: width, height: height)
+            historyValid = false
+        }
+        guard let targets else { return }
+        let aspect = Float(width) / Float(Swift.max(height, 1))
         let proj = Matrix.perspective(fovY: 60 * .pi / 180, aspect: aspect, near: 0.3, far: 150_000)
         let viewProjection = proj * Matrix.lookDirection(forward)
         func f3(_ c: RGB) -> SIMD3<Float> { SIMD3(Float(c.r), Float(c.g), Float(c.b)) }
@@ -336,10 +378,19 @@ public final class TerrainRenderer {
                               // Wrapped to keep the noise coordinates small enough for Float.
                               Float(clock.truncatingRemainder(dividingBy: 86_400 * 4)), domainSize),
             cloudWind: SIMD4(Float(cos(windDirection) * windSpeed), Float(sin(windDirection) * windSpeed),
-                             Float(orographicGain), 0))
+                             Float(orographicGain), 0),
+            previousViewProjection: previousViewProjection,
+            previousCamera: SIMD4(previousCamera, 0),
+            frame: SIMD4(Float(width), Float(height), Float(frameNumber % 4096), historyValid ? 1 : 0))
         let skyView = skyViews[skyViewIndex]
 
         // 1. Terrain depth.
+        let depthPass = MTLRenderPassDescriptor()
+        depthPass.depthAttachment.texture = targets.depth
+        depthPass.depthAttachment.loadAction = .clear
+        depthPass.depthAttachment.storeAction = .store
+        depthPass.depthAttachment.clearDepth = 1
+        guard let enc = cmd.makeRenderCommandEncoder(descriptor: depthPass) else { return }
         enc.setRenderPipelineState(depthPipeline)
         enc.setDepthStencilState(prepassDepthState)
         enc.setCullMode(.none)
@@ -348,25 +399,58 @@ public final class TerrainRenderer {
         enc.setVertexBuffer(horizons, offset: 0, index: 2)
         enc.drawIndexedPrimitives(type: .triangle, indexCount: indexCount, indexType: .uint32,
                                   indexBuffer: indices, indexBufferOffset: 0)
-
-        // 2. Sky where nothing covers it.
-        enc.setRenderPipelineState(skyPipeline)
-        enc.setDepthStencilState(skyDepthState)
-        enc.setFragmentBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 1)
-        enc.setFragmentTexture(skyView, index: 0)
-        enc.setFragmentTexture(cloudMap, index: 1)
-        enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
-
-        // 3. Terrain shading, only for the nearest surface.
-        enc.setRenderPipelineState(pipeline)
-        enc.setDepthStencilState(depthState)
-        if let terrainAccel {
-            enc.setFragmentAccelerationStructure(terrainAccel, bufferIndex: 2)
-            enc.useResource(terrainAccel, usage: .read, stages: .fragment)
-        }
-        enc.drawIndexedPrimitives(type: .triangle, indexCount: indexCount, indexType: .uint32,
-                                  indexBuffer: indices, indexBufferOffset: 0)
         enc.endEncoding()
+
+        // 2. Clouds at half resolution, marched up to that depth, then blended into the history.
+        let previous = historyIndex, next = 1 - historyIndex
+        guard let compute = cmd.makeComputeCommandEncoder() else { return }
+        let grid = MTLSize(width: targets.clouds.width, height: targets.clouds.height, depth: 1)
+        let group = MTLSize(width: 8, height: 8, depth: 1)
+        compute.setComputePipelineState(cloudMarch)
+        compute.setBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 0)
+        compute.setTextures([targets.depth, skyView, cloudMap, targets.clouds, targets.cloudDistance], range: 0..<5)
+        compute.dispatchThreads(grid, threadsPerThreadgroup: group)
+        compute.setComputePipelineState(cloudResolve)
+        compute.setTextures([targets.clouds, targets.cloudDistance, targets.history[previous], targets.historyDistance[previous],
+                             targets.history[next], targets.historyDistance[next]], range: 0..<6)
+        compute.dispatchThreads(grid, threadsPerThreadgroup: group)
+        compute.endEncoding()
+
+        // 3. Sky where nothing covers it, then the terrain's nearest surface, both with clouds.
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = color
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].storeAction = .store
+        pass.colorAttachments[0].clearColor = TerrainRenderer.skyClearColor
+        pass.depthAttachment.texture = targets.depth
+        pass.depthAttachment.loadAction = .load
+        pass.depthAttachment.storeAction = .dontCare
+        guard let shade = cmd.makeRenderCommandEncoder(descriptor: pass) else { return }
+        shade.setRenderPipelineState(skyPipeline)
+        shade.setDepthStencilState(skyDepthState)
+        shade.setCullMode(.none)
+        shade.setFragmentBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 1)
+        shade.setFragmentTextures([skyView, cloudMap, targets.history[next], targets.historyDistance[next]], range: 0..<4)
+        shade.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+
+        shade.setRenderPipelineState(pipeline)
+        shade.setDepthStencilState(depthState)
+        shade.setVertexBuffer(vertices, offset: 0, index: 0)
+        shade.setVertexBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 1)
+        shade.setVertexBuffer(horizons, offset: 0, index: 2)
+        if let terrainAccel {
+            shade.setFragmentAccelerationStructure(terrainAccel, bufferIndex: 2)
+            shade.useResource(terrainAccel, usage: .read, stages: .fragment)
+        }
+        shade.drawIndexedPrimitives(type: .triangle, indexCount: indexCount, indexType: .uint32,
+                                    indexBuffer: indices, indexBufferOffset: 0)
+        shade.endEncoding()
+
+        historyIndex = next
+        historyValid = true
+        frameNumber += 1
+        previousViewProjection = viewProjection
+        previousCamera = u.cameraPosition
     }
 }
 
