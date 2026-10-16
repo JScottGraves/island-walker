@@ -1,35 +1,28 @@
 import Foundation
 
-/// The light a sun position gives: direction, sun radiance after the atmosphere, sky
-/// irradiance, haze tint and exposure, all pre-exposed like `Look`'s constants.
-public struct SunLight: Sendable, Equatable {
+/// The light a sun position gives, from the `Atmosphere` model, pre-exposed like
+/// `Look`'s constants: the reference sun's sunlight has the luminance of `Look.sun`.
+public struct SunLight: Sendable {
     /// Towards the sun (x east, y north, z up), unit length.
     public var direction: (x: Double, y: Double, z: Double)
-    /// Sun radiance, reddened and dimmed by the air mass at this elevation.
+    /// Sunlight on a surface facing the sun, after the atmosphere.
     public var sun: RGB
-    /// Sky irradiance on open horizontal ground.
+    /// Sky irradiance on open horizontal ground (for exposure and the CPU views).
     public var sky: RGB
-    /// Multiplies the haze (horizon) and zenith sky colours.
-    public var hazeTint: RGB
-    public var zenithTint: RGB
+    /// Sky irradiance for any normal, as spherical harmonics (`Atmosphere.irradianceSH`).
+    public var skySH: [RGB]
+    /// Sky radiance in every direction (`Atmosphere.skyViewSize`, row-major).
+    public var skyView: [RGB]
     /// Scale applied before tone mapping: partial eye adaptation, so dawn and dusk read
     /// darker than noon without going black.
     public var exposure: Double
 
-    public static func == (a: SunLight, b: SunLight) -> Bool {
-        a.direction == b.direction && a.sun == b.sun && a.sky == b.sky
-            && a.hazeTint == b.hazeTint && a.zenithTint == b.zenithTint && a.exposure == b.exposure
-    }
-
-    /// The fixed sun every render used before the sun moved; matches `Look`'s constants
-    /// exactly, so renders at this sun compare one-to-one with older ones.
+    /// The fixed sun older renders used, for before/after comparisons.
     public static var reference: SunLight { SunPath.light(direction: Look.sunDirection) }
 }
 
 /// Where the sun is over the island at a given hour and day, and what light that gives
-/// (research/global-illumination.md §3, §5). A stand-in for the Hillaire sky model: an
-/// analytic air-mass transmittance for the sun and a simple elevation curve for the sky,
-/// both normalised so `Look.sunDirection` gives back `Look.sun` and `Look.sky`.
+/// (research/global-illumination.md §3, §5), with sunlight and sky from `Atmosphere`.
 public enum SunPath {
     /// Oʻahu's latitude.
     public static let latitude = 21.4
@@ -46,50 +39,39 @@ public enum SunPath {
                 sin(phi) * sin(declination) + cos(phi) * cos(declination) * cos(h))
     }
 
-    /// Optical depth at the zenith per channel (~650, 550, 450 nm): Rayleigh plus a humid
-    /// maritime aerosol load.
-    static let opticalDepth = RGB(0.13, 0.20, 0.36)
-
-    /// Relative air mass (Kasten & Young 1989), finite down to the horizon.
-    static func airMass(sinElevation s: Double) -> Double {
-        let e = asin(Swift.max(-1, Swift.min(1, s))) * 180 / .pi
-        let clamped = Swift.max(e, 0)
-        return 1 / (sin(clamped * .pi / 180) + 0.50572 * pow(clamped + 6.07995, -1.6364))
-    }
-
-    static func transmittance(sinElevation s: Double) -> RGB {
-        let m = airMass(sinElevation: s)
-        return RGB(exp(-opticalDepth.r * m), exp(-opticalDepth.g * m), exp(-opticalDepth.b * m))
-    }
-
-    /// Sky brightness relative to the reference sun: falls with the sun, still lit in
-    /// civil twilight, dark by 6° below the horizon.
-    static func skyLevel(sinElevation s: Double) -> Double {
-        (Swift.max(0, s + 0.1) / (Look.sunDirection.z + 0.1)).squareRoot()
-    }
+    /// Scale from the atmosphere's units (sun irradiance 1 above the atmosphere) to the
+    /// renderer's pre-exposed irradiance over π.
+    static let scale: Double = {
+        let ref = Atmosphere.sunIrradiance(sinElevation: Look.sunDirection.z)
+        return luminance(Look.sun) / luminance(ref)
+    }()
 
     static func luminance(_ c: RGB) -> Double { 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b }
 
+    /// Horizontal illuminance the eye adapts to; the reference sun's is the fixed point.
+    static func adaptationLevel(sun: RGB, sky: RGB, sinElevation s: Double) -> Double {
+        luminance(sun) * Swift.max(0, s) + luminance(sky)
+    }
+
+    static let referenceLevel: Double = {
+        let s = Look.sunDirection
+        let sky = Atmosphere.evaluateSH(Atmosphere.irradianceSH(skyView: Atmosphere.skyView(sun: s)), (0, 0, 1)) * scale
+        return adaptationLevel(sun: Atmosphere.sunIrradiance(sinElevation: s.z) * scale, sky: sky, sinElevation: s.z)
+    }()
+
     public static func light(direction d: (x: Double, y: Double, z: Double)) -> SunLight {
-        let s = d.z
-        let ref = Look.sunDirection.z
-        let t = transmittance(sinElevation: s), t0 = transmittance(sinElevation: ref)
         // The disc sinks below the horizon over about half a degree.
-        let disc = Look.smoothstep(-0.006, 0.006, s)
-        let sun = Look.sun * RGB(t.r / t0.r, t.g / t0.g, t.b / t0.b) * disc
-        let level = skyLevel(sinElevation: s)
-        let sky = Look.sky * level
-        // Low sun: warm haze along the horizon, a deeper zenith.
-        let low = 1 - Look.smoothstep(0.05, 0.4, s)
-        let hazeTint = RGB(1, 1, 1).mix(RGB(1.25, 0.95, 0.75), low) * level
-        let zenithTint = RGB(1, 1, 1).mix(RGB(0.8, 0.85, 1.0), low) * level
-        // Horizontal illuminance relative to the reference; adapt to the square root of
-        // the change, capped so night doesn't get amplified into grey.
-        let e = luminance(sun) * Swift.max(0, s) + luminance(sky)
-        let e0 = luminance(Look.sun) * ref + luminance(Look.sky)
-        let exposure = Swift.min(6, Swift.max(0.8, pow(e0 / Swift.max(e, 1e-4), 0.5)))
-        return SunLight(direction: d, sun: sun, sky: sky, hazeTint: hazeTint, zenithTint: zenithTint,
-                        exposure: exposure)
+        let disc = Look.smoothstep(-0.006, 0.006, d.z)
+        let sun = Atmosphere.sunIrradiance(sinElevation: Swift.max(d.z, 0.004)) * (scale * disc)
+        // The shader lights terrain with albedo · E rather than albedo · E / π (the π is in
+        // `scale`), so radiance seen directly takes the π back.
+        let skyView = Atmosphere.skyView(sun: d).map { $0 * (scale * Double.pi) }
+        let skySH = Atmosphere.irradianceSH(skyView: skyView).map { $0 * (1 / Double.pi) }
+        let sky = Atmosphere.evaluateSH(skySH, (0, 0, 1))
+        // Adapt to the square root of the change, capped so night isn't amplified to grey.
+        let level = adaptationLevel(sun: sun, sky: sky, sinElevation: d.z)
+        let exposure = Swift.min(8, Swift.max(0.8, pow(referenceLevel / Swift.max(level, 1e-5), 0.5)))
+        return SunLight(direction: d, sun: sun, sky: sky, skySH: skySH, skyView: skyView, exposure: exposure)
     }
 
     public static func light(hour: Double, day: Int = defaultDay) -> SunLight {
