@@ -8,7 +8,12 @@ import IslandCore
 ///
 ///     dh/dt = U − K · A^m · S^n + G · Qs / Q + Kd · ∇²h
 ///
-/// with n = 1, A the rain-weighted upstream drainage area, S the slope to the receiver.
+/// with A the rain-weighted upstream drainage area and S the slope to the receiver.
+/// n > 1 makes steep reaches erode disproportionately fast, so a step in a river profile
+/// (a waterfall at a landslide scarp) stays sharp and retreats upstream instead of
+/// smoothing out: the knickpoint mechanism behind Hawaiian amphitheater-headed valleys
+/// (Lamb et al. 2007; research/hawaiian-geology.md §4). For n ≠ 1 the implicit update is
+/// solved per cell by Newton's method (Braun & Willett 2013, eq. 23).
 /// The G term is deposition (Yuan et al. 2019, "A new efficient method to solve the
 /// stream power law model taking into account sediment deposition"): sediment settles at
 /// G · p · Qs / Q (p local rain, Qs sediment flux, Q discharge), so small, loaded streams
@@ -17,9 +22,16 @@ import IslandCore
 /// This is the reference CPU implementation; a Metal port comes after it is validated.
 public enum StreamPower {
     public struct Params: Sendable {
-        /// Fluvial erodibility. Units with m = 0.5: m^(1-2m) / yr = 1 / yr.
+        /// Fluvial erodibility, defined at n = 1, m = 0.5 (units 1 / yr with rain-weighted
+        /// area). Other exponents are rescaled so a channel with `referenceDischarge` and
+        /// `referenceSlope` erodes at the same rate whatever m and n are.
         public var erodibility: Double = 5e-6
         public var areaExponent: Double = 0.5
+        /// Slope exponent n. 1 is linear; 1.5–2 keeps knickpoints sharp.
+        public var slopeExponent: Double = 1
+        /// Rain-weighted drainage area (m³/yr) and slope at which m and n leave the rate unchanged.
+        public var referenceDischarge: Double = 1e7
+        public var referenceSlope: Double = 0.1
         /// Hillslope diffusivity in m² / yr (soil creep).
         public var diffusivity: Double = 0.02
         /// Dimensionless deposition coefficient G (settling velocity over rain rate).
@@ -183,6 +195,10 @@ public enum StreamPower {
         let beforeIncision = params.deposition > 0 ? h.values : []
         let hardnessValues = hardness?.values
         let areaValues = area.values
+        let n = params.slopeExponent
+        let linear = n == 1 && params.areaExponent == 0.5
+        let areaScale = pow(params.referenceDischarge, 0.5)
+        let slopeScale = pow(params.referenceSlope, 1 - n)
         phase("incision") {
             h.values.withUnsafeMutableBufferPointer { hBuf in
                 let hv = SharedBuffer(hBuf)
@@ -192,10 +208,30 @@ public enum StreamPower {
                         if r == i { continue }
                         var k = params.erodibility
                         if let hardnessValues { k /= Double(hardnessValues[i]) }
-                        let f = Float(k * dt * pow(Double(areaValues[i]), params.areaExponent) / distances[i])
                         // Rivers cut down to sea level at the coast, not to the depth of the sea floor.
                         let base = Swift.max(hv[r], sea)
-                        hv[i] = (hv[i] + f * base) / (1 + f)
+                        if linear {
+                            let f = Float(k * dt * pow(Double(areaValues[i]), params.areaExponent) / distances[i])
+                            hv[i] = (hv[i] + f * base) / (1 + f)
+                        } else {
+                            let h0 = Double(hv[i]), b = Double(base)
+                            guard h0 > b else { continue }
+                            let a = Double(areaValues[i]) / params.referenceDischarge
+                            let f = k * dt * areaScale * pow(Swift.max(a, 0), params.areaExponent)
+                                * slopeScale / pow(distances[i], n)
+                            // Solve x − h0 + f · (x − b)^n = 0 for x in (b, h0]; the function is
+                            // increasing and convex there, so Newton from h0 converges from above.
+                            var x = h0
+                            for _ in 0..<20 {
+                                let d = x - b
+                                let g = x - h0 + f * pow(d, n)
+                                let dg = 1 + n * f * pow(d, n - 1)
+                                let next = Swift.max(b + 1e-9, x - g / dg)
+                                if abs(next - x) < 1e-4 { x = next; break }
+                                x = next
+                            }
+                            hv[i] = Float(x)
+                        }
                     }
                 }
             }

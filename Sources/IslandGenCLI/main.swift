@@ -8,12 +8,13 @@ import IslandGen
 
 func usage() -> Never {
     print("""
-    usage: islandgen [--seed N] [--size N] [--steps N] [--domain METRES] [--deposition G] [--profile] [--out DIR]
+    usage: islandgen [--seed N] [--size N] [--steps N] [--domain METRES] [--deposition G] [--slope-exponent N] [--profile] [--out DIR]
       --seed    random seed (default 1)
       --size    grid samples per side (default 1024)
       --steps   erosion time steps (default 400)
       --domain  domain edge length in metres (default 80000)
       --deposition  sediment deposition coefficient G, 0 for none (default 0.3)
+      --slope-exponent  stream power slope exponent n, area exponent follows as n/2 (default 1)
       --profile print time spent in each pipeline phase
       --out     output directory (default ./out)
     """)
@@ -38,6 +39,9 @@ while let flag = args.popFirst() {
     case "--steps": params.steps = parsed(Int(value))
     case "--domain": params.domainSize = parsed(Double(value))
     case "--deposition": params.erosion.deposition = parsed(Double(value))
+    case "--slope-exponent":
+        params.erosion.slopeExponent = parsed(Double(value))
+        params.erosion.areaExponent = params.erosion.slopeExponent / 2
     case "--out": outDir = value
     default: usage()
     }
@@ -111,6 +115,8 @@ let info: [String: Any] = [
     "domainMetres": params.domainSize,
     "cellMetres": island.height.cellSize,
     "steps": params.steps,
+    "slopeExponent": params.erosion.slopeExponent,
+    "deposition": params.erosion.deposition,
     "landAreaKm2": (landKm2 * 10).rounded() / 10,
     "maxHeightMetres": Double(island.height.range.max),
     "steepFraction": rounded(Double(steep) / Double(Swift.max(land, 1)), 10000),
