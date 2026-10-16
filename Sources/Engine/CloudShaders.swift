@@ -184,8 +184,11 @@ float cloudDensity(constant Uniforms &u, texture2d<float> cloudMap, texture3d<fl
         // doesn't: Heus & Jonker 2008), at three scales: real cloud edges are ragged at
         // every scale (Lovejoy 1982), so a big cloud needs big bites as well as small ones.
         // Each octave fades out once a texel spans its finest Worley cells (tile / 8).
-        float tile = kCloudDetailTile;
-        for (int o = 0; o < 3; o++, tile *= 3.0) {
+        // Coarse first, gently, so it bites big clouds without erasing small ones; the
+        // finest last, so its billows sit on the final edge.
+        float tile = kCloudDetailTile * 9.0;
+        const float strength[3] = { 0.12, 0.2, 0.3 };
+        for (int o = 0; o < 3; o++, tile /= 3.0) {
             if (d <= 0.0 || d >= 0.9) break;
             float fade = 1.0 - smoothstep(tile / 16.0, tile / 8.0, scale);
             if (fade <= 0.0) continue;
@@ -199,7 +202,7 @@ float cloudDensity(constant Uniforms &u, texture2d<float> cloudMap, texture3d<fl
             // Inverted Worley low in the cloud tears it into wisps; plain Worley higher up
             // leaves rounded billows (Schneider 2015).
             float erosion = mix(1.0 - fine, fine, saturate(hn * 4.0));
-            d = saturate(remapRange(d, 0.3 * fade * erosion, 1.0, 0.0, 1.0));
+            d = saturate(remapRange(d, strength[o] * fade * erosion, 1.0, 0.0, 1.0));
         }
     }
     // Real cumulus edges are abrupt: liquid water appears within metres of the boundary.
@@ -276,29 +279,30 @@ CloudResult marchClouds(constant Uniforms &u, texture2d<float> cloudMap, texture
 
     end = min(end, start + 60000.0);
     if (end <= start) return result;
-    // Steps of ~1.5% of the distance (15–400 m), so a cloud lobe gets several samples at
-    // any range: a few long fixed steps sliced distant banks into regular ridges. Empty air
-    // is crossed four steps at a time; the first hit backs up and re-enters at the short
-    // step, which holds until several samples in a row come up empty (Schneider 2017).
+    // Steps of ~1% of the distance (15–250 m), so a cloud lobe gets several samples at any
+    // range: a few long fixed steps sliced distant banks into regular ridges. Empty air is
+    // crossed two steps at a time; the first hit backs up and re-enters at the short step,
+    // which holds until several samples in a row come up empty (Schneider 2017). Longer
+    // skips jumped thin slices of banks seen edge-on and tore them into horizontal bars.
     // The start moves every frame and the history averages the jitter out.
     float jitter = fract(52.9829189 * fract(dot(pixel, float2(0.06711056, 0.00583715))));
     float weightedDistance = 0.0, weight = 0.0;
-    float t = start + jitter * clamp(start * 0.015, 15.0, 400.0);
+    float t = start + jitter * clamp(start * 0.01, 15.0, 250.0);
     bool fine = false;
     int empty = 0;
-    for (int k = 0; k < 128 && t < end; k++) {
-        float dt = clamp(t * 0.015, 15.0, 400.0);
+    for (int k = 0; k < 192 && t < end; k++) {
+        float dt = clamp(t * 0.01, 15.0, 250.0);
         float3 p = u.cameraPosition + dir * t;
         float density = cloudDensity(u, cloudMap, shapeNoise, detailNoise, p, max(t * kCloudPixelAngle, 1.0), true);
         if (density <= 0.0) {
-            if (++empty > 6) fine = false;
-            t += fine ? dt : 4.0 * dt;
+            if (++empty > 8) fine = false;
+            t += fine ? dt : 2.0 * dt;
             continue;
         }
         if (!fine) {
             fine = true;
             empty = 0;
-            t = max(t - 3.0 * dt, start);
+            t = max(t - 2.0 * dt, start);
             continue;
         }
         empty = 0;
