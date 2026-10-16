@@ -81,6 +81,14 @@ public enum StreamPower {
         /// the cliffs is planed to wave base instead of left as a dead-flat skirt just
         /// under sea level.
         public var waveBase: Double = 0
+        /// Share of the sediment a river carries into the sea that settles at its mouth as a
+        /// delta, filling the nearest sea cells up to `deltaTop` above sea level. Oahu's
+        /// broad lowlands (Ewa, Honolulu, Kaneohe) are largely alluvium and reef built out
+        /// in front of the old shoreline; without this every grain that reaches the sea is
+        /// lost. Waves still cut what is built, so deltas survive mostly in the lee. 0
+        /// disables it.
+        public var deltaShare: Double = 0
+        public var deltaTop: Double = 0.5
         /// Direction the wind blows towards, in radians (Climate.Params.windDirection).
         public var windDirection: Double = 5 * Double.pi / 4
         /// Time step in years.
@@ -369,6 +377,7 @@ public enum StreamPower {
                         }
                     }
                 }
+                if params.deltaShare > 0 { buildDeltas(&h, load: load, params: params) }
             }
         }
 
@@ -456,5 +465,47 @@ public enum StreamPower {
         }
 
         return Flow(receivers: receivers, area: area)
+    }
+
+    /// Spreads the load arriving at each river mouth over the nearest sea cells, filling
+    /// each to `deltaTop` above sea level before moving outward (breadth first, up to 40
+    /// cells away). Mouths are taken in index order, so the result is deterministic.
+    static func buildDeltas(_ h: inout Grid, load: [Float], params: Params) {
+        let w = h.width, rows = h.height
+        let sea = params.seaLevel
+        let top = sea + Float(params.deltaTop)
+        let share = Float(params.deltaShare)
+        let maxReach = 40
+        var stamp = [Int32](repeating: -1, count: h.count)
+        var reach = [Int32](repeating: 0, count: h.count)
+        var queue: [Int] = []
+        for m in 0..<h.count where load[m] > 0 && h.values[m] <= sea {
+            var budget = load[m] * share
+            queue.removeAll(keepingCapacity: true)
+            queue.append(m)
+            stamp[m] = Int32(m)
+            reach[m] = 0
+            var head = 0
+            while head < queue.count && budget > 0 {
+                let c = queue[head]; head += 1
+                let need = top - h.values[c]
+                if need > 0 {
+                    if budget < need { h.values[c] += budget; budget = 0; break }
+                    h.values[c] = top
+                    budget -= need
+                }
+                guard reach[c] < maxReach else { continue }
+                let x = c % w, y = c / w
+                for k in 0..<8 {
+                    let nx = x + D8.dx[k], ny = y + D8.dy[k]
+                    guard nx > 0, ny > 0, nx < w - 1, ny < rows - 1 else { continue }
+                    let j = ny * w + nx
+                    if stamp[j] == Int32(m) || h.values[j] > sea { continue }
+                    stamp[j] = Int32(m)
+                    reach[j] = reach[c] + 1
+                    queue.append(j)
+                }
+            }
+        }
     }
 }
