@@ -67,7 +67,7 @@ public final class TerrainRenderer {
     /// Sunlight through the cloud layer over the island, from the cloud base up (r16Float).
     let cloudShadows: MTLTexture
     /// Per-size render targets: terrain depth (read by the cloud march), this frame's
-    /// half-resolution clouds, and the two cloud histories the resolve ping-pongs between.
+    /// reduced-resolution clouds, and the two cloud histories the resolve ping-pongs between.
     struct Targets {
         let width: Int, height: Int
         let depth: MTLTexture
@@ -481,17 +481,20 @@ public final class TerrainRenderer {
         let depthDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: depthFormat, width: width, height: height, mipmapped: false)
         depthDesc.usage = [.renderTarget, .shaderRead]
         depthDesc.storageMode = .private
-        let halfWidth = (width + 1) / 2, halfHeight = (height + 1) / 2
-        func half(_ format: MTLPixelFormat) -> MTLTexture? {
-            let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: format, width: halfWidth, height: halfHeight, mipmapped: false)
+        // Clouds at half resolution up to 1080p, coarser above (3 at 1440p, 4 at 4K), so
+        // their cost stays near that of a 1080p frame; the history smooths the rest.
+        let scale = Swift.max(2, (height + 539) / 540)
+        let cloudWidth = (width + scale - 1) / scale, cloudHeight = (height + scale - 1) / scale
+        func reduced(_ format: MTLPixelFormat) -> MTLTexture? {
+            let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: format, width: cloudWidth, height: cloudHeight, mipmapped: false)
             d.usage = [.shaderRead, .shaderWrite]
             d.storageMode = .private
             return device.makeTexture(descriptor: d)
         }
         guard let depth = device.makeTexture(descriptor: depthDesc),
-              let clouds = half(.rgba16Float), let cloudDistance = half(.rg32Float),
-              let h0 = half(.rgba16Float), let h1 = half(.rgba16Float),
-              let d0 = half(.rg32Float), let d1 = half(.rg32Float) else { return nil }
+              let clouds = reduced(.rgba16Float), let cloudDistance = reduced(.rg32Float),
+              let h0 = reduced(.rgba16Float), let h1 = reduced(.rgba16Float),
+              let d0 = reduced(.rg32Float), let d1 = reduced(.rg32Float) else { return nil }
         return Targets(width: width, height: height, depth: depth, clouds: clouds, cloudDistance: cloudDistance,
                        history: [h0, h1], historyDistance: [d0, d1])
     }
@@ -625,7 +628,7 @@ public final class TerrainRenderer {
         drawTerrain(enc, frame: frameTerrain)
         enc.endEncoding()
 
-        // 2. The cloud shadow map, then clouds at half resolution, marched up to that depth
+        // 2. The cloud shadow map, then clouds at reduced resolution, marched up to that depth
         // and blended into the history.
         let previous = historyIndex, next = 1 - historyIndex
         guard let compute = cloudCmd.makeComputeCommandEncoder() else { return }

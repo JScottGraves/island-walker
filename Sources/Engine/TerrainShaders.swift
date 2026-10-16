@@ -195,15 +195,20 @@ float rayTracedSun(float3 p, float3 n, float3 l, float2 pixel, primitive_acceler
     // it. Rays only stop on faces turned towards them: from below, they pass through.
     isect.set_triangle_front_facing_winding(winding::clockwise);
     isect.set_triangle_cull_mode(triangle_cull_mode::back);
-    float visible = 0.0;
-    for (int k = 0; k < 4; k++) {
+    // Two rays from opposite sides of the sun's disc first: where they agree the point is
+    // almost surely fully lit or fully shadowed, and only penumbrae pay for the other two.
+    float hits[4];
+    const int order[4] = { 1, 3, 0, 2 };
+    for (int i = 0; i < 4; i++) {
+        int k = order[i];
         float r = kSunConeRadius * sqrt((float(k) + 0.5) / 4.0);
         float a = float(k) * 2.3999632 + spin;
         float3 d = normalize(l + (t * cos(a) + b * sin(a)) * r);
         ray shadowRay(origin, d, 0.5, 200000.0);
-        if (isect.intersect(shadowRay, terrain).type == intersection_type::none) visible += 0.25;
+        hits[i] = isect.intersect(shadowRay, terrain).type == intersection_type::none ? 1.0 : 0.0;
+        if (i == 1 && hits[0] == hits[1]) return hits[0];
     }
-    return visible;
+    return 0.25 * (hits[0] + hits[1] + hits[2] + hits[3]);
 }
 
 // Sun visibility from the 16-sector horizon map: interpolate the horizon at the sun's
@@ -251,16 +256,16 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
 
     float skyVisibility = saturate(in.light.x);
     float nDotL = saturate(dot(n, l));
+    // Cloud shadows drifting over the terrain; under thick cloud no ray is worth tracing.
+    float cloudSun = cloudSunlight(u, cloudShadows, surface);
     float sunVisibility = 0.0;
-    if (nDotL > 0.0 && l.z > -0.01) {
+    if (nDotL > 0.0 && l.z > -0.01 && cloudSun > 0.01) {
         if (kRayTraced) {
             sunVisibility = rayTracedSun(surface, n, l, in.position.xy, terrain);
         } else {
             sunVisibility = horizonSun(in, l);
         }
     }
-    // Cloud shadows drifting over the terrain.
-    float cloudSun = cloudSunlight(u, cloudShadows, surface);
     sunVisibility *= cloudSun;
     float3 direct = u.sunRadiance * (nDotL * sunVisibility);
     // Sky light from the part of the sky the terrain leaves open.
@@ -284,7 +289,7 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
     // Aerial perspective: haze takes the colour of the sky behind it, so it brightens
     // towards the sun and warms at sunset.
     color = mix(color, skyAbove(skyView, -toEye), kHazeMax * (1.0 - exp(-dist / kHazeDistance)));
-    color = compositeClouds(clouds, cloudDistance, color, in.position.xy, dist);
+    color = compositeClouds(u, clouds, cloudDistance, color, in.position.xy, dist);
 
     color = pbrNeutral(color * u.exposure);
     // The render target is an _srgb format, which applies the sRGB encoding on write.
@@ -328,7 +333,7 @@ fragment float4 skyFragment(SkyOut in [[stage_in]], constant Uniforms &u [[buffe
     float cosSun = dot(dir, normalize(u.sunDirection));
     color += u.sunRadiance * (2000.0 * smoothstep(cos(0.0050), cos(0.0042), cosSun));
     // Below the horizon the view ends on the sea; clouds in between still count.
-    color = compositeClouds(clouds, cloudDistance, color, in.position.xy, skyViewEnd(u, dir));
+    color = compositeClouds(u, clouds, cloudDistance, color, in.position.xy, skyViewEnd(u, dir));
     return float4(pbrNeutral(color * u.exposure), 1.0);
 }
 """

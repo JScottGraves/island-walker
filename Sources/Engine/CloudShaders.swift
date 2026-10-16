@@ -1,5 +1,5 @@
 /// Metal source for the trade-wind cloud layer (research/clouds.md): a 2.5D cloud layer
-/// in the Horizon Zero Dawn / Frostbite style. A compute pass marches it at half
+/// in the Horizon Zero Dawn / Frostbite style. A compute pass marches it at reduced
 /// resolution up to the terrain depth, a second pass blends each frame into a history
 /// (temporal accumulation, which turns the per-pixel step jitter into smooth cloud), and
 /// the sky and terrain shaders composite the result in HDR before tone mapping.
@@ -186,7 +186,8 @@ CloudResult marchClouds(constant Uniforms &u, texture2d<float> cloudMap, float3 
         float lightStep = 50.0;
         for (int j = 0; j < 3; j++) {
             tl += lightStep;
-            tau += cloudDensity(u, cloudMap, p + l * (tl - 0.5 * lightStep), max(lightStep, kCloudDetailStep)) * kCloudExtinction * lightStep;
+            // Coarse shape only: the light march needs the bulk optical depth, not the wisps.
+            tau += cloudDensity(u, cloudMap, p + l * (tl - 0.5 * lightStep), kCloudShapeStep) * kCloudExtinction * lightStep;
             lightStep *= 3.0;
         }
         // Sun: dual-lobe phase (silver linings towards the sun, a little back-scatter),
@@ -221,10 +222,16 @@ float skyViewEnd(constant Uniforms &u, float3 dir) {
     return dir.z < 0.0 ? max(u.cameraPosition.z - u.seaLevel, 1.0) / max(-dir.z, 1e-5) : 1e9;
 }
 
-// The full-resolution pixel that half-resolution cloud texel `g` is marched through
-// (centre at 2g + 1.5 in pixel coordinates), and the view direction through it.
-uint2 cloudPixel(constant Uniforms &u, uint2 g) {
-    return min(g * 2 + 1, uint2(u.frame.xy) - 1);
+// Full-resolution pixels per cloud texel along each axis: 2 up to 1080p, more above so
+// the march costs about the same at any resolution (the renderer sizes the textures).
+uint cloudScale(constant Uniforms &u, uint cloudWidth) {
+    return max(1u, uint(round(u.frame.x / float(cloudWidth))));
+}
+
+// The full-resolution pixel that cloud texel `g` is marched through (centre at
+// s·g + ⌊s/2⌋ + 0.5 in pixel coordinates for scale s).
+uint2 cloudPixel(constant Uniforms &u, uint2 g, uint scale) {
+    return min(g * scale + scale / 2, uint2(u.frame.xy) - 1);
 }
 
 float3 pixelDirection(constant Uniforms &u, float2 pixelCentre, float depth, thread float &distance) {
@@ -240,7 +247,7 @@ float3 pixelDirection(constant Uniforms &u, float2 pixelCentre, float depth, thr
     return dir;
 }
 
-// Pass 1: march the clouds for each half-resolution texel up to the terrain (or sea, or
+// Pass 1: march the clouds for each reduced-resolution texel up to the terrain (or sea, or
 // sky) behind it. Writes hazed cloud light and transmittance, plus (distance to what lies
 // behind, distance to the cloud) for upsampling and reprojection.
 kernel void cloudMarch(constant Uniforms &u [[buffer(0)]],
@@ -251,7 +258,7 @@ kernel void cloudMarch(constant Uniforms &u [[buffer(0)]],
                        texture2d<float, access::write> distanceOut [[texture(4)]],
                        uint2 g [[thread_position_in_grid]]) {
     if (g.x >= cloudOut.get_width() || g.y >= cloudOut.get_height()) return;
-    uint2 pixel = cloudPixel(u, g);
+    uint2 pixel = cloudPixel(u, g, cloudScale(u, cloudOut.get_width()));
     float behind;
     float3 dir = pixelDirection(u, float2(pixel) + 0.5, depth.read(pixel), behind);
     // Interleaved gradient noise shifted every frame (Jimenez 2014): over the history's
@@ -293,7 +300,8 @@ kernel void cloudResolve(constant Uniforms &u [[buffer(0)]],
     }
     float4 result = c;
     if (u.frame.w > 0.5) {
-        uint2 pixel = cloudPixel(u, g);
+        uint scale = cloudScale(u, uint(size.x));
+        uint2 pixel = cloudPixel(u, g, scale);
         float unused;
         float3 dir = pixelDirection(u, float2(pixel) + 0.5, 1.0, unused);
         float3 world = u.cameraPosition + dir * min(d.y, 200000.0);
@@ -301,7 +309,7 @@ kernel void cloudResolve(constant Uniforms &u [[buffer(0)]],
         if (clip.w > 0.0) {
             float2 ndc = clip.xy / clip.w;
             float2 previousPixel = float2((0.5 + 0.5 * ndc.x) * u.frame.x, (0.5 - 0.5 * ndc.y) * u.frame.y);
-            float2 uv = ((previousPixel - 1.5) * 0.5 + 0.5) / float2(size);
+            float2 uv = ((previousPixel - 0.5 - float(scale / 2)) / float(scale) + 0.5) / float2(size);
             if (all(uv >= 0.0) && all(uv <= 1.0)) {
                 constexpr sampler s(filter::linear, address::clamp_to_edge);
                 float previousBehind = historyDistance.sample(s, uv).x;
@@ -316,12 +324,13 @@ kernel void cloudResolve(constant Uniforms &u [[buffer(0)]],
     resolvedDistance.write(float4(d, 0.0, 0.0), g);
 }
 
-// Composites the resolved half-resolution clouds over a colour `distance` away, at full
+// Composites the resolved reduced-resolution clouds over a colour `distance` away, at full
 // resolution: a bilinear upsample that favours texels which saw the same distance behind,
 // so clouds don't bleed across the terrain's silhouette.
-float3 compositeClouds(texture2d<float> clouds, texture2d<float> cloudDistance,
+float3 compositeClouds(constant Uniforms &u, texture2d<float> clouds, texture2d<float> cloudDistance,
                        float3 color, float2 pixelCentre, float distance) {
-    float2 h = (pixelCentre - 1.5) * 0.5;
+    uint scale = cloudScale(u, clouds.get_width());
+    float2 h = (pixelCentre - 0.5 - float(scale / 2)) / float(scale);
     float2 g0 = floor(h);
     float2 f = h - g0;
     int2 size = int2(clouds.get_width(), clouds.get_height());
