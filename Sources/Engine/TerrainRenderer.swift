@@ -120,9 +120,9 @@ public final class TerrainRenderer {
         // Depth only: the terrain is shaded (with its cloud march) once per pixel, not once
         // per overlapping triangle, and the sky only where the terrain leaves it uncovered.
         desc.fragmentFunction = nil
-        desc.colorAttachments[0].writeMask = []
+        desc.colorAttachments[0].pixelFormat = .invalid  // a pass of its own, with no colour target
         depthPipeline = try device.makeRenderPipelineState(descriptor: desc)
-        desc.colorAttachments[0].writeMask = .all
+        desc.colorAttachments[0].pixelFormat = colorFormat
         desc.vertexFunction = library.makeFunction(name: "skyVertex")
         desc.fragmentFunction = library.makeFunction(name: "skyFragment")
         skyPipeline = try device.makeRenderPipelineState(descriptor: desc)
