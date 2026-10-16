@@ -28,7 +28,7 @@ func usage() -> Never {
       --saddle-fill        soft-maximum width in metres blending neighbouring shields, filling the saddle (default 0)
       --pond-time          share of the erosion run after which saddle lava floods in (default 0.9)
       --pond-hardness      erosion resistance multiplier of the ponded lava (default 2)
-      --pond-share         share of the saddle the lava buries; the rest stands above it (default 0.5)
+      --pond-share         share of the saddle the lava buries; the rest stands above it (default 0.7)
       --wave-retreat       sea-cliff retreat in m/yr on coasts facing the wind (default 0.004)
       --leeward-waves      share of wave retreat on coasts facing away from the wind (default 0.2)
       --uplift             uplift in m/yr, negative for subsidence (default 0)

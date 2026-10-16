@@ -79,6 +79,24 @@ final class IslandGenTests: XCTestCase {
         XCTAssertEqual(h[30, 4], 30, accuracy: 0.01, "full lift beyond the flexure distance")
     }
 
+    func testPondBuriesOnlyTheDeepestShareOfTheSaddle() {
+        // A saddle surface at 200 m over eroded ground whose height rises 0..99 m by column.
+        var h = Grid(width: 100, height: 4, cellSize: 100)
+        var hardness = Grid(width: 100, height: 4, cellSize: 100, fill: 1)
+        var surface = Grid(width: 100, height: 4, cellSize: 100, fill: 200)
+        for y in 0..<4 { for x in 0..<100 { h[x, y] = Float(x) + 1 } }
+        surface[0, 0] = -.infinity // outside the saddle
+        var p = Island.Params()
+        p.pondShare = 0.5
+        Island.pond(&h, hardness: &hardness, surface: surface, p: p)
+        XCTAssertEqual(h[0, 0], 1, "cells outside the saddle are untouched")
+        XCTAssertEqual(h[90, 1], 91, "high ground stands above the lava")
+        XCTAssertGreaterThan(h[10, 1], 11, "low ground is buried")
+        XCTAssertEqual(hardness[10, 1], p.pondHardness, "ponded lava is harder")
+        let buried = (0..<100).filter { h[$0, 2] > Float($0) + 1 }.count
+        XCTAssertEqual(buried, 50, accuracy: 2)
+    }
+
     func testPNGChecksumsMatchKnownValues() {
         XCTAssertEqual(PNG.crc32(Array("IEND".utf8)), 0xAE42_6082)
         XCTAssertEqual(PNG.adler32(Array("Wikipedia".utf8)), 0x11E6_0398)

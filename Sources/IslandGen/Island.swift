@@ -34,10 +34,12 @@ public enum Island {
         /// over a third of the island. Instead the lava surface keeps the saddle's gentle
         /// shape but is lowered so that only the deepest `pondShare` of the saddle (by how
         /// far erosion has cut below that shape) is buried; ridges still stand above it.
+        /// Off by default: against the Oahu DEM it trades steep land for flat land almost
+        /// one for one. Best tried: saddleFill 300, pondShare 0.7 (score 0.241 vs 0.227).
         public var saddleFill: Double = 0
         public var pondTime: Double = 0.9
         public var pondHardness: Float = 2
-        public var pondShare: Double = 0.5
+        public var pondShare: Double = 0.7
         /// Flexural uplift after erosion, in metres, reached `flexureDistance` inland and
         /// held beyond it. Oahu rides the bulge raised by the Big Island's weight, which has
         /// lifted its old reefs and lowland a few tens of metres; tilting the coastal fringe
