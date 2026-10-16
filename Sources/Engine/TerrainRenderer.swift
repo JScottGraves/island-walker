@@ -513,15 +513,20 @@ public final class TerrainRenderer {
             SIMD4(Double(m.columns.0[i]), Double(m.columns.1[i]), Double(m.columns.2[i]), Double(m.columns.3[i]))
         }
         let r0 = row(0), r1 = row(1), r2 = row(2), r3 = row(3)
-        let planes = [r3 + r0, r3 - r0, r3 + r1, r3 - r1, r2, r3 - r2]
-        let selected = quadtree.select(eye: (eye.x, eye.y, eye.z)) { lo, hi in
-            let a = lo - eye, b = hi - eye
+        let planes: [SIMD4<Double>] = [r3 + r0, r3 - r0, r3 + r1, r3 - r1, r2, r3 - r2]
+        // A box is outside when its corner furthest along a plane's normal is behind it.
+        func visible(_ lo: SIMD3<Double>, _ hi: SIMD3<Double>) -> Bool {
+            let a: SIMD3<Double> = lo - eye, b: SIMD3<Double> = hi - eye
             for p in planes {
-                let v = SIMD3(p.x > 0 ? b.x : a.x, p.y > 0 ? b.y : a.y, p.z > 0 ? b.z : a.z)
-                if p.x * v.x + p.y * v.y + p.z * v.z + p.w < 0 { return false }
+                let x: Double = p.x > 0 ? b.x : a.x
+                let y: Double = p.y > 0 ? b.y : a.y
+                let z: Double = p.z > 0 ? b.z : a.z
+                let distance: Double = p.x * x + p.y * y + p.z * z + p.w
+                if distance < 0 { return false }
             }
             return true
         }
+        let selected = quadtree.select(eye: (eye.x, eye.y, eye.z), visible: visible)
         var keys: [TerrainStreamer.Key] = []
         for node in selected {
             let level = Swift.min(node.lod, terrain.levels - 1)
