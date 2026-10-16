@@ -89,6 +89,12 @@ public enum StreamPower {
         /// disables it.
         public var deltaShare: Double = 0
         public var deltaTop: Double = 0.5
+        /// Seaward gradient of the delta surface: each cell is filled to `deltaTop` minus
+        /// this times its distance from the mouth, so a delta is a low fan that dips under
+        /// the sea instead of a flat apron. 0 keeps the surface level.
+        public var deltaGradient: Double = 0
+        /// Furthest a delta spreads from its mouth, in cells.
+        public var deltaReach: Int = 40
         /// Direction the wind blows towards, in radians (Climate.Params.windDirection).
         public var windDirection: Double = 5 * Double.pi / 4
         /// Time step in years.
@@ -468,14 +474,16 @@ public enum StreamPower {
     }
 
     /// Spreads the load arriving at each river mouth over the nearest sea cells, filling
-    /// each to `deltaTop` above sea level before moving outward (breadth first, up to 40
-    /// cells away). Mouths are taken in index order, so the result is deterministic.
+    /// each to `deltaTop` above sea level, less `deltaGradient` per metre from the mouth,
+    /// before moving outward (breadth first, up to `deltaReach` cells away).
+    /// Mouths are taken in index order, so the result is deterministic.
     static func buildDeltas(_ h: inout Grid, load: [Float], params: Params) {
         let w = h.width, rows = h.height
         let sea = params.seaLevel
         let top = sea + Float(params.deltaTop)
         let share = Float(params.deltaShare)
-        let maxReach = 40
+        let maxReach = Int32(params.deltaReach)
+        let drop = Float(params.deltaGradient * h.cellSize)
         var stamp = [Int32](repeating: -1, count: h.count)
         var reach = [Int32](repeating: 0, count: h.count)
         var queue: [Int] = []
@@ -486,12 +494,14 @@ public enum StreamPower {
             stamp[m] = Int32(m)
             reach[m] = 0
             var head = 0
+            let mx = m % w, my = m / w
             while head < queue.count && budget > 0 {
                 let c = queue[head]; head += 1
-                let need = top - h.values[c]
+                let ddx = Float(c % w - mx), ddy = Float(c / w - my)
+                let need = top - drop * (ddx * ddx + ddy * ddy).squareRoot() - h.values[c]
                 if need > 0 {
                     if budget < need { h.values[c] += budget; budget = 0; break }
-                    h.values[c] = top
+                    h.values[c] += need
                     budget -= need
                 }
                 guard reach[c] < maxReach else { continue }
