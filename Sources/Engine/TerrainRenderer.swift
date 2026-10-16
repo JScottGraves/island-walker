@@ -19,6 +19,8 @@ public final class TerrainRenderer {
         var exposure: Float
         var skySH: (SIMD4<Float>, SIMD4<Float>, SIMD4<Float>, SIMD4<Float>, SIMD4<Float>,
                     SIMD4<Float>, SIMD4<Float>, SIMD4<Float>, SIMD4<Float>)
+        var cloudLayer: SIMD4<Float>
+        var cloudWind: SIMD4<Float>
     }
 
     /// How terrain casts sun shadows.
@@ -54,11 +56,24 @@ public final class TerrainRenderer {
     let skyViews: [MTLTexture]
     var skyViewIndex = 0
 
+    /// Baked orographic cloud coverage (islandgen's clouds-trades.r32) over the domain.
+    let cloudMap: MTLTexture
+    let domainSize: Float
+    /// Local solar time (hours) for the clouds' daily cycle; keep it with `light`'s sun.
+    public var hour = 9.5
+    /// Seconds of wind so far: how far the trade wind has carried the cloud texture.
+    public var clock: Double = 0
+    /// Direction the trade wind blows towards (radians, x east, y north) and its speed.
+    public var windDirection = 5 * Double.pi / 4
+    public var windSpeed = 7.5
+    /// Trade-wind inversion: the flat cap on cloud tops (normal regime ~2,000 m).
+    public var inversionHeight = 2000.0
+
     /// - Parameter meshResolution: vertices per side of the rendered mesh (the height grid
     ///   is resampled to this). 1024 keeps the mesh around 2 million triangles.
     public init(device: MTLDevice, colorFormat: MTLPixelFormat, depthFormat: MTLPixelFormat,
                 height: Grid, seaLevel: Float, meshResolution: Int = 1024,
-                shadows requested: Shadows = .rayTraced) throws {
+                shadows requested: Shadows = .rayTraced, clouds: Grid? = nil) throws {
         self.device = device
         guard let queue = device.makeCommandQueue() else { throw RendererError.setup("command queue") }
         self.queue = queue
@@ -149,6 +164,18 @@ public final class TerrainRenderer {
             height: Atmosphere.skyViewSize.height, mipmapped: false)
         skyDesc.usage = [.shaderRead]
         skyDesc.storageMode = .shared
+        domainSize = Float(Double(height.width) * height.cellSize)
+        let coverage = clouds ?? Grid(width: 1, height: 1, cellSize: 1)
+        let cloudDesc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .r32Float, width: coverage.width, height: coverage.height, mipmapped: false)
+        cloudDesc.usage = [.shaderRead]
+        cloudDesc.storageMode = .shared
+        guard let cloudTexture = device.makeTexture(descriptor: cloudDesc) else { throw RendererError.setup("cloud map") }
+        coverage.values.withUnsafeBytes { raw in
+            cloudTexture.replace(region: MTLRegionMake2D(0, 0, coverage.width, coverage.height), mipmapLevel: 0,
+                                 withBytes: raw.baseAddress!, bytesPerRow: coverage.width * 4)
+        }
+        cloudMap = cloudTexture
         skyViews = try (0..<3).map { _ in
             guard let t = device.makeTexture(descriptor: skyDesc) else { throw RendererError.setup("sky-view texture") }
             return t
@@ -159,6 +186,13 @@ public final class TerrainRenderer {
             : nil
         uploadSkyView()
     }
+
+    /// Cloud base (lifting condensation level): ~400 m at night, ~800 m early afternoon
+    /// (Hartley & Chen; research/clouds.md §2).
+    var cloudBase: Double { 600 - 200 * cos(2 * Double.pi * (hour - 14) / 24) }
+
+    /// Windward orographic cloud is thickest around dawn and thinnest mid-afternoon.
+    var orographicGain: Double { 0.85 + 0.15 * cos(2 * Double.pi * (hour - 7) / 24) }
 
     func uploadSkyView() {
         skyViewIndex = (skyViewIndex + 1) % skyViews.count
@@ -282,13 +316,19 @@ public final class TerrainRenderer {
             maxHeight: maxHeight,
             sunRadiance: f3(light.sun),
             exposure: Float(light.exposure),
-            skySH: (f4(0), f4(1), f4(2), f4(3), f4(4), f4(5), f4(6), f4(7), f4(8)))
+            skySH: (f4(0), f4(1), f4(2), f4(3), f4(4), f4(5), f4(6), f4(7), f4(8)),
+            cloudLayer: SIMD4(Float(cloudBase), Float(inversionHeight),
+                              // Wrapped to keep the noise coordinates small enough for Float.
+                              Float(clock.truncatingRemainder(dividingBy: 86_400 * 4)), domainSize),
+            cloudWind: SIMD4(Float(cos(windDirection) * windSpeed), Float(sin(windDirection) * windSpeed),
+                             Float(orographicGain), 0))
         let skyView = skyViews[skyViewIndex]
 
         enc.setRenderPipelineState(skyPipeline)
         enc.setDepthStencilState(skyDepthState)
         enc.setFragmentBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 1)
         enc.setFragmentTexture(skyView, index: 0)
+        enc.setFragmentTexture(cloudMap, index: 1)
         enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
 
         enc.setRenderPipelineState(pipeline)

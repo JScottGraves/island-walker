@@ -5,6 +5,28 @@ import IslandGen
 /// Where the app's island comes from: a baked `height.r32` passed on the command line,
 /// or a quick in-app bake when none is given.
 enum IslandSource {
+    /// Standing trade-wind cloud coverage: islandgen's clouds-trades.r32 next to the
+    /// height map, or baked here from the heightfield if there is none.
+    static func clouds(for height: Grid) -> Grid {
+        let args = CommandLine.arguments
+        let domain = Double(height.width) * height.cellSize
+        if args.count > 1, args[1].hasSuffix(".r32") {
+            let url = URL(fileURLWithPath: args[1]).deletingLastPathComponent().appendingPathComponent("clouds-trades.r32")
+            if let data = FileManager.default.contents(atPath: url.path) {
+                let count = data.count / MemoryLayout<Float>.size
+                let side = Int(Double(count).squareRoot())
+                if side * side == count, side > 0 {
+                    var grid = Grid(width: side, height: side, cellSize: domain / Double(side))
+                    data.withUnsafeBytes { raw in
+                        for i in 0..<count { grid.values[i] = raw.loadUnaligned(fromByteOffset: i * 4, as: Float.self) }
+                    }
+                    return grid
+                }
+            }
+        }
+        return Clouds.coverage(height: height, seaLevel: 0)
+    }
+
     static func load() -> Grid {
         let args = CommandLine.arguments
         if args.count > 1, args[1].hasSuffix(".r32"), let data = FileManager.default.contents(atPath: args[1]) {

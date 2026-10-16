@@ -29,7 +29,7 @@ enum Snapshots {
             let requested: TerrainRenderer.Shadows = option("--shadows") == "horizon" ? .horizonMap : .rayTraced
             let renderer = try TerrainRenderer(device: device, colorFormat: .bgra8Unorm_srgb,
                                                depthFormat: .depth32Float, height: height, seaLevel: 0,
-                                               shadows: requested)
+                                               shadows: requested, clouds: IslandSource.clouds(for: height))
             print("shadows: \(renderer.shadows.rawValue)")
             let day = option("--day").flatMap { Int($0) } ?? SunPath.defaultDay
             let hours = option("--time")?.split(separator: ",").compactMap { Double($0) } ?? []
@@ -62,6 +62,9 @@ enum Snapshots {
                     var name = "app-\(view.name)"
                     if let hour {
                         renderer.light = SunPath.light(hour: hour, day: day)
+                        renderer.hour = hour
+                        // The same wind state for every viewpoint at a given hour.
+                        renderer.clock = hour * 3600
                         let minutes = Int((hour * 60).rounded())
                         name += String(format: "-%02d%02d", minutes / 60, minutes % 60)
                     } else {
