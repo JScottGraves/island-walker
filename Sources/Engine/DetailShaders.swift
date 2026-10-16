@@ -116,13 +116,16 @@ float rockRelief(float2 xy, float lambdaMin, uint seed) {
     return sum;
 }
 
-// Soil hummocks: soft fBm, 6 m down.
+// Soil hummocks and, from about 2 m down, clumpy tussocks: soft fBm turning billowy
+// (rounded tops, sharp creases between) in the small octaves, 8 m down.
 float soilRelief(float2 xy, float lambdaMin, uint seed) {
-    float sum = 0.0, amp = 1.0, lambda = 6.0;
+    float sum = 0.0, amp = 1.0, lambda = 8.0;
     float2 p = xy;
-    for (int o = 0; o < 6 && lambda > lambdaMin; o++) {
-        sum += amp * band(lambda, lambdaMin) * gradientNoise(p / lambda, seed + 16u + uint(o));
-        amp *= 0.5;
+    for (int o = 0; o < 7 && lambda > lambdaMin; o++) {
+        float n = gradientNoise(p / lambda, seed + 16u + uint(o));
+        if (lambda < 2.5) n = 1.2 * (0.6 - abs(n));
+        sum += amp * band(lambda, lambdaMin) * n;
+        amp *= lambda < 2.5 ? 0.75 : 0.55;
         lambda *= 0.5;
         p = kOctaveTurn * p;
     }
@@ -155,8 +158,9 @@ float gullies(float2 xy, float2 downhill, float lambdaMin, uint seed) {
     return sum;
 }
 
-// Loose boulders, 0.35–1.3 m in radius: at most one per 3 m cell, kept where a hash
-// falls under `density`. Rounded tops, the tallest one wins where they touch.
+// Loose boulders, 0.3–1.1 m in radius, mostly small: at most one per 3 m cell, kept where
+// a hash falls under `density`. Each has a lumpy outline, a flattened top, a faceted
+// surface and its base sunk into the ground; the tallest wins where they touch.
 float boulders(float2 xy, float density, float lambdaMin, uint seed) {
     const float cell = 3.0;
     int2 c = int2(floor(xy / cell));
@@ -168,11 +172,19 @@ float boulders(float2 xy, float density, float lambdaMin, uint seed) {
             if (hashUnit(r) >= density) continue;
             float2 centre = (float2(k) + float2(hashUnit(r * 0x9e3779b9u), hashUnit(r * 0x85ebca6bu))) * cell;
             float u = hashUnit(r * 0xc2b2ae35u);
-            float radius = mix(0.35, 1.3, u * u);
+            float radius = mix(0.3, 1.1, u * u);
             float weight = band(2.0 * radius, lambdaMin);
             if (weight <= 0.0) continue;
-            float d2 = length_squared(xy - centre) / (radius * radius);
-            if (d2 < 1.0) h = max(h, weight * 0.6 * radius * sqrt(1.0 - d2));
+            float2 q = (xy - centre) / radius;
+            if (length_squared(q) > 2.0) continue;
+            uint own = r * 0x27d4eb2fu;
+            // Lumpy outline and facets, both at the boulder's own scale.
+            float d2 = length_squared(q) * (1.0 + 0.45 * gradientNoise(q * 1.3, own));
+            if (d2 >= 1.0) continue;
+            float facets = 1.0 - abs(gradientNoise(q * 2.2, own + 1u));
+            float dome = min(sqrt(1.0 - d2), 0.75) * (0.8 + 0.3 * facets);
+            float stone = radius * (0.75 * dome - 0.15);
+            h = max(h, weight * stone);
         }
     }
     return h;
@@ -258,10 +270,10 @@ float detailHeight(constant TerrainParams &t, constant DetailParams &d, const de
     float land = max(smoothstep(0.5, 4.0, above), steep) * smoothstep(-3.0, 0.0, above);
 
     float rockAmp = 0.8 * rock;
-    float soilAmp = 0.15 * (1.0 - rock) * (1.0 - 0.5 * valleyFloor);
-    float gullyAmp = 0.45 * smoothstep(0.12, 0.45, slope) * (1.0 - smoothstep(1.3, 2.2, slope))
+    float soilAmp = 0.22 * (1.0 - rock) * (1.0 - 0.5 * valleyFloor);
+    float gullyAmp = 0.6 * smoothstep(0.08, 0.4, slope) * (1.0 - smoothstep(1.3, 2.2, slope))
                    * mix(0.5, 1.0, wet) * (1.0 - valleyFloor);
-    float boulderDensity = (0.04 + 0.22 * rock) * (1.0 - smoothstep(1.2, 2.0, slope));
+    float boulderDensity = (0.015 + 0.3 * rock) * (1.0 - smoothstep(1.2, 2.0, slope));
 
     uint seed = d.seed;
     float h = 0.0;
