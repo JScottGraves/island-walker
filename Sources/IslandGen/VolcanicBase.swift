@@ -122,10 +122,15 @@ public enum VolcanicBase {
     ///   - riftDescent: how far each rift crest drops from the summit to its tip, as a share of
     ///     the summit height. 0 keeps the crest level along the whole rift, which leaves long
     ///     broad summits; real rift ridges fall away from the caldera.
+    ///   - saddleFill: blends neighbouring shields with a soft maximum of this width in
+    ///     metres instead of a hard one, so the V between two cones fills by up to
+    ///     0.69 × saddleFill. That stands in for the younger volcano's lava ponding against
+    ///     the older one, which built Oahu's Schofield plateau between the Waianae and
+    ///     Koolau ranges. 0 keeps the hard maximum.
     public static func generate(seed: UInt64, size: Int, domainSize: Double, seaFloor: Double = -1800,
                                 shields: [ShieldVolcano]? = nil, landExponent: Double = 2,
                                 submarineSlope: Double = 0.15, coastSlope: Double = 0,
-                                riftDescent: Double = 0) -> Output {
+                                riftDescent: Double = 0, saddleFill: Double = 0) -> Output {
         let cell = domainSize / Double(size)
         let volcanoes = shields ?? randomShields(seed: seed, domainSize: domainSize)
         var height = Grid(width: size, height: size, cellSize: cell)
@@ -142,7 +147,9 @@ public enum VolcanicBase {
 
                 var h = seaFloor
                 var riftNear = Double.infinity
+                var softSum = 0.0, softMax = -Double.infinity
                 for v in volcanoes {
+                    var own = seaFloor
                     if landExponent > 0 {
                         // Same coastline as the classic profile, a concave land surface above it.
                         let top = v.summitHeight + seaFloor
@@ -153,15 +160,30 @@ public enum VolcanicBase {
                             let shield = u < 1
                                 ? crest * ((1 - coastSlope) * pow(1 - u, landExponent) + coastSlope * (1 - u))
                                 : Swift.max(seaFloor, submarineDepth(r - shore, slope: submarineSlope))
-                            h = Swift.max(h, shield)
+                            own = Swift.max(own, shield)
                         }
                     } else {
                         let d = v.skeletonDistance(wx, wy) / v.radius
                         // Shield profile: convex near the summit, long gentle apron at the base.
                         let profile = exp(-3.0 * pow(d, 1.4))
-                        h = Swift.max(h, seaFloor + v.summitHeight * profile)
+                        own = seaFloor + v.summitHeight * profile
                     }
                     riftNear = Swift.min(riftNear, v.riftDistance(wx, wy))
+                    h = Swift.max(h, own)
+                    if saddleFill > 0 {
+                        // Running log-sum-exp, rescaled so large heights don't overflow.
+                        if own > softMax {
+                            softSum = softSum * exp((softMax - own) / saddleFill) + 1
+                            softMax = own
+                        } else {
+                            softSum += exp((own - softMax) / saddleFill)
+                        }
+                    }
+                }
+                if saddleFill > 0 && softSum > 1 {
+                    // The soft maximum is never below the hard one; it adds most where
+                    // two shields stand at the same height, i.e. in the saddle between them.
+                    h = Swift.max(h, softMax + saddleFill * log(softSum))
                 }
                 // Lava-flow scale roughness (tens of metres). With the concave profile the coastal
                 // plain sits only metres above the sea, so the roughness fades out near sea level

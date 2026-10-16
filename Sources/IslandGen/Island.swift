@@ -23,6 +23,8 @@ public enum Island {
         /// 0.3 and 0.4 score closest to Oahu with wave retreat on (realism sweep, 2026-10-16).
         public var coastSlope: Double = 0.3
         public var riftDescent: Double = 0.4
+        /// Soft-maximum width blending neighbouring shields (see VolcanicBase.generate).
+        public var saddleFill: Double = 0
         /// Flexural uplift after erosion, in metres, reached `flexureDistance` inland and
         /// held beyond it. Oahu rides the bulge raised by the Big Island's weight, which has
         /// lifted its old reefs and lowland a few tens of metres; tilting the coastal fringe
@@ -57,7 +59,7 @@ public enum Island {
         erosion.timeStep = Swift.min(erosion.timeStep, maxDt)
 
         var base = phase("volcano") { VolcanicBase.generate(seed: p.seed, size: p.size, domainSize: p.domainSize, landExponent: p.landExponent,
-                                                                coastSlope: p.coastSlope, riftDescent: p.riftDescent) }
+                                                                coastSlope: p.coastSlope, riftDescent: p.riftDescent, saddleFill: p.saddleFill) }
         let scarp = p.flankCollapse
             ? FlankCollapse.choose(shields: base.shields, height: base.height, windDirection: p.climate.windDirection, seed: p.seed)
             : nil
