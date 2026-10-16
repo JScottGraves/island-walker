@@ -75,6 +75,7 @@ var summitIndex = 0
 for i in 0..<island.height.count where island.height.values[i] > island.height.values[summitIndex] { summitIndex = i }
 let sx = summitIndex % params.size, sy = summitIndex / params.size
 var slopeSum = (windward: 0.0, leeward: 0.0), slopeCount = (windward: 0, leeward: 0)
+var steep = 0 // land steeper than 35°: cliffs such as a pali
 for y in 1..<(params.size - 1) {
     for x in 1..<(params.size - 1) {
         let g = island.height
@@ -82,6 +83,7 @@ for y in 1..<(params.size - 1) {
         let gx = Double(g[x + 1, y] - g[x - 1, y]) / (2 * g.cellSize)
         let gy = Double(g[x, y + 1] - g[x, y - 1]) / (2 * g.cellSize)
         let slope = (gx * gx + gy * gy).squareRoot()
+        if slope > 0.7 { steep += 1 }
         // Upwind of the summit means against the wind direction.
         if Double(x - sx) * wind.0 + Double(y - sy) * wind.1 < 0 {
             slopeSum.windward += slope; slopeCount.windward += 1
@@ -100,6 +102,7 @@ let info: [String: Any] = [
     "steps": params.steps,
     "landAreaKm2": (landKm2 * 10).rounded() / 10,
     "maxHeightMetres": Double(island.height.range.max),
+    "steepFraction": rounded(Double(steep) / Double(Swift.max(land, 1)), 10000),
     "lowlandFraction": rounded(Double(lowland) / Double(Swift.max(land, 1))),
     "meanSlopeWindward": rounded(slopeSum.windward / Double(Swift.max(slopeCount.windward, 1))),
     "meanSlopeLeeward": rounded(slopeSum.leeward / Double(Swift.max(slopeCount.leeward, 1))),

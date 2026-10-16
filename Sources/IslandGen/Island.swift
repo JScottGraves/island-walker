@@ -15,6 +15,8 @@ public enum Island {
         public var rainInterval: Int = 50
         public var erosion = StreamPower.Params()
         public var climate = Climate.Params()
+        /// Cut a giant landslide sector from the windward flank before erosion (see FlankCollapse).
+        public var flankCollapse = true
         public init() {}
     }
 
@@ -35,7 +37,11 @@ public enum Island {
         let maxDt = 0.2 * cell * cell / Swift.max(erosion.diffusivity, 1e-9)
         erosion.timeStep = Swift.min(erosion.timeStep, maxDt)
 
-        let base = VolcanicBase.generate(seed: p.seed, size: p.size, domainSize: p.domainSize)
+        var base = VolcanicBase.generate(seed: p.seed, size: p.size, domainSize: p.domainSize)
+        if p.flankCollapse,
+           let sector = FlankCollapse.choose(shields: base.shields, windDirection: p.climate.windDirection, seed: p.seed) {
+            FlankCollapse.apply(sector, height: &base.height, hardness: &base.hardness, seed: p.seed)
+        }
         var height = base.height
         var rain = Climate.precipitation(height: height, seaLevel: erosion.seaLevel, params: p.climate)
         var area = Grid(width: p.size, height: p.size, cellSize: cell)

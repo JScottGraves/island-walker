@@ -88,6 +88,7 @@ public enum VolcanicBase {
         public var height: Grid
         /// Relative rock resistance to erosion; 1 is average, higher is harder.
         public var hardness: Grid
+        public var shields: [ShieldVolcano]
     }
 
     /// - Parameters:
@@ -131,6 +132,6 @@ public enum VolcanicBase {
                 hardness[x, y] = Float(Swift.max(0.4, 0.9 + 0.35 * dike + variation))
             }
         }
-        return Output(height: height, hardness: hardness)
+        return Output(height: height, hardness: hardness, shields: volcanoes)
     }
 }
