@@ -59,6 +59,12 @@ try Preview.write(Preview.gray(island.rain), to: out.appendingPathComponent("rai
 try Preview.write(Preview.gray(island.hardness), to: out.appendingPathComponent("hardness.png"))
 try Preview.writeRaw(island.height, to: out.appendingPathComponent("height.r32"))
 
+// Ground-level pictures from a walker's eye height, rendered on the CPU.
+for view in Viewpoints.automatic(height: island.height, drainageArea: island.drainageArea, seaLevel: sea) {
+    let image = GroundView.render(island.height, camera: view.camera, seaLevel: sea)
+    try Preview.write(image, to: out.appendingPathComponent("view-\(view.name).png"))
+}
+
 let land = island.height.values.filter { $0 > sea }.count
 let landKm2 = Double(land) * island.height.cellArea / 1e6
 let info: [String: Any] = [

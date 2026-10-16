@@ -1,10 +1,5 @@
 import Foundation
 import IslandCore
-#if canImport(ImageIO)
-import CoreGraphics
-import ImageIO
-import UniformTypeIdentifiers
-#endif
 
 /// Quick-look images of generated maps for fast visual iteration.
 public enum Preview {
@@ -87,24 +82,8 @@ public enum Preview {
         return Image(width: w, height: n, rgb: out)
     }
 
-    /// Writes a PNG where ImageIO is available, otherwise a binary PPM next to the path.
     public static func write(_ image: Image, to url: URL) throws {
-        #if canImport(ImageIO)
-        let provider = CGDataProvider(data: Data(image.rgb) as CFData)!
-        let cg = CGImage(width: image.width, height: image.height, bitsPerComponent: 8, bitsPerPixel: 24,
-                         bytesPerRow: image.width * 3, space: CGColorSpaceCreateDeviceRGB(),
-                         bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
-                         provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)!
-        guard let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil) else {
-            throw CocoaError(.fileWriteUnknown)
-        }
-        CGImageDestinationAddImage(dest, cg, nil)
-        guard CGImageDestinationFinalize(dest) else { throw CocoaError(.fileWriteUnknown) }
-        #else
-        var data = Data("P6\n\(image.width) \(image.height)\n255\n".utf8)
-        data.append(contentsOf: image.rgb)
-        try data.write(to: url.deletingPathExtension().appendingPathExtension("ppm"))
-        #endif
+        try Data(PNG.encode(rgb: image.rgb, width: image.width, height: image.height)).write(to: url)
     }
 
     /// Raw little-endian Float32 heights, row-major, for external tools.
