@@ -183,7 +183,7 @@ constant float kSunConeRadius = 0.01;
 
 // Fraction of 4 rays towards the sun's disc that escape the terrain. A per-pixel rotation
 // (interleaved gradient noise) spreads the 4 samples into a smooth penumbra.
-float rayTracedSun(float3 p, float3 n, float3 l, float2 pixel, primitive_acceleration_structure terrain) {
+float rayTracedSun(float3 p, float3 n, float3 l, float2 pixel, float distance, primitive_acceleration_structure terrain) {
     float3 t = normalize(cross(l, abs(l.z) < 0.9 ? float3(0.0, 0.0, 1.0) : float3(1.0, 0.0, 0.0)));
     float3 b = cross(l, t);
     float spin = 6.2831853 * fract(52.9829189 * fract(dot(pixel, float2(0.06711056, 0.00583715))));
@@ -197,6 +197,7 @@ float rayTracedSun(float3 p, float3 n, float3 l, float2 pixel, primitive_acceler
     isect.set_triangle_cull_mode(triangle_cull_mode::back);
     // Two rays from opposite sides of the sun's disc first: where they agree the point is
     // almost surely fully lit or fully shadowed, and only penumbrae pay for the other two.
+    // Far away a penumbra is narrower than a pixel, so two rays are enough there.
     float hits[4];
     const int order[4] = { 1, 3, 0, 2 };
     for (int i = 0; i < 4; i++) {
@@ -206,7 +207,7 @@ float rayTracedSun(float3 p, float3 n, float3 l, float2 pixel, primitive_acceler
         float3 d = normalize(l + (t * cos(a) + b * sin(a)) * r);
         ray shadowRay(origin, d, 0.5, 200000.0);
         hits[i] = isect.intersect(shadowRay, terrain).type == intersection_type::none ? 1.0 : 0.0;
-        if (i == 1 && hits[0] == hits[1]) return hits[0];
+        if (i == 1 && (hits[0] == hits[1] || distance > 4000.0)) return 0.5 * (hits[0] + hits[1]);
     }
     return 0.25 * (hits[0] + hits[1] + hits[2] + hits[3]);
 }
@@ -261,7 +262,7 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
     float sunVisibility = 0.0;
     if (nDotL > 0.0 && l.z > -0.01 && cloudSun > 0.01) {
         if (kRayTraced) {
-            sunVisibility = rayTracedSun(surface, n, l, in.position.xy, terrain);
+            sunVisibility = rayTracedSun(surface, n, l, in.position.xy, length(u.cameraPosition - in.world), terrain);
         } else {
             sunVisibility = horizonSun(in, l);
         }

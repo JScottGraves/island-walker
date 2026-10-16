@@ -481,9 +481,9 @@ public final class TerrainRenderer {
         let depthDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: depthFormat, width: width, height: height, mipmapped: false)
         depthDesc.usage = [.renderTarget, .shaderRead]
         depthDesc.storageMode = .private
-        // Clouds at half resolution up to 1080p, coarser above (3 at 1440p, 4 at 4K), so
-        // their cost stays near that of a 1080p frame; the history smooths the rest.
-        let scale = Swift.max(2, (height + 539) / 540)
+        // Clouds at no more than 360 rows (half resolution at 720p, a quarter at 1440p),
+        // so their cost stays near that of a 720p frame; the history smooths the rest.
+        let scale = Swift.max(2, (height + 359) / 360)
         let cloudWidth = (width + scale - 1) / scale, cloudHeight = (height + scale - 1) / scale
         func reduced(_ format: MTLPixelFormat) -> MTLTexture? {
             let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: format, width: cloudWidth, height: cloudHeight, mipmapped: false)

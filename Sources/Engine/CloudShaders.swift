@@ -186,8 +186,7 @@ CloudResult marchClouds(constant Uniforms &u, texture2d<float> cloudMap, float3 
         float lightStep = 50.0;
         for (int j = 0; j < 3; j++) {
             tl += lightStep;
-            // Coarse shape only: the light march needs the bulk optical depth, not the wisps.
-            tau += cloudDensity(u, cloudMap, p + l * (tl - 0.5 * lightStep), kCloudShapeStep) * kCloudExtinction * lightStep;
+            tau += cloudDensity(u, cloudMap, p + l * (tl - 0.5 * lightStep), max(lightStep, kCloudDetailStep)) * kCloudExtinction * lightStep;
             lightStep *= 3.0;
         }
         // Sun: dual-lobe phase (silver linings towards the sun, a little back-scatter),
@@ -222,8 +221,8 @@ float skyViewEnd(constant Uniforms &u, float3 dir) {
     return dir.z < 0.0 ? max(u.cameraPosition.z - u.seaLevel, 1.0) / max(-dir.z, 1e-5) : 1e9;
 }
 
-// Full-resolution pixels per cloud texel along each axis: 2 up to 1080p, more above so
-// the march costs about the same at any resolution (the renderer sizes the textures).
+// Full-resolution pixels per cloud texel along each axis: 2 at 720p, more above so the
+// march costs about the same at any resolution (the renderer sizes the textures).
 uint cloudScale(constant Uniforms &u, uint cloudWidth) {
     return max(1u, uint(round(u.frame.x / float(cloudWidth))));
 }
