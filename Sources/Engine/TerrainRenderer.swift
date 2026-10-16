@@ -241,8 +241,10 @@ public final class TerrainRenderer {
         let detailLods = fineDetail ? TerrainDetail.levelCount(cellMetres: terrain.cellMetres) : 0
         detail = try TerrainDetail(device: device, library: library, levels: detailLods, cellMetres: terrain.cellMetres,
                                    seaLevel: terrain.seaLevel, seed: TerrainDetail.seed(of: overview), maps: detailMaps)
+        // Rings two node sizes wide: three drew 40% more triangles, mostly a few pixels across
+        // far away (shading 3 ms slower at 1440p), with no relief visible in the difference.
         let tree = TerrainQuadtree(quads: TerrainRenderer.nodeQuads, cellMetres: terrain.cellMetres / Double(1 << detailLods),
-                                   domain: terrain.domainMetres, overview: overview)
+                                   domain: terrain.domainMetres, overview: overview, rangeFactor: 2)
         quadtree = tree
         guard terrain.levels <= 8, tree.lodCount <= 16 else { throw RendererError.setup("terrain too large for the LOD tables") }
         func ints(_ f: (Int) -> Int) -> (SIMD4<Int32>, SIMD4<Int32>) {
