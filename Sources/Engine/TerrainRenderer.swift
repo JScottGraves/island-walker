@@ -37,6 +37,8 @@ public final class TerrainRenderer {
     let pipeline: MTLRenderPipelineState
     let skyPipeline: MTLRenderPipelineState
     let depthState: MTLDepthStencilState
+    let depthPipeline: MTLRenderPipelineState
+    let prepassDepthState: MTLDepthStencilState
     let skyDepthState: MTLDepthStencilState
     let vertices: MTLBuffer
     let indices: MTLBuffer
@@ -82,7 +84,9 @@ public final class TerrainRenderer {
 
         let shadows: Shadows = requested == .rayTraced && device.supportsRaytracingFromRender ? .rayTraced : .horizonMap
         self.shadows = shadows
-        let library = try device.makeLibrary(source: terrainShaderSource, options: nil)
+        let options = MTLCompileOptions()
+        options.preserveInvariance = true  // the depth prepass and shading pass must agree
+        let library = try device.makeLibrary(source: terrainShaderSource, options: options)
         let constants = MTLFunctionConstantValues()
         var rayTraced = shadows == .rayTraced
         constants.setConstantValue(&rayTraced, type: .bool, index: 0)
@@ -92,17 +96,28 @@ public final class TerrainRenderer {
         desc.colorAttachments[0].pixelFormat = colorFormat
         desc.depthAttachmentPixelFormat = depthFormat
         pipeline = try device.makeRenderPipelineState(descriptor: desc)
+        // Depth only: the terrain is shaded (with its cloud march) once per pixel, not once
+        // per overlapping triangle, and the sky only where the terrain leaves it uncovered.
+        desc.fragmentFunction = nil
+        desc.colorAttachments[0].writeMask = []
+        depthPipeline = try device.makeRenderPipelineState(descriptor: desc)
+        desc.colorAttachments[0].writeMask = .all
         desc.vertexFunction = library.makeFunction(name: "skyVertex")
         desc.fragmentFunction = library.makeFunction(name: "skyFragment")
         skyPipeline = try device.makeRenderPipelineState(descriptor: desc)
 
+        let prepassDesc = MTLDepthStencilDescriptor()
+        prepassDesc.depthCompareFunction = .less
+        prepassDesc.isDepthWriteEnabled = true
+        guard let pds = device.makeDepthStencilState(descriptor: prepassDesc) else { throw RendererError.setup("prepass depth state") }
+        prepassDepthState = pds
         let depthDesc = MTLDepthStencilDescriptor()
-        depthDesc.depthCompareFunction = .less
-        depthDesc.isDepthWriteEnabled = true
+        depthDesc.depthCompareFunction = .lessEqual
+        depthDesc.isDepthWriteEnabled = false
         guard let ds = device.makeDepthStencilState(descriptor: depthDesc) else { throw RendererError.setup("depth state") }
         depthState = ds
         let skyDepthDesc = MTLDepthStencilDescriptor()
-        skyDepthDesc.depthCompareFunction = .always
+        skyDepthDesc.depthCompareFunction = .lessEqual
         skyDepthDesc.isDepthWriteEnabled = false
         guard let sds = device.makeDepthStencilState(descriptor: skyDepthDesc) else { throw RendererError.setup("sky depth state") }
         skyDepthState = sds
@@ -324,6 +339,17 @@ public final class TerrainRenderer {
                              Float(orographicGain), 0))
         let skyView = skyViews[skyViewIndex]
 
+        // 1. Terrain depth.
+        enc.setRenderPipelineState(depthPipeline)
+        enc.setDepthStencilState(prepassDepthState)
+        enc.setCullMode(.none)
+        enc.setVertexBuffer(vertices, offset: 0, index: 0)
+        enc.setVertexBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 1)
+        enc.setVertexBuffer(horizons, offset: 0, index: 2)
+        enc.drawIndexedPrimitives(type: .triangle, indexCount: indexCount, indexType: .uint32,
+                                  indexBuffer: indices, indexBufferOffset: 0)
+
+        // 2. Sky where nothing covers it.
         enc.setRenderPipelineState(skyPipeline)
         enc.setDepthStencilState(skyDepthState)
         enc.setFragmentBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 1)
@@ -331,13 +357,9 @@ public final class TerrainRenderer {
         enc.setFragmentTexture(cloudMap, index: 1)
         enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
 
+        // 3. Terrain shading, only for the nearest surface.
         enc.setRenderPipelineState(pipeline)
         enc.setDepthStencilState(depthState)
-        enc.setCullMode(.none)
-        enc.setVertexBuffer(vertices, offset: 0, index: 0)
-        enc.setVertexBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 1)
-        enc.setVertexBuffer(horizons, offset: 0, index: 2)
-        enc.setFragmentBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 1)
         if let terrainAccel {
             enc.setFragmentAccelerationStructure(terrainAccel, bufferIndex: 2)
             enc.useResource(terrainAccel, usage: .read, stages: .fragment)

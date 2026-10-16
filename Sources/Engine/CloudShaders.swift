@@ -12,8 +12,10 @@
 let cloudShaderSource = """
 
 constant float kEarthRadius = 6360000.0;
-// Cumulus extinction per metre at full density (~25 m visibility inside a dense cloud core).
-constant float kCloudExtinction = 0.04;
+// Cumulus extinction per metre at full density (~40 m visibility inside a dense cloud core).
+constant float kCloudExtinction = 0.025;
+// Beyond this the march steps are too long for the detail noise: it would only stipple.
+constant float kCloudDetailStep = 250.0;
 
 float cloudHash(float3 p) {
     p = fract(p * 0.3183099 + 0.1);
@@ -53,9 +55,10 @@ float cloudCoverage(constant Uniforms &u, texture2d<float> cloudMap, float2 xy) 
     float clock = u.cloudLayer.z;
     float orographic = cloudMap.sample(s, xy / u.cloudLayer.w).r * u.cloudWind.z;
     float2 drift = xy - u.cloudWind.xy * clock;
-    float field = fbm3(float3(drift / 6000.0, 0.37), 3);
+    float field = fbm3(float3(drift / 6000.0, 0.37), 2);
     float cumulus = 0.55 * smoothstep(0.52, 0.72, field);
-    return saturate(max(orographic, cumulus));
+    // Even the cap cloud on the crest has breaks in it.
+    return min(max(orographic, cumulus), 0.88);
 }
 
 // Height above the sea of a point, on a curved Earth centred below the camera's x, y.
@@ -147,8 +150,14 @@ CloudResult marchClouds(constant Uniforms &u, texture2d<float> cloudMap, float3 
     float3 skyUp = skyIrradiance(u, float3(0.0, 0.0, 1.0));
     // What the ground below bounces up: green land or dark sea, lit by sun and sky.
     float3 ground = float3(0.05, 0.07, 0.06) * (u.sunRadiance * max(l.z, 0.0) + skyUp);
+    // Light inside a cloud has scattered many times: most of the sky's blue is washed out.
+    float skyLum = dot(skyUp, float3(0.2126, 0.7152, 0.0722));
+    float3 skyNeutral = mix(skyUp, float3(skyLum), 0.6);
 
-    const int steps = 48;
+    end = min(end, start + 60000.0);
+    if (end <= start) return result;
+    // Fewer steps for the sky: they still reach the cloud bottoms over the sea.
+    const int steps = maxDistance > 1e8 ? 40 : 32;
     float span = end - start;
     // Short steps near the camera (fog around a walker inside the cloud), longer far out.
     float jitter = fract(52.9829189 * fract(dot(pixel, float2(0.06711056, 0.00583715))));
@@ -160,30 +169,32 @@ CloudResult marchClouds(constant Uniforms &u, texture2d<float> cloudMap, float3 
         float dt = max(t - tPrevious, 1.0);
         tPrevious = t;
         float3 p = u.cameraPosition + dir * t;
-        float density = cloudDensity(u, cloudMap, p, true);
+        float density = cloudDensity(u, cloudMap, p, dt < kCloudDetailStep);
         if (density <= 0.0) continue;
-        float sigma = density * kCloudExtinction;
+        // Thin the cloud right around the camera so a walker inside it still sees the
+        // ground at their feet: fog, not a grey wall.
+        float sigma = density * kCloudExtinction * mix(0.3, 1.0, saturate(t / 400.0));
 
-        // Optical depth towards the sun over a few exponentially spaced samples.
+        // Optical depth towards the sun over a few coarse samples (~550 m in total).
         float tau = 0.0, tl = 0.0;
-        float lightStep = 60.0;
-        for (int j = 0; j < 4; j++) {
+        float lightStep = 50.0;
+        for (int j = 0; j < 3; j++) {
             tl += lightStep;
-            tau += cloudDensity(u, cloudMap, p + l * tl, false) * kCloudExtinction * lightStep;
-            lightStep *= 2.5;
+            tau += cloudDensity(u, cloudMap, p + l * (tl - 0.5 * lightStep), false) * kCloudExtinction * lightStep;
+            lightStep *= 3.0;
         }
         // Sun: dual-lobe phase (silver linings towards the sun, a little back-scatter),
-        // plus two Wrenninge octaves for multiple scattering.
+        // plus Wrenninge octaves standing in for multiple scattering.
         float3 inScatter = 0.0;
         float a = 1.0, b = 1.0, c = 1.0;
-        for (int o = 0; o < 3; o++) {
+        for (int o = 0; o < 4; o++) {
             float phase = mix(henyeyGreenstein(cosTheta, -0.3 * c), henyeyGreenstein(cosTheta, 0.8 * c), 0.7);
             inScatter += sun * (a * phase * exp(-b * tau));
             a *= 0.5; b *= 0.5; c *= 0.5;
         }
         // Ambient: sky above (more of it near the tops), ground below.
         float hn = saturate((altitude(u, p) - u.cloudLayer.x) / (u.cloudLayer.y - u.cloudLayer.x));
-        inScatter += 0.5 * skyUp * mix(0.35, 1.0, hn) + 0.5 * ground * (1.0 - 0.6 * hn);
+        inScatter += 0.5 * skyNeutral * mix(0.5, 1.0, hn) + 0.5 * ground * (1.0 - 0.6 * hn);
 
         float stepT = exp(-sigma * dt);
         // Energy-conserving integration over the step (cloud albedo ~1: scattering = extinction).

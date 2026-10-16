@@ -58,7 +58,8 @@ float3 skyIrradiance(constant Uniforms &u, float3 n) {
 }
 """ + cloudShaderSource + """
 struct VOut {
-    float4 position [[position]];
+    // Invariant: the depth prepass and the shading pass must produce identical depths.
+    float4 position [[position, invariant]];
     float3 world;
     float3 normal;
     float2 light;
@@ -196,8 +197,8 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
     return float4(color, 1.0);
 }
 
-// Sky: one full-screen triangle drawn before the terrain, coloured by the elevation of
-// each pixel's view ray (mirrors GroundView's sky).
+// Sky: one full-screen triangle at the far plane, drawn after the terrain's depth prepass
+// so it shades (and marches clouds) only where no terrain covers it.
 struct SkyOut {
     float4 position [[position]];
     float2 ndc;
@@ -206,7 +207,7 @@ struct SkyOut {
 vertex SkyOut skyVertex(uint vid [[vertex_id]]) {
     float2 p = float2((vid << 1) & 2, vid & 2) * 2.0 - 1.0;
     SkyOut o;
-    o.position = float4(p, 0.0, 1.0);
+    o.position = float4(p, 1.0, 1.0);
     o.ndc = p;
     return o;
 }
