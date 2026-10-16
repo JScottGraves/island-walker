@@ -69,6 +69,16 @@ final class IslandGenTests: XCTestCase {
         XCTAssertLessThan(leeward, 100, "swell still reaches the leeward coast")
     }
 
+    func testFlexureTiltsTheCoastalFringe() {
+        // Sea west of x = 8, a 10 m plain east of it, 100 m cells.
+        var h = Grid(width: 32, height: 8, cellSize: 100, fill: 10)
+        for y in 0..<8 { for x in 0..<8 { h[x, y] = -5 } }
+        Island.flex(&h, seaLevel: 0, lift: 20, distance: 1000)
+        XCTAssertEqual(h[4, 4], -5, "the sea is not lifted")
+        XCTAssertEqual(h[8, 4], 12, accuracy: 0.01, "one cell inland gets a tenth of the lift")
+        XCTAssertEqual(h[30, 4], 30, accuracy: 0.01, "full lift beyond the flexure distance")
+    }
+
     func testPNGChecksumsMatchKnownValues() {
         XCTAssertEqual(PNG.crc32(Array("IEND".utf8)), 0xAE42_6082)
         XCTAssertEqual(PNG.adler32(Array("Wikipedia".utf8)), 0x11E6_0398)
