@@ -174,6 +174,7 @@ footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--rule);
         <li><a href="#frame">One frame</a></li>
         <li><a href="#streaming">Streaming</a></li>
         <li><a href="#lod">CDLOD terrain</a></li>
+        <li><a href="#detail">Fine ground detail</a></li>
         <li><a href="#light">Sun, sky, shading</a></li>
         <li><a href="#shadows">Shadows</a></li>
         <li><a href="#clouds">Clouds</a></li>
@@ -193,13 +194,14 @@ footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--rule);
   <div class="eyebrow">Island Walker · architecture explainer</div>
   <h1>How the island walker works</h1>
   <p class="lede">A seed goes into a geology simulator that runs offline for about twenty seconds. What comes out is a tiled map of one volcanic island. A Metal app streams that map in around you as you walk, and lights it with a moving sun, a physical sky and trade-wind clouds.</p>
-  <div class="meta"><span>Repo: JScottGraves/island-walker</span><span>Written against main @ 47ee68b (PR #20)</span><span>2026-10-16</span><span>Swift + Metal · macOS 14 · Apple Silicon</span></div>
+  <div class="meta"><span>Repo: JScottGraves/island-walker</span><span>Written against main @ 61ba5a4 (PR #22)</span><span>2026-10-16</span><span>Swift + Metal · macOS 14 · Apple Silicon</span></div>
   <div class="facts" role="list">
     <div role="listitem"><b>80 km</b><span>square domain, island in the middle</span></div>
     <div role="listitem"><b>78 m</b><span>erosion grid (1024²)</span></div>
     <div role="listitem"><b>~10 m</b><span>refined grid (8192²)</span></div>
     <div role="listitem"><b>800 kyr</b><span>simulated erosion: 400 steps × 2,000 yr</span></div>
     <div role="listitem"><b>17–19 s</b><span>erosion bake on Scott's M3</span></div>
+    <div role="listitem"><b>31 cm</b><span>finest ground, generated around the walker</span></div>
     <div role="listitem"><b>6,600</b><span>lines of Swift and Metal</span></div>
   </div>
 </header>
@@ -360,16 +362,18 @@ footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--rule);
         <tr><td><code>GroundView.swift</code></td><td class="num">299</td><td>CPU first-person renders and automatic viewpoints</td><td>both</td></tr>
         <tr><td><code>Preview.swift</code>, <code>PNG.swift</code></td><td class="num">187</td><td>Hillshade, flow and grey previews; a dependency-free PNG encoder</td><td>both</td></tr>
         <tr><td colspan="4"><b>Engine</b>, <b>Walker</b>, <b>IslandApp</b> · runtime</td></tr>
-        <tr><td><code>TerrainRenderer.swift</code></td><td class="num">701</td><td>Pipelines, targets, per-frame encoding, snapshots, the shadow acceleration structure</td><td>lighting</td></tr>
-        <tr><td><code>TerrainShaders.swift</code></td><td class="num">357</td><td>Metal source: CDLOD vertex shader, terrain and sky fragments, shadows</td><td>lighting</td></tr>
+        <tr><td><code>TerrainRenderer.swift</code></td><td class="num">730</td><td>Pipelines, targets, per-frame encoding, snapshots, the shadow acceleration structure</td><td>lighting</td></tr>
+        <tr><td><code>TerrainShaders.swift</code></td><td class="num">359</td><td>Metal source: CDLOD vertex shader, terrain and sky fragments, shadows</td><td>lighting</td></tr>
+        <tr><td><code>TerrainDetail.swift</code></td><td class="num">254</td><td>Fine-detail clipmap: levels, which rows to refill as the camera moves, CPU height for the walker</td><td>detail</td></tr>
+        <tr><td><code>DetailShaders.swift</code></td><td class="num">308</td><td>Metal source: the detail recipe (rock, soil, rills, boulders) and the chain that hands each LOD its surface</td><td>detail</td></tr>
         <tr><td><code>CloudShaders.swift</code></td><td class="num">397</td><td>Metal source: cloud density, march, resolve, composite, shadow map</td><td>lighting</td></tr>
         <tr><td><code>TerrainStreamer.swift</code></td><td class="num">173</td><td>GPU tile cache and page table</td><td>lighting</td></tr>
         <tr><td><code>Walker.swift</code></td><td class="num">43</td><td>First-person walking with a slope limit</td><td>lighting</td></tr>
-        <tr><td><code>IslandApp.swift</code>, <code>IslandSource.swift</code>, <code>Snapshots.swift</code></td><td class="num">375</td><td>Window and input, choosing the island source, headless <code>--snapshot</code> renders</td><td>lighting</td></tr>
+        <tr><td><code>IslandApp.swift</code>, <code>IslandSource.swift</code>, <code>Snapshots.swift</code></td><td class="num">398</td><td>Window and input, choosing the island source, headless <code>--snapshot</code> renders</td><td>lighting</td></tr>
       </tbody>
     </table>
   </div>
-  <p>"Owned by" names the project thread that changes the file: <b>terrain</b> is "Terrain-first architecture plan", <b>lighting</b> is "Sun lighting implementation", <b>clouds</b> was the cloud bake thread. The Metal shaders live as Swift strings so <code>swift build</code> needs no Xcode Metal toolchain step.</p>
+  <p>"Owned by" names the project thread that changes the file: <b>terrain</b> is "Terrain-first architecture plan", <b>lighting</b> is "Sun lighting implementation", <b>clouds</b> was the cloud bake thread, <b>detail</b> is "Fine ground detail near walker". The Metal shaders live as Swift strings so <code>swift build</code> needs no Xcode Metal toolchain step.</p>
 </section>
 
 <!-- ============================================================ 3 -->
@@ -585,7 +589,7 @@ footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--rule);
       </div>
       <figure>
         <img src="img/cloud-bake.jpg" alt="Three generated islands with white cloud coverage drawn over their hillshades, thickest over the crests and windward slopes." width="1536" height="512">
-        <figcaption><span class="fig-n">Fig 10</span><b>Baked coverage</b> for seeds 42, 7 and 123 (<code>clouds.png</code>). The app adds drifting cumulus and the daily cycle on top (<a href="#clouds">§5.6</a>).</figcaption>
+        <figcaption><span class="fig-n">Fig 10</span><b>Baked coverage</b> for seeds 42, 7 and 123 (<code>clouds.png</code>). The app adds drifting cumulus and the daily cycle on top (<a href="#clouds">§5.7</a>).</figcaption>
       </figure>
     </div>
   </div>
@@ -705,10 +709,11 @@ tile name: &lt;level&gt;/&lt;ty&gt;_&lt;tx&gt;.lz4, row 0 south</code></pre>
             <rect x="250" y="190" width="300" height="36" rx="3" style="fill: var(--soil-soft); stroke: var(--soil)"/><text x="400" y="212" text-anchor="middle">load + LZ4-decode missing tiles</text>
             <path d="M417 64 L 417 188" style="stroke: var(--ink-soft)" stroke-dasharray="3 3" marker-end="url(#ar)"/>
 
+            <rect x="446" y="115" width="104" height="44" rx="3" style="fill: var(--leaf-soft); stroke: var(--leaf)"/><text x="498" y="133" text-anchor="middle" font-weight="600">detail</text><text x="498" y="149" text-anchor="middle" font-size="10" class="soft">refill moved rows</text>
             <rect x="560" y="115" width="80" height="44" rx="3" style="fill: var(--sky-soft); stroke: var(--sky)"/><text x="600" y="135" text-anchor="middle" font-weight="600">depth</text><text x="600" y="150" text-anchor="middle" font-size="10" class="soft">prepass</text>
             <rect x="646" y="115" width="130" height="44" rx="3" style="fill: var(--sky-soft); stroke: var(--sky)"/><text x="711" y="133" text-anchor="middle" font-weight="600">clouds (compute)</text><text x="711" y="149" text-anchor="middle" font-size="10" class="soft">shadow map · march · resolve</text>
             <rect x="782" y="115" width="108" height="44" rx="3" style="fill: var(--sky-soft); stroke: var(--sky)"/><text x="836" y="133" text-anchor="middle" font-weight="600">shade</text><text x="836" y="149" text-anchor="middle" font-size="10" class="soft">sky, then terrain</text>
-            <path d="M553 64 L 590 113" style="stroke: var(--ink-soft)" marker-end="url(#ar)"/>
+            <path d="M553 64 L 510 113" style="stroke: var(--ink-soft)" marker-end="url(#ar)"/>
           </g>
           <line x1="60" y1="88" x2="890" y2="88" style="stroke: var(--rule)"/>
           <line x1="60" y1="175" x2="890" y2="175" style="stroke: var(--rule)"/>
@@ -717,6 +722,7 @@ tile name: &lt;level&gt;/&lt;ty&gt;_&lt;tx&gt;.lz4, row 0 south</code></pre>
       <figcaption><span class="fig-n">Fig 12</span><b>A frame across CPU, GPU and the tile loader.</b> The sky-view LUT is rebuilt on the CPU only when the sun has moved about 0.1°. Three of everything that changes per frame (node buffers, page tables, sky textures) are kept so the CPU never writes a buffer the GPU is still reading.</figcaption>
     </figure>
     <ol class="rail">
+      <li><div><b>Fine detail, in compute.</b> Refills only the rows and columns of the detail clipmap that the camera has moved into (<a href="#detail">§5.4</a>). Usually nothing, at walking pace a few hundred samples.</div></li>
       <li><div><b>Depth prepass.</b> Terrain depth only, no colour. The cloud march needs it to stop at the ground, and it means the expensive terrain shader later runs once per pixel instead of once per overlapping triangle. Both passes use <code>invariant</code> positions so their depths match exactly.</div></li>
       <li><div><b>Clouds, in compute.</b> A 512² cloud shadow map over the island (~160 m texels); the cloud march at reduced resolution (at most 360 rows: half per axis at 720p, a quarter at 1440p) up to the terrain depth; a resolve that blends 10 % of the new frame into a reprojected history.</div></li>
       <li><div><b>Sky.</b> One full-screen triangle at the far plane, shaded only where no terrain covers it: sky-view LUT, sun disc, open sea beyond the heightfield, clouds composited.</div></li>
@@ -761,7 +767,7 @@ tile name: &lt;level&gt;/&lt;ty&gt;_&lt;tx&gt;.lz4, row 0 south</code></pre>
         <figcaption><span class="fig-n">Fig 13</span><b>Fallback through the page table.</b> A missing tile reads its parent's samples at half the coordinates.</figcaption>
       </figure>
     </div>
-    <p>The walker's ground height comes from <code>TerrainHeights</code> on the CPU, which decodes level-0 tiles into a small 64-tile LRU cache and interpolates bilinearly, matching what the renderer draws up close.</p>
+    <p>Beyond the fine-detail clipmap (<a href="#detail">§5.4</a>), the walker's ground height comes from <code>TerrainHeights</code> on the CPU, which decodes level-0 tiles into a small 64-tile LRU cache and interpolates bilinearly, matching what the renderer draws there.</p>
   </div>
 
   <!-- 5.3 -->
@@ -792,17 +798,88 @@ tile name: &lt;level&gt;/&lt;ty&gt;_&lt;tx&gt;.lz4, row 0 south</code></pre>
         <figcaption><span class="fig-n">Fig 14</span><b>Nested rings.</b> Every node is the same 64×64-quad grid; only its spacing doubles per level. Near the camera nodes are small and dense.</figcaption>
       </figure>
       <div class="prose">
-        <p><code>TerrainQuadtree.select</code> walks a quadtree whose root covers the whole domain. A level-<i>k</i> node is 64 quads of <code>cellMetres × 2<sup>k</sup></code>, and it is drawn if it lies inside its own ring but outside the finer level's ring; otherwise its four children are visited. Rings reach 3 node sizes from the camera. With a 10 m bundle that is 8 levels: the finest ring reaches about 1.9 km at 10 m spacing, and each ring out doubles in size and spacing.</p>
+        <p><code>TerrainQuadtree.select</code> walks a quadtree whose root covers the whole domain. A level-<i>k</i> node is 64 quads of <code>cellMetres × 2<sup>k</sup></code>, and it is drawn if it lies inside its own ring but outside the finer level's ring; otherwise its four children are visited. Rings reach 3 node sizes from the camera. With a 10 m bundle that is 13 levels: five generated detail levels (<a href="#detail">§5.4</a>), the finest reaching about 60 m at 31 cm spacing, then 8 data levels, the first reaching about 1.9 km at 10 m. Each ring out doubles in size and spacing.</p>
         <p>Culling uses a min/max height pyramid of the overview padded by 40 m, tested against the six frustum planes. Selected nodes go to the GPU as instances: one draw for full nodes, one for quarter nodes drawn at their parent's level when only some children are inside their ring.</p>
-        <p><b>Morphing</b> hides the seams. From 70 % of the way across a ring, each vertex slides its odd rows and columns onto the next level's grid and blends its height to the next data level. A fully morphed vertex matches the coarser neighbour exactly, so nothing pops or cracks. Normals come from central differences on that same morphed surface.</p>
+        <p><b>Morphing</b> hides the seams. From 70 % of the way across a ring, each vertex slides its odd rows and columns onto the next level's grid and blends its height to the next level's surface (detail or data). A fully morphed vertex matches the coarser neighbour exactly, so nothing pops or cracks. Normals come from central differences on that same morphed surface.</p>
         <p>Positions are subtracted from the camera before projection, so there is no vertex jitter 40 km from the origin.</p>
       </div>
     </div>
   </div>
 
   <!-- 5.4 -->
+  <div class="sub" id="detail">
+    <h3>5.4 Fine ground detail</h3>
+    <div class="ways">
+      <div class="way plain"><h4>In plain words</h4><p>The bundle stops at one height every 10 m, which looks like smooth felt underfoot. So the app makes up the last few metres of roughness itself (broken rock, soil lumps, rills, boulders), but only right around you, and it makes them fit the place: rocky on steep crests, soft in valley bottoms, gullied where it rains.</p></div>
+      <div class="way mech"><h4>Mechanism</h4><p>Five clipmap levels centred on the camera, 5 m down to 31 cm, each 768² samples. A compute kernel fills them with a Catmull-Rom surface through the 10 m data plus noise steered by slope, curvature, rain, drainage and hardness. Five extra CDLOD rings draw them; the walker stands on them.</p></div>
+      <div class="way code"><h4>Where</h4><p><code>TerrainDetail.swift</code> owns the levels and their updates; <code>DetailShaders.swift</code> holds <code>detailHeight</code> (the recipe) and <code>chainHeight</code>. Plan item §4.1, PR #22. <code>--detail off</code> and <code>--pitch DEG</code> make before/after close-ups with <code>--snapshot</code>.</p></div>
+    </div>
+    <figure>
+      <div class="canvas">
+        <svg viewBox="0 0 640 340" width="640" height="340" role="img" aria-label="Five nested square detail levels around the camera, each twice the size and spacing of the one inside it">
+          <rect x="10" y="10" width="320" height="320" style="fill: var(--sheet); stroke: var(--rule)"/>
+          <g style="fill: var(--sea-soft); fill-opacity: 0.35; stroke: var(--sea)" stroke-width="1.3">
+            <rect x="10" y="10" width="320" height="320"/>
+            <rect x="90" y="90" width="160" height="160"/>
+            <rect x="130" y="130" width="80" height="80"/>
+            <rect x="150" y="150" width="40" height="40"/>
+            <rect x="160" y="160" width="20" height="20"/>
+          </g>
+          <circle cx="170" cy="170" r="3.5" style="fill: var(--soil)"/>
+          <g style="stroke: var(--ink-soft); fill: none" stroke-dasharray="2 3">
+            <path d="M330 10 L 352 22"/>
+            <path d="M250 90 L 352 82"/>
+            <path d="M210 130 L 352 142"/>
+            <path d="M190 150 L 352 202"/>
+            <path d="M180 160 L 352 262"/>
+          </g>
+          <g font-size="12">
+            <text x="358" y="26"><tspan font-weight="600">L4 · 4.9 m</tspan><tspan class="soft" dx="8">3.8 km across</tspan></text>
+            <text x="358" y="86"><tspan font-weight="600">L3 · 2.5 m</tspan><tspan class="soft" dx="8">1.9 km</tspan></text>
+            <text x="358" y="146"><tspan font-weight="600">L2 · 1.2 m</tspan><tspan class="soft" dx="8">940 m</tspan></text>
+            <text x="358" y="206"><tspan font-weight="600">L1 · 61 cm</tspan><tspan class="soft" dx="8">470 m</tspan></text>
+            <text x="358" y="266"><tspan font-weight="600">L0 · 31 cm</tspan><tspan class="soft" dx="8">235 m</tspan></text>
+            <text x="358" y="312" class="soft" font-size="11">outside L4: the bundle's own 10 m data,</text>
+            <text x="358" y="327" class="soft" font-size="11">then coarser mips out to the horizon</text>
+          </g>
+        </svg>
+      </div>
+      <figcaption><span class="fig-n">Fig 15</span><b>The detail clipmap, drawn to scale.</b> Every level holds 768 × 768 heights; only the spacing doubles. Sizes are for a 9.8 m bundle, which gets five levels (<code>levelCount</code>: halve until about 30 cm; none over grids coarser than 20 m).</figcaption>
+    </figure>
+    <div class="two">
+      <div class="prose">
+        <p><b>Scrolling, not rebuilding.</b> Sample <i>j</i> of a level lives at texel <i>j</i> mod 768, so when the camera moves, the samples that are still wanted stay put and only the rows and columns that scroll in are computed. A level moves once the camera has drifted 4 of its samples, and waits (keeping its old region) until the 10 m tiles under its new region are resident. At walking pace that is a few hundred samples a frame.</p>
+        <p><b>Handing over.</b> A CDLOD vertex at LOD <i>l</i> &lt; 5 asks <code>chainHeight</code> for detail level <i>l</i>; if that level doesn't hold the point yet, the next coarser one answers, and past L4 the streamed data does. Morphing blends toward the next level's surface exactly as in <a href="#lod">§5.3</a>, so the detail fades in with distance rather than popping.</p>
+        <p><b>No shimmer.</b> Each level keeps only noise octaves at least twice its spacing, fully from four times (<code>band</code>). Coarser levels are smoothed copies of finer ones, which is what lets the morph between them be seamless.</p>
+      </div>
+      <div class="prose">
+        <p><b>Same rocks every time.</b> The noise seed is a hash of the bundle's overview heights, so one island always gets the same boulders, including the imported Oʻahu DEM.</p>
+        <p><b>Standing on it.</b> The clipmap is in shared memory. <code>groundHeight</code> reads the finest level whose last finished GPU update covers the walker's feet, bilinearly like the vertex shader, and falls back to the 10 m <code>TerrainHeights</code> elsewhere. <code>prepareGround</code> fills the levels synchronously before spawning or a snapshot.</p>
+        <p><b>Cost.</b> About +3 ms GPU at 1440p; the worst of the 40 test views is 15.6 ms on Scott's M3.</p>
+      </div>
+    </div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Layer</th><th>Shape</th><th>Strongest where</th><th class="num">Amplitude</th></tr></thead>
+        <tbody>
+          <tr><td>Base</td><td>Catmull-Rom through the 10 m samples (smooth, and through every sample). Also gives the slope and curvature the other layers read.</td><td>everywhere</td><td class="num">—</td></tr>
+          <tr><td>Broken rock</td><td>Ridged noise, sharp crests and blocky hollows, 12 m wavelength down</td><td>steep ground (from ~14°, full at 45°), crests, dry slopes; less on soft rock</td><td class="num">0.8 m</td></tr>
+          <tr><td>Soil</td><td>Soft hummocks from 8 m, turning into clumpy tussocks below ~2.5 m</td><td>wherever it isn't rock; halved on valley floors</td><td class="num">0.22 m</td></tr>
+          <tr><td>Rills</td><td>Narrow grooves stretched 4:1 straight downhill, 6 m down, in 8 fixed directions blended</td><td>hillsides from ~5°, fading out between ~50° and 65°, deeper where it rains more; none on valley floors</td><td class="num">0.6 m</td></tr>
+          <tr><td>Boulders</td><td>At most one per 3 m cell, radius 0.3–1.1 m (mostly small), lumpy outline, flat top, facets, base sunk in</td><td>1.5 % of cells anywhere, up to ~30 % on rock; fading out on slopes between 50° and 63°</td><td class="num">up to ~0.5 m</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>Two masks sit over all of it. <b>Valley floors</b> (drainage over about 10<sup>5</sup>–10<sup>6.5</sup> m², or hollows in the 10 m surface, and not steep) are kept smooth like sediment. <b>Beaches and sea</b>: detail fades in from 0.5 to 4 m above sea level, sea cliffs keep it, and it is gone 3 m under water. Rain, drainage and hardness come from the bundle channels at about 1024²; a bare heightfield or DEM without them gets neutral defaults.</p>
+    <figure>
+      <img src="img/detail-before-after.jpg" alt="Four renders in a grid. Top: a grassy ridge on seed 42, smooth on the left and with lumps, rills and small boulders on the right. Bottom: a slope near the Oahu summit, smooth on the left and with rough rock and a boulder on the right." width="1288" height="728">
+      <figcaption><span class="fig-n">Fig 16</span><b>Off and on.</b> Left column <code>--detail off</code>, right column on: seed 42's ridge (top) and near the Oʻahu summit (bottom). The shape is there, but up close the ground still reads flatter than it is, mainly because the albedo is uniform and the small relief casts no shadows (the shadow mesh is the coarse overview). Those belong to shading, not this layer.</figcaption>
+    </figure>
+  </div>
+
+  <!-- 5.5 -->
   <div class="sub" id="light">
-    <h3>5.4 Sun, sky and the shading equation</h3>
+    <h3>5.5 Sun, sky and the shading equation</h3>
     <div class="prose">
       <p>The sun moves. <code>SunPath.direction(hour:day:)</code> gives the direction at Oʻahu's latitude (21.4° N) from local solar time and day of year (default day 288, mid-October). <code>Atmosphere</code> then computes sunlight after the atmosphere and the whole sky on the CPU following Hillaire 2020: Rayleigh, Mie (6× Hillaire's default aerosol, AOD ~0.03, for clean trade-wind air with sea salt) and ozone, with multiple scattering from a small LUT. The result is a 128×64 <b>sky-view texture</b> and 9 <b>spherical-harmonic</b> coefficients for sky light on any surface normal. Exposure adapts to the square root of the light change, so dawn reads darker than noon without going black.</p>
     </div>
@@ -814,7 +891,7 @@ tile name: &lt;level&gt;/&lt;ty&gt;_&lt;tx&gt;.lz4, row 0 south</code></pre>
       <div style="overflow-x:auto"><svg id="sunSvg" viewBox="0 0 720 230" width="720" height="230" role="img" aria-label="Sun path across the sky for the chosen day"></svg></div>
       <div class="readout" id="sunRead"></div>
     </div>
-    <figcaption><span class="fig-n">Fig 15</span><b>The sun path the app uses</b>, computed with the same formula as <code>SunPath.direction</code>. The cloud numbers use the renderer's daily cycles: base = 600 − 200·cos(2π(h−14)/24) m and orographic gain = 0.85 + 0.15·cos(2π(h−7)/24).</figcaption>
+    <figcaption><span class="fig-n">Fig 17</span><b>The sun path the app uses</b>, computed with the same formula as <code>SunPath.direction</code>. The cloud numbers use the renderer's daily cycles: base = 600 − 200·cos(2π(h−14)/24) m and orographic gain = 0.85 + 0.15·cos(2π(h−7)/24).</figcaption>
 
     <p>Each terrain pixel is lit like this (<code>terrainFragment</code>):</p>
     <div class="eq">colour = albedo · ( sun · max(n·l, 0) · shadow · cloudShadow &nbsp;+&nbsp; skySH(n) · skyVisibility &nbsp;+&nbsp; bounce )</div>
@@ -823,7 +900,7 @@ tile name: &lt;level&gt;/&lt;ty&gt;_&lt;tx&gt;.lz4, row 0 south</code></pre>
         <thead><tr><th>Piece</th><th>Where it comes from</th></tr></thead>
         <tbody>
           <tr><td>albedo</td><td><code>Look.albedo</code>: grass by height, cliff green on slopes, red soil and dark basalt breaking through in patches on steep spurs, a sand strip within 1–3 m of the sea. Authored as sRGB swatches and converted to linear once; the pale early renders came from using sRGB numbers as linear.</td></tr>
-          <tr><td>shadow</td><td>Terrain shadow: horizon map, plus ray tracing where it's in doubt (<a href="#shadows">§5.5</a>)</td></tr>
+          <tr><td>shadow</td><td>Terrain shadow: horizon map, plus ray tracing where it's in doubt (<a href="#shadows">§5.6</a>)</td></tr>
           <tr><td>cloudShadow</td><td>The 512² cloud shadow map, read where the sun ray meets the cloud base; never darker than 30 %</td></tr>
           <tr><td>skySH · skyVisibility</td><td>Sky light for this normal, times the share of sky the terrain leaves open (baked cosine-weighted in 16 directions out to 6 km)</td></tr>
           <tr><td>bounce</td><td>One cheap bounce: the blocked sky and the ground a tilted face looks at return light, assuming neighbours share this albedo and are half in sun</td></tr>
@@ -834,13 +911,13 @@ tile name: &lt;level&gt;/&lt;ty&gt;_&lt;tx&gt;.lz4, row 0 south</code></pre>
     <p><code>Look.metalPrelude</code> generates the albedo, tone mapper and water functions as Metal source from the same Swift constants, so the CPU ground views and the GPU stay alike.</p>
     <figure>
       <img src="img/sky-pali-sheet.jpg" alt="Grid of ten renders of a cliff seen from a plain, at different times of day, before and after the physical sky." width="1290" height="1840" style="max-width: 640px">
-      <figcaption><span class="fig-n">Fig 16</span><b>The pali through the day</b> before (left) and after (right) the Hillaire sky (PR #10). Rows run from morning to dusk; the last rows show the warm, dim low sun and the aureole around it.</figcaption>
+      <figcaption><span class="fig-n">Fig 18</span><b>The pali through the day</b> before (left) and after (right) the Hillaire sky (PR #10). Rows run from morning to dusk; the last rows show the warm, dim low sun and the aureole around it.</figcaption>
     </figure>
   </div>
 
-  <!-- 5.5 -->
+  <!-- 5.6 -->
   <div class="sub" id="shadows">
-    <h3>5.5 Terrain shadows</h3>
+    <h3>5.6 Terrain shadows</h3>
     <div class="two">
       <div class="prose">
         <p>Two methods share the work.</p>
@@ -867,14 +944,14 @@ tile name: &lt;level&gt;/&lt;ty&gt;_&lt;tx&gt;.lz4, row 0 south</code></pre>
             </g>
           </svg>
         </div>
-        <figcaption><span class="fig-n">Fig 17</span><b>Per-pixel shadow decision.</b> The horizon map skips rays for most pixels (PR #20).</figcaption>
+        <figcaption><span class="fig-n">Fig 19</span><b>Per-pixel shadow decision.</b> The horizon map skips rays for most pixels (PR #20).</figcaption>
       </figure>
     </div>
   </div>
 
-  <!-- 5.6 -->
+  <!-- 5.7 -->
   <div class="sub" id="clouds">
-    <h3>5.6 Trade-wind clouds</h3>
+    <h3>5.7 Trade-wind clouds</h3>
     <div class="ways">
       <div class="way plain"><h4>In plain words</h4><p>A layer of cumulus between a few hundred metres and 2 km. It sits where the bake said clouds stand, plus drifting puffs off the ocean. Walking on the crest of the range, you're inside it.</p></div>
       <div class="way mech"><h4>Mechanism</h4><p>A 2.5D ray-marched layer in the Horizon Zero Dawn / Frostbite style: coverage from a map, a height profile, fBm noise advected by the wind, Beer–Lambert light with dual-lobe phase and multi-scattering octaves, temporal accumulation.</p></div>
@@ -900,7 +977,7 @@ tile name: &lt;level&gt;/&lt;ty&gt;_&lt;tx&gt;.lz4, row 0 south</code></pre>
           <circle cx="360" cy="91" r="4" style="fill: var(--soil)"/><text x="370" y="88" font-size="10">walker on the crest: in fog</text>
         </svg>
       </div>
-      <figcaption><span class="fig-n">Fig 18</span><b>The cloud layer in section.</b> Coverage at a point is the larger of the baked orographic map (times a gain thickest at dawn) and a drifting 6 km noise field, capped at 0.88 so even the cap has breaks. Heavier cover reaches higher toward the inversion.</figcaption>
+      <figcaption><span class="fig-n">Fig 20</span><b>The cloud layer in section.</b> Coverage at a point is the larger of the baked orographic map (times a gain thickest at dawn) and a drifting 6 km noise field, capped at 0.88 so even the cap has breaks. Heavier cover reaches higher toward the inversion.</figcaption>
     </figure>
     <ol class="rail">
       <li><div><b>Shadow map.</b> For each of 512² texels over the island, march 6 samples up through the layer toward the sun. Terrain reads it instead of marching per pixel.</div></li>
@@ -910,16 +987,16 @@ tile name: &lt;level&gt;/&lt;ty&gt;_&lt;tx&gt;.lz4, row 0 south</code></pre>
     </ol>
     <figure>
       <img src="img/clouds-pali-sheet.jpg" alt="Fifteen renders of the pali view at 07:00, 10:00, 13:00, 16:00 and 17:30, without clouds and with two rounds of the cloud layer." width="1800" height="1700">
-      <figcaption><span class="fig-n">Fig 19</span><b>The pali at five times of day</b>, without clouds (left) and with the cloud layer (middle and right, two tuning rounds of PR #12). Measured on the M3 at 720p after PR #14: coast 5 ms, pali 6, summit 11, ridge 14. The target is 60 fps at 1440p.</figcaption>
+      <figcaption><span class="fig-n">Fig 21</span><b>The pali at five times of day</b>, without clouds (left) and with the cloud layer (middle and right, two tuning rounds of PR #12). Measured on the M3 at 720p after PR #14: coast 5 ms, pali 6, summit 11, ridge 14. The target is 60 fps at 1440p.</figcaption>
     </figure>
   </div>
 
-  <!-- 5.7 -->
+  <!-- 5.8 -->
   <div class="sub" id="walker">
-    <h3>5.7 Walker and controls</h3>
+    <h3>5.8 Walker and controls</h3>
     <div class="two">
       <div class="prose">
-        <p><code>Walker</code> stores a position in Double metres, feet height, yaw and pitch. Walking is 1.4 m/s, running 4 m/s; a step is refused if it would climb steeper than 1:1. Eye height is 1.7 m. Fly mode (F) moves at 60 m/s, 400 with Shift, and never goes below 2 m over the ground. The app starts on the island's highest point.</p>
+        <p><code>Walker</code> stores a position in Double metres, feet height, yaw and pitch. Walking is 1.4 m/s, running 4 m/s; a step is refused if it would climb steeper than 1:1. Its feet sit on the fine-detail surface where it exists (<a href="#detail">§5.4</a>). Eye height is 1.7 m. Fly mode (F) moves at 60 m/s, 400 with Shift, and never goes below 2 m over the ground. The app starts on the island's highest point.</p>
         <p>The title bar is the debug overlay: time of day, GPU ms, nodes drawn, resident tiles and tiles still loading.</p>
       </div>
       <div class="tablewrap">
@@ -948,7 +1025,7 @@ tile name: &lt;level&gt;/&lt;ty&gt;_&lt;tx&gt;.lz4, row 0 south</code></pre>
     <div class="canvas">
       <svg id="realismSvg" viewBox="0 0 760 300" width="760" height="300" role="img" aria-label="Bar chart comparing Oahu with seeds 42, 7 and 123 on flat land, land over 25 degrees, and cliffs"></svg>
     </div>
-    <figcaption><span class="fig-n">Fig 20</span><b>Generated islands against Oʻahu at 78 m</b>, from the final tuning sweep (<code>renders/inland/sweep-final.md</code>, coast slope 0.3, wave retreat 0.004, leeward 0.2; before flexure). The hypsometric integral already matches (0.176–0.179 vs 0.176), as do drainage density (0.67 vs 0.69) and Hack's exponent (0.48–0.49 vs 0.58, a little low). Flat land is the big miss.</figcaption>
+    <figcaption><span class="fig-n">Fig 22</span><b>Generated islands against Oʻahu at 78 m</b>, from the final tuning sweep (<code>renders/inland/sweep-final.md</code>, coast slope 0.3, wave retreat 0.004, leeward 0.2; before flexure). The hypsometric integral already matches (0.176–0.179 vs 0.176), as do drainage density (0.67 vs 0.69) and Hack's exponent (0.48–0.49 vs 0.58, a little low). Flat land is the big miss.</figcaption>
   </figure>
   <div class="callout"><b>The open realism gap.</b> Oʻahu is two knife-edged ranges on wide, nearly flat ground: 40 % of its land is under 5°. Our islands reach 17–29 %. Late sea-level fall, wave base, deltas, flexure and saddle lava ponding have all been tried; flat land stays near 23 %. The next idea on record is inland alluvial fill, and a saddle pond capped at its spill point on the eroded surface.</div>
 </section>
@@ -1003,7 +1080,7 @@ tile name: &lt;level&gt;/&lt;ty&gt;_&lt;tx&gt;.lz4, row 0 south</code></pre>
         <tr><td>3.7 Derived maps</td><td><span class="pill part">partial</span></td><td>Height, rain, drainage, hardness, clouds. No sediment depth, curvature or material IDs.</td></tr>
         <tr><td>3.8 Refine to 10 m</td><td><span class="pill part">first cut</span></td><td>Residual noise, no erosion pass; cliffs too soft at 10 m</td></tr>
         <tr><td>3.9 Determinism</td><td><span class="pill ok">done</span></td><td>Byte-identical bundles, tested</td></tr>
-        <tr><td>4.1 Runtime detail 10 m → 25 cm</td><td><span class="pill todo">not started</span></td><td>Only the CPU ground views have a detail noise</td></tr>
+        <tr><td>4.1 Runtime detail 10 m → 25 cm</td><td><span class="pill part">first cut</span></td><td>Shape only, to 31 cm, steered by the bake (§5.4). No material or albedo variation and no small-scale shadows yet.</td></tr>
         <tr><td>4.2 LOD and streaming</td><td><span class="pill ok">done</span></td><td>CDLOD with morphing, tile cache + page table (instead of sparse textures and mesh shaders)</td></tr>
         <tr><td>4.3 Shading</td><td><span class="pill part">partial</span></td><td>Hillaire sky, aerial perspective, RT + horizon shadows, flat water. Procedural albedo only: no texture layers, triplanar or moisture-driven materials.</td></tr>
         <tr><td>Time of day, clouds (added)</td><td><span class="pill ok">done</span></td><td>Moving sun, trade-wind clouds with shadows</td></tr>
@@ -1018,7 +1095,7 @@ tile name: &lt;level&gt;/&lt;ty&gt;_&lt;tx&gt;.lz4, row 0 south</code></pre>
     <h3>Open threads worth knowing</h3>
     <ul>
       <li>Flat land (§6) is the biggest terrain realism gap; refined cliffs at 10 m are the second.</li>
-      <li>The app reads bundles, but the 10 m surface is only what the bundle holds; no runtime detail below it yet.</li>
+      <li>Ground up close now has relief, but reads flat because albedo is uniform and rocks cast no shadows; that is the next shading gap.</li>
       <li>Shaded pali bowls can render too dark; sky ambient and bounce helped. A faint shelf line in the cloud bank on the pali view persists, and motion ghosting of the cloud history is unchecked.</li>
       <li>The rain model is a stand-in; the research notes recommend a linear feedback precipitation model.</li>
     </ul>
@@ -1029,7 +1106,7 @@ tile name: &lt;level&gt;/&lt;ty&gt;_&lt;tx&gt;.lz4, row 0 south</code></pre>
 <section id="history">
   <div class="eyebrow">9</div>
   <h2>How we got here</h2>
-  <p>All twenty pull requests merged on 2026-10-16, in order. Each one is a single idea, so this list doubles as a map of why the code looks the way it does.</p>
+  <p>All twenty-two pull requests merged on 2026-10-16, in order. Each one is a single idea, so this list doubles as a map of why the code looks the way it does.</p>
   <div class="tablewrap">
     <table>
       <thead><tr><th class="num">PR</th><th>Change</th><th>Area</th></tr></thead>
@@ -1054,6 +1131,8 @@ tile name: &lt;level&gt;/&lt;ty&gt;_&lt;tx&gt;.lz4, row 0 south</code></pre>
         <tr><td class="num">18</td><td>Import the Oʻahu DEM as a bundle; bundle determinism test</td><td>terrain</td></tr>
         <tr><td class="num">19</td><td>Streaming CDLOD terrain from bundles, lighting and clouds at 1440p</td><td>lighting</td></tr>
         <tr><td class="num">20</td><td>Trace sun rays only where the horizon map is in doubt</td><td>lighting</td></tr>
+        <tr><td class="num">21</td><td>This explainer page</td><td>docs</td></tr>
+        <tr><td class="num">22</td><td>Fine ground detail near the walker: GPU clipmap to 31 cm</td><td>detail</td></tr>
       </tbody>
     </table>
   </div>
@@ -1080,6 +1159,7 @@ tile name: &lt;level&gt;/&lt;ty&gt;_&lt;tx&gt;.lz4, row 0 south</code></pre>
     <dt>Mip level</dt><dd>A copy of a map at half the resolution of the one below it.</dd>
     <dt>Page table</dt><dd>A lookup from tile coordinates to the GPU slot that holds the tile, or "not loaded".</dd>
     <dt>CDLOD</dt><dd>Continuous Distance-Dependent Level of Detail (Strugar 2009): quadtree terrain with vertex morphing between levels.</dd>
+    <dt>Clipmap</dt><dd>A stack of same-size grids centred on the camera, each covering twice the area at half the resolution of the one inside it, refilled only where the camera moves.</dd>
     <dt>Horizon map</dt><dd>For each cell, how high the terrain horizon rises in each compass direction.</dd>
     <dt>Spherical harmonics (SH)</dt><dd>Nine numbers per colour that describe the sky's light on a surface of any orientation.</dd>
     <dt>Sky-view LUT</dt><dd>A small texture of sky colour in every direction, rebuilt when the sun moves.</dd>
@@ -1089,7 +1169,7 @@ tile name: &lt;level&gt;/&lt;ty&gt;_&lt;tx&gt;.lz4, row 0 south</code></pre>
 </section>
 
 <footer>
-  Written from the code on main at 47ee68b and the project's plan, research notes and renders, 2026-10-16. Numbers quoted from PR descriptions and project notes are measurements on Scott's M3 at the time. When the code changes, update the section it touches; the source lives at <code>docs/architecture/index.html</code> in the repo.
+  Written from the code on main at 61ba5a4 and the project's plan, research notes and renders, 2026-10-16. Numbers quoted from PR descriptions and project notes are measurements on Scott's M3 at the time. When the code changes, update the section it touches; the source lives at <code>docs/architecture/index.html</code> in the repo.
 </footer>
 </main>
 </div>
