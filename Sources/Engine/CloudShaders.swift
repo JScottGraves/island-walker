@@ -180,7 +180,7 @@ float cloudDensity(constant Uniforms &u, texture2d<float> cloudMap, texture3d<fl
     // from 10% to 99% agree within 0.02), so a coverage of c still fills about c of the sky.
     shape = saturate(shape * 1.762 - 0.613) * profile;
     // Big clouds are ragged at the kilometre scale as well (Lovejoy 1982): cut the
-    // coverage by up to 75% over cells of 0.8–3 km, so banks get bays, gaps and towers.
+    // coverage by up to all of it over cells of 0.8–3 km, so banks get bays, gaps and towers.
     // It barely raises coverage elsewhere, since that merged separate cumulus into one
     // mass; multiplicative, so clear sky stays clear. It shapes the bulk cloud, so the
     // light march and shadows see it too.
@@ -189,7 +189,7 @@ float cloudDensity(constant Uniforms &u, texture2d<float> cloudMap, texture3d<fl
     float3 bank = detailNoise.sample(s, q / kCloudBankTile + float3(0.31, 0.17, 0.53), level(bankLod)).rgb;
     // Median 0.48 and spread 0.10 of this Worley mix, measured on the baked noise.
     float swing = clamp((bank.r * 0.6 + bank.g * 0.4 - 0.48) / 0.10, -2.5, 2.5);
-    coverage = saturate(coverage * (1.0 + (swing < 0.0 ? 0.3 : 0.08) * swing));
+    coverage = saturate(coverage * (1.0 + (swing < 0.0 ? 0.4 : 0.08) * swing));
     float d = saturate(remapRange(shape, 1.0 - coverage, 1.0, 0.0, 1.0));
     float fade = 1.0 - smoothstep(kCloudDetailTile / 16.0, kCloudDetailTile / 8.0, scale);
     if (erode && fade > 0.0 && d > 0.0 && d < 0.9) {
@@ -213,7 +213,7 @@ float cloudDensity(constant Uniforms &u, texture2d<float> cloudMap, texture3d<fl
     // same way). Not within ~300 m of the camera, where a walker in the cloud should still
     // see through its thin parts, nor in the light march.
     float sharpen = erode ? smoothstep(1.0, 3.0, scale) : 0.0;
-    return d > 0.0 ? pow(d, mix(1.0, 0.6, sharpen)) : 0.0;
+    return d > 0.0 ? pow(d, mix(1.0, 0.4, sharpen)) : 0.0;
 }
 
 float henyeyGreenstein(float c, float g) {
