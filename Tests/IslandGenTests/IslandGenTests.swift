@@ -64,7 +64,7 @@ final class IslandGenTests: XCTestCase {
         p.waterfallRetreat = 0
         _ = StreamPower.step(&h, params: p)
         let windward = h[27, 16], leeward = h[4, 16], inland = h[16, 16]
-        XCTAssertEqual(inland, 100, "waves only reach the shoreline")
+        XCTAssertEqual(inland, 100, accuracy: 0.1, "waves only reach the shoreline (pit filling tilts the flat slightly)")
         XCTAssertLessThan(windward, leeward, "the windward cliff retreats faster")
         XCTAssertLessThan(leeward, 100, "swell still reaches the leeward coast")
     }
