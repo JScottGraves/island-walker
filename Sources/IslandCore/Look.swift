@@ -35,12 +35,12 @@ public enum Look {
     public static let grassHigh = RGB.srgb(58, 90, 50)
     /// Ferns and moss clinging to steep pali walls: darker and cooler than open grass.
     public static let cliffGreen = RGB.srgb(40, 76, 38)
-    public static let soil = RGB.srgb(140, 72, 46)
+    public static let soil = RGB.srgb(150, 70, 42)
     public static let rock = RGB.srgb(62, 60, 58)
     public static let sand = RGB.srgb(175, 165, 140)
     /// Water over a sandy bottom a few metres down, and open ocean.
     public static let shallowWater = RGB.srgb(35, 150, 145)
-    public static let deepWater = RGB.srgb(8, 58, 92)
+    public static let deepWater = RGB.srgb(6, 80, 98)
 
     /// Direction towards the sun (x east, y north, z up): mid-morning, high in the sky.
     public static let sunDirection: (x: Double, y: Double, z: Double) = {
@@ -70,7 +70,7 @@ public enum Look {
         let grass = grassLow.mix(grassHigh, Swift.min(1, Swift.max(0, above / Swift.max(maxHeight, 1))))
         let bare = exposure(x: x, y: y)
         var a = grass.mix(cliffGreen, smoothstep(0.2, 0.45, slope))
-        a = a.mix(soil, smoothstep(0.15, 0.35, slope) * (0.15 + 0.6 * bare))
+        a = a.mix(soil, smoothstep(0.15, 0.35, slope) * (0.2 + 0.75 * bare))
         a = a.mix(rock, smoothstep(0.4, 0.7, slope) * (0.2 + 0.6 * (1 - bare)))
         // Beach: a narrow band just above the waterline on gentle slopes only.
         return sand.mix(a, Swift.max(smoothstep(1, 3, above), smoothstep(0.1, 0.25, slope)))
@@ -101,12 +101,12 @@ public enum Look {
 
     /// Fraction of the sky a water surface reflects (Schlick, F0 = 0.02), given the cosine
     /// between the view ray and the mean water surface and the distance to it. Nearby,
-    /// waves tilt the surface toward the viewer (an effective cosine of at least ~0.3), so
+    /// waves tilt the surface toward the viewer (an effective cosine of at least ~0.35), so
     /// bays keep their own colour; far out the waves blur into a flat grazing mirror, which
     /// is what lets the distant sea meet the sky without a dark seam.
     public static func waterReflectance(cosView: Double, distance: Double) -> Double {
         let c = Swift.min(1, Swift.max(0, cosView))
-        let roughness = 0.3 * (1 - smoothstep(4000, 30_000, distance))
+        let roughness = 0.35 * (1 - smoothstep(6000, 35_000, distance))
         let m = 1 - (c * c + roughness * roughness).squareRoot()
         return 0.02 + 0.9 * m * m * m * m * m
     }
@@ -206,7 +206,7 @@ public enum Look {
             float3 grass = mix(kGrassLow, kGrassHigh, saturate(above / max(maxHeight, 1.0)));
             float bare = exposure(p);
             float3 a = mix(grass, kCliffGreen, smoothstep(0.2, 0.45, slope));
-            a = mix(a, kSoil, smoothstep(0.15, 0.35, slope) * (0.15 + 0.6 * bare));
+            a = mix(a, kSoil, smoothstep(0.15, 0.35, slope) * (0.2 + 0.75 * bare));
             a = mix(a, kRock, smoothstep(0.4, 0.7, slope) * (0.2 + 0.6 * (1.0 - bare)));
             return mix(kSand, a, max(smoothstep(1.0, 3.0, above), smoothstep(0.1, 0.25, slope)));
         }
@@ -221,7 +221,7 @@ public enum Look {
 
         float waterReflectance(float cosView, float dist) {
             float c = saturate(cosView);
-            float roughness = 0.3 * (1.0 - smoothstep(4000.0, 30000.0, dist));
+            float roughness = 0.35 * (1.0 - smoothstep(6000.0, 35000.0, dist));
             float m = 1.0 - sqrt(c * c + roughness * roughness);
             return 0.02 + 0.9 * m * m * m * m * m;
         }
