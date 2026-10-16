@@ -28,13 +28,32 @@ struct Uniforms {
     float maxHeight;
     float3 sunRadiance;     // SunLight.sun
     float exposure;
-    float3 skyIrradiance;   // SunLight.sky
-    float bounce;
-    float3 haze;            // horizon sky colour, tinted for the sun's height
-    float pad0;
-    float3 zenith;
-    float pad1;
+    float4 skySH[9];        // SunLight.skySH: sky irradiance for any normal (rgb)
 };
+
+// Sky radiance along a direction, from the sky-view LUT (Atmosphere.skyView).
+float3 skyRadiance(texture2d<float> skyView, float3 dir) {
+    constexpr sampler s(filter::linear, s_address::repeat, t_address::clamp_to_edge);
+    float azimuth = atan2(dir.y, dir.x);
+    float elevation = asin(clamp(dir.z, -1.0, 1.0));
+    float w = sign(elevation) * sqrt(abs(elevation) / M_PI_2_F);
+    return skyView.sample(s, float2(azimuth / (2.0 * M_PI_F), 0.5 + 0.5 * w)).rgb;
+}
+
+// Haze and reflections look along a direction lifted to the horizon at least: the sky
+// below it is never seen through air in the renderer.
+float3 skyAbove(texture2d<float> skyView, float3 dir) {
+    return skyRadiance(skyView, normalize(float3(dir.xy, max(dir.z, 0.002 * length(dir.xy)))));
+}
+
+float3 skyIrradiance(constant Uniforms &u, float3 n) {
+    float3 e = u.skySH[0].rgb * 0.282095
+        + u.skySH[1].rgb * (0.488603 * n.y) + u.skySH[2].rgb * (0.488603 * n.z) + u.skySH[3].rgb * (0.488603 * n.x)
+        + u.skySH[4].rgb * (1.092548 * n.x * n.y) + u.skySH[5].rgb * (1.092548 * n.y * n.z)
+        + u.skySH[6].rgb * (0.315392 * (3.0 * n.z * n.z - 1.0))
+        + u.skySH[7].rgb * (1.092548 * n.x * n.z) + u.skySH[8].rgb * (0.546274 * (n.x * n.x - n.y * n.y));
+    return max(e, 0.0);
+}
 
 struct VOut {
     float4 position [[position]];
@@ -115,6 +134,7 @@ float horizonSun(VOut in, float3 l) {
 // Mirrors Look.lit and GroundView.shade; constants come from Look.metalPrelude, the sun
 // and sky from SunLight through the uniforms.
 fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buffer(1)]],
+                                texture2d<float> skyView [[texture(0)]],
                                 primitive_acceleration_structure terrain [[buffer(2), function_constant(kRayTraced)]]) {
     float3 n = normalize(in.normal);
     float slope = 1.0 - n.z;
@@ -142,8 +162,14 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
         }
     }
     float3 direct = u.sunRadiance * (nDotL * sunVisibility);
-    float3 ambient = u.skyIrradiance * (skyVisibility * (0.5 + 0.5 * n.z));
-    float3 bounced = u.sunRadiance * (u.bounce * max(l.z, 0.0) * (0.5 - 0.5 * n.z));
+    // Sky light from the part of the sky the terrain leaves open.
+    float3 ambient = skyIrradiance(u, n) * skyVisibility;
+    // One bounce off the surrounding terrain (global-illumination.md §6, cheap version):
+    // it fills the sky the terrain blocks, plus the ground a tilted face looks down at.
+    // Neighbours are taken to share this albedo and to be half in sun.
+    float3 groundLight = u.sunRadiance * (0.5 * max(l.z, 0.0)) + skyIrradiance(u, float3(0.0, 0.0, 1.0));
+    float terrainSeen = (1.0 - skyVisibility) * (0.5 + 0.5 * n.z) + (0.5 - 0.5 * n.z);
+    float3 bounced = albedo * groundLight * terrainSeen;
     float3 color = albedo * (direct + ambient + bounced);
 
     float3 toEye = u.cameraPosition - in.world;
@@ -151,9 +177,12 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
     if (h < 0.0) {
         // Flat water mirrors the sky at the view ray's depression angle.
         float cosView = toEye.z / max(dist, 1e-3);
-        color = mix(color, skyColor(cosView, u.haze, u.zenith), waterReflectance(cosView, dist));
+        float3 reflected = float3(-toEye.xy, toEye.z);
+        color = mix(color, skyAbove(skyView, reflected), waterReflectance(cosView, dist));
     }
-    color = mix(color, u.haze, kHazeMax * (1.0 - exp(-dist / kHazeDistance)));
+    // Aerial perspective: haze takes the colour of the sky behind it, so it brightens
+    // towards the sun and warms at sunset.
+    color = mix(color, skyAbove(skyView, -toEye), kHazeMax * (1.0 - exp(-dist / kHazeDistance)));
 
     color = pbrNeutral(color * u.exposure);
     // The render target is an _srgb format, which applies the sRGB encoding on write.
@@ -175,9 +204,25 @@ vertex SkyOut skyVertex(uint vid [[vertex_id]]) {
     return o;
 }
 
-fragment float4 skyFragment(SkyOut in [[stage_in]], constant Uniforms &u [[buffer(1)]]) {
+fragment float4 skyFragment(SkyOut in [[stage_in]], constant Uniforms &u [[buffer(1)]],
+                            texture2d<float> skyView [[texture(0)]]) {
     float4 far = u.inverseViewProjection * float4(in.ndc, 1.0, 1.0);
     float3 dir = normalize(far.xyz / far.w);
-    return float4(pbrNeutral(skyColor(dir.z, u.haze, u.zenith) * u.exposure), 1.0);
+    float3 color = skyRadiance(skyView, dir);
+    if (dir.z < 0.0) {
+        // Open sea beyond the heightfield, shaded like the terrain shader's distant water
+        // so the two meet without a seam.
+        float height = max(u.cameraPosition.z - u.seaLevel, 1.0);
+        float dist = height / max(-dir.z, 1e-5);
+        float3 l = normalize(u.sunDirection);
+        float3 water = kDeepWater * (u.sunRadiance * max(l.z, 0.0) + skyIrradiance(u, float3(0.0, 0.0, 1.0)));
+        float cosView = -dir.z;
+        water = mix(water, skyAbove(skyView, float3(dir.xy, -dir.z)), waterReflectance(cosView, dist));
+        color = mix(water, skyAbove(skyView, dir), kHazeMax * (1.0 - exp(-dist / kHazeDistance)));
+    }
+    // The sun's disc (0.53°), far brighter than anything else; the tone mapper clips it.
+    float cosSun = dot(dir, normalize(u.sunDirection));
+    color += u.sunRadiance * (2000.0 * smoothstep(cos(0.0050), cos(0.0042), cosSun));
+    return float4(pbrNeutral(color * u.exposure), 1.0);
 }
 """

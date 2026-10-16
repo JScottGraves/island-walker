@@ -52,13 +52,41 @@ final class IslandCoreTests: XCTestCase {
         XCTAssertGreaterThan(light.sky[10, 32], 0.9)
     }
 
-    func testReferenceSunReproducesLookConstants() {
+    func testReferenceSunMatchesLookSun() {
         let l = SunLight.reference
-        XCTAssertEqual(l.sun.r, Look.sun.r, accuracy: 1e-9)
-        XCTAssertEqual(l.sun.b, Look.sun.b, accuracy: 1e-9)
-        XCTAssertEqual(l.sky.g, Look.sky.g, accuracy: 1e-9)
-        XCTAssertEqual(l.exposure, 1, accuracy: 1e-9)
-        XCTAssertEqual(l.hazeTint.r, 1, accuracy: 1e-9)
+        XCTAssertEqual(SunPath.luminance(l.sun), SunPath.luminance(Look.sun), accuracy: 1e-6)
+        XCTAssertEqual(l.exposure, SunPath.exposureKey, accuracy: 1e-6)
+        // Clear-sky diffuse light on open ground is roughly 10–40% of the direct sun's.
+        let ratio = SunPath.luminance(l.sky) / (SunPath.luminance(l.sun) * Look.sunDirection.z)
+        XCTAssert((0.1...0.4).contains(ratio), "sky/sun ratio \(ratio)")
+    }
+
+    func testSkyIsBluerOverheadThanAtTheHorizon() {
+        let sun = SunPath.direction(hour: 10)
+        let zenith = Atmosphere.skyRadiance(view: (0, 0, 1), sun: sun)
+        let horizon = Atmosphere.skyRadiance(view: (-sun.x, -sun.y, 0.02), sun: sun)
+        XCTAssertGreaterThan(zenith.b / zenith.r, horizon.b / horizon.r)
+        XCTAssertGreaterThan(zenith.b, zenith.g)
+    }
+
+    func testSkyIrradianceSHMatchesDirectIntegration() {
+        let sun = SunPath.direction(hour: 15)
+        let lut = Atmosphere.skyView(sun: sun)
+        let sh = Atmosphere.irradianceSH(skyView: lut)
+        // Brute-force cosine-weighted integral over the upper hemisphere.
+        var e = RGB(0, 0, 0)
+        let n = 60
+        for j in 0..<n {
+            let el = (Double(j) + 0.5) / Double(n) * Double.pi / 2
+            for i in 0..<(2 * n) {
+                let az = (Double(i) + 0.5) / Double(2 * n) * 2 * Double.pi
+                let d = (cos(el) * cos(az), cos(el) * sin(az), sin(el))
+                let dOmega = cos(el) * (Double.pi / 2 / Double(n)) * (Double.pi / Double(n))
+                e = e + Atmosphere.skyRadiance(view: d, sun: sun) * (sin(el) * dOmega)
+            }
+        }
+        let up = Atmosphere.evaluateSH(sh, (0, 0, 1))
+        XCTAssertEqual(up.g, e.g, accuracy: e.g * 0.1)
     }
 
     func testSunPathCrossesTheSouthAtNoonInOctober() {

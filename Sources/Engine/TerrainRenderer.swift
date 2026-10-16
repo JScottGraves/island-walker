@@ -17,12 +17,8 @@ public final class TerrainRenderer {
         var maxHeight: Float
         var sunRadiance: SIMD3<Float>
         var exposure: Float
-        var skyIrradiance: SIMD3<Float>
-        var bounce: Float
-        var haze: SIMD3<Float>
-        var pad0: Float = 0
-        var zenith: SIMD3<Float>
-        var pad1: Float = 0
+        var skySH: (SIMD4<Float>, SIMD4<Float>, SIMD4<Float>, SIMD4<Float>, SIMD4<Float>,
+                    SIMD4<Float>, SIMD4<Float>, SIMD4<Float>, SIMD4<Float>)
     }
 
     /// How terrain casts sun shadows.
@@ -50,7 +46,13 @@ public final class TerrainRenderer {
     /// Which shadow path this renderer uses (ray tracing unless unsupported or declined).
     public let shadows: Shadows
     /// The sun and sky to light the next frame with; set it to move the sun.
-    public var light = SunLight.reference
+    public var light = SunLight.reference {
+        didSet { uploadSkyView() }
+    }
+    /// The sky-view LUT, one texture per frame in flight so an upload never overwrites
+    /// one the GPU is still reading.
+    let skyViews: [MTLTexture]
+    var skyViewIndex = 0
 
     /// - Parameter meshResolution: vertices per side of the rendered mesh (the height grid
     ///   is resampled to this). 1024 keeps the mesh around 2 million triangles.
@@ -142,10 +144,30 @@ public final class TerrainRenderer {
         indices = ib
         horizons = hb
         indexCount = idx.count
+        let skyDesc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba32Float, width: Atmosphere.skyViewSize.width,
+            height: Atmosphere.skyViewSize.height, mipmapped: false)
+        skyDesc.usage = [.shaderRead]
+        skyDesc.storageMode = .shared
+        skyViews = try (0..<3).map { _ in
+            guard let t = device.makeTexture(descriptor: skyDesc) else { throw RendererError.setup("sky-view texture") }
+            return t
+        }
         terrainAccel = shadows == .rayTraced
             ? try TerrainRenderer.buildAccelerationStructure(device: device, queue: queue, vertices: vb,
                                                               stride: 8 * 4, indices: ib, triangles: idx.count / 3)
             : nil
+        uploadSkyView()
+    }
+
+    func uploadSkyView() {
+        skyViewIndex = (skyViewIndex + 1) % skyViews.count
+        let (w, h) = Atmosphere.skyViewSize
+        var texels = [Float]()
+        texels.reserveCapacity(w * h * 4)
+        for c in light.skyView { texels += [Float(c.r), Float(c.g), Float(c.b), 1] }
+        skyViews[skyViewIndex].replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0,
+                                       withBytes: texels, bytesPerRow: w * 16)
     }
 
     /// One bottom-level acceleration structure over the whole terrain mesh, built once and
@@ -249,6 +271,7 @@ public final class TerrainRenderer {
         let proj = Matrix.perspective(fovY: 60 * .pi / 180, aspect: aspect, near: 0.3, far: 150_000)
         let viewProjection = proj * Matrix.lookDirection(forward)
         func f3(_ c: RGB) -> SIMD3<Float> { SIMD3(Float(c.r), Float(c.g), Float(c.b)) }
+        func f4(_ k: Int) -> SIMD4<Float> { let c = light.skySH[k]; return SIMD4(Float(c.r), Float(c.g), Float(c.b), 0) }
         let d = light.direction
         var u = Uniforms(
             viewProjection: viewProjection,
@@ -259,14 +282,13 @@ public final class TerrainRenderer {
             maxHeight: maxHeight,
             sunRadiance: f3(light.sun),
             exposure: Float(light.exposure),
-            skyIrradiance: f3(light.sky),
-            bounce: Float(Look.bounce),
-            haze: f3(Look.haze * light.hazeTint),
-            zenith: f3(Look.zenith * light.zenithTint))
+            skySH: (f4(0), f4(1), f4(2), f4(3), f4(4), f4(5), f4(6), f4(7), f4(8)))
+        let skyView = skyViews[skyViewIndex]
 
         enc.setRenderPipelineState(skyPipeline)
         enc.setDepthStencilState(skyDepthState)
         enc.setFragmentBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 1)
+        enc.setFragmentTexture(skyView, index: 0)
         enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
 
         enc.setRenderPipelineState(pipeline)
