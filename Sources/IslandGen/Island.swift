@@ -39,8 +39,9 @@ public enum Island {
 
         var base = VolcanicBase.generate(seed: p.seed, size: p.size, domainSize: p.domainSize)
         if p.flankCollapse,
-           let sector = FlankCollapse.choose(shields: base.shields, windDirection: p.climate.windDirection, seed: p.seed) {
-            FlankCollapse.apply(sector, height: &base.height, hardness: &base.hardness, seed: p.seed)
+           let scarp = FlankCollapse.choose(shields: base.shields, height: base.height,
+                                            windDirection: p.climate.windDirection, seed: p.seed) {
+            FlankCollapse.apply(scarp, height: &base.height, hardness: &base.hardness, seed: p.seed)
         }
         var height = base.height
         var rain = Climate.precipitation(height: height, seaLevel: erosion.seaLevel, params: p.climate)
