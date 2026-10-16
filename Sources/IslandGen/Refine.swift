@@ -57,10 +57,14 @@ public enum Refine {
                     let cy = (Double(y) + 0.5) * invF - 0.5
                     for x in 0..<width {
                         let cx = (Double(x) + 0.5) * invF - 0.5
+                        // The coastline follows the bilinear surface: bicubic overshoot lifted
+                        // the shallow shelf into a chain of islets and cut square notches
+                        // into the coast. Bicubic still shapes the land and the sea floor.
+                        let isLand = h.sample(x: cx, y: cy) > seaLevel
                         let base = h.sampleCubic(x: cx, y: cy)
-                        let above = Double(base - seaLevel)
-                        var value = base
-                        if above > 0 {
+                        let above = Swift.max(0, Double(base - seaLevel))
+                        var value = isLand ? base : Swift.min(base, seaLevel - 0.01)
+                        if isLand {
                             let s = Double(slope.sample(x: cx, y: cy))
                             let a = Double(logArea.sample(x: cx, y: cy))
                             let t = Swift.min(Swift.max((a - lo) / (hi - lo), 0), 1)
