@@ -30,8 +30,10 @@ public enum Island {
         public var scarp: FlankCollapse.Scarp?
     }
 
-    /// Generates an island. `progress` is called with values in 0...1.
-    public static func generate(_ p: Params, progress: ((Double) -> Void)? = nil) -> Result {
+    /// Generates an island. `progress` is called with values in 0...1; `timer`, if given,
+    /// collects time per pipeline phase.
+    public static func generate(_ p: Params, timer: PhaseTimer? = nil, progress: ((Double) -> Void)? = nil) -> Result {
+        func phase<T>(_ name: String, _ body: () -> T) -> T { timer?.measure(name, body) ?? body() }
         var erosion = p.erosion
         erosion.seed = Hash.mix(p.seed ^ 0x524F_5554_45)
         // Keep diffusion stable at coarse and fine resolutions alike.
@@ -39,15 +41,15 @@ public enum Island {
         let maxDt = 0.2 * cell * cell / Swift.max(erosion.diffusivity, 1e-9)
         erosion.timeStep = Swift.min(erosion.timeStep, maxDt)
 
-        var base = VolcanicBase.generate(seed: p.seed, size: p.size, domainSize: p.domainSize)
+        var base = phase("volcano") { VolcanicBase.generate(seed: p.seed, size: p.size, domainSize: p.domainSize) }
         let scarp = p.flankCollapse
             ? FlankCollapse.choose(shields: base.shields, height: base.height, windDirection: p.climate.windDirection, seed: p.seed)
             : nil
         if let scarp {
-            FlankCollapse.apply(scarp, height: &base.height, hardness: &base.hardness, seed: p.seed)
+            phase("collapse") { FlankCollapse.apply(scarp, height: &base.height, hardness: &base.hardness, seed: p.seed) }
         }
         var height = base.height
-        var rain = Climate.precipitation(height: height, seaLevel: erosion.seaLevel, params: p.climate)
+        var rain = phase("rain") { Climate.precipitation(height: height, seaLevel: erosion.seaLevel, params: p.climate) }
         var area = Grid(width: p.size, height: p.size, cellSize: cell)
 
         // Random routing makes any single step's drainage area noisy, so the reported
@@ -55,9 +57,9 @@ public enum Island {
         let averaged = Swift.min(20, p.steps)
         for s in 0..<p.steps {
             if s > 0 && s % p.rainInterval == 0 {
-                rain = Climate.precipitation(height: height, seaLevel: erosion.seaLevel, params: p.climate)
+                rain = phase("rain") { Climate.precipitation(height: height, seaLevel: erosion.seaLevel, params: p.climate) }
             }
-            let stepArea = StreamPower.step(&height, rain: rain, hardness: base.hardness, params: erosion, stepIndex: s).area
+            let stepArea = StreamPower.step(&height, rain: rain, hardness: base.hardness, params: erosion, stepIndex: s, timer: timer).area
             if s >= p.steps - averaged {
                 for i in 0..<area.count { area.values[i] += stepArea.values[i] / Float(averaged) }
             }

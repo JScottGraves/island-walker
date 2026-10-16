@@ -8,12 +8,13 @@ import IslandGen
 
 func usage() -> Never {
     print("""
-    usage: islandgen [--seed N] [--size N] [--steps N] [--domain METRES] [--deposition G] [--out DIR]
+    usage: islandgen [--seed N] [--size N] [--steps N] [--domain METRES] [--deposition G] [--profile] [--out DIR]
       --seed    random seed (default 1)
       --size    grid samples per side (default 1024)
       --steps   erosion time steps (default 400)
       --domain  domain edge length in metres (default 80000)
       --deposition  sediment deposition coefficient G, 0 for none (default 0.3)
+      --profile print time spent in each pipeline phase
       --out     output directory (default ./out)
     """)
     exit(2)
@@ -26,8 +27,10 @@ func parsed<T>(_ value: T?) -> T {
 
 var params = Island.Params()
 var outDir = "out"
+var timer: PhaseTimer?
 var args = CommandLine.arguments.dropFirst()
 while let flag = args.popFirst() {
+    if flag == "--profile" { timer = PhaseTimer(); continue }
     guard let value = args.popFirst() else { usage() }
     switch flag {
     case "--seed": params.seed = parsed(UInt64(value))
@@ -45,7 +48,7 @@ try FileManager.default.createDirectory(at: out, withIntermediateDirectories: tr
 
 let start = Date()
 var lastReported = -1
-let island = Island.generate(params) { fraction in
+let island = Island.generate(params, timer: timer) { fraction in
     let percent = Int(fraction * 100)
     if percent / 10 != lastReported / 10 {
         lastReported = percent
@@ -53,6 +56,7 @@ let island = Island.generate(params) { fraction in
     }
 }
 let elapsed = Date().timeIntervalSince(start)
+if let timer { print("time by phase (\(ProcessInfo.processInfo.activeProcessorCount) cores):\n" + timer.report) }
 
 let sea = params.erosion.seaLevel
 try Preview.write(Preview.hillshade(island.height, seaLevel: sea), to: out.appendingPathComponent("hillshade.png"))

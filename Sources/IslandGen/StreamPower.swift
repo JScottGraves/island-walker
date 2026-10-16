@@ -1,3 +1,4 @@
+import Dispatch
 import Foundation
 import IslandCore
 
@@ -53,98 +54,151 @@ public enum StreamPower {
     ///   - hardness: optional rock hardness; erodibility is divided by it.
     @discardableResult
     public static func step(_ h: inout Grid, rain: Grid? = nil, hardness: Grid? = nil, params: Params = Params(),
-                            stepIndex: Int = 0) -> Flow {
-        let n = h.count, w = h.width
+                            stepIndex: Int = 0, timer: PhaseTimer? = nil) -> Flow {
+        let n = h.count, w = h.width, rows = h.height
         let sea = params.seaLevel
         let dt = params.timeStep
+        let cell = h.cellSize
+        func phase<T>(_ name: String, _ body: () -> T) -> T { timer?.measure(name, body) ?? body() }
 
         if params.uplift != 0 {
             let du = Float(params.uplift * dt)
             for i in 0..<n where !h.isBoundary(i) { h.values[i] += du }
         }
 
-        PriorityFlood.fill(&h, seaLevel: sea)
+        phase("fill") { PriorityFlood.fill(&h, seaLevel: sea) }
 
         // 1. Receivers. Plain steepest-descent D8 carves channels along the grid's 0°, 45°
         //    and 90° lines. With `randomRouting`, each step picks a downslope neighbour at
         //    random, weighted by slope; over many steps flow spreads like multiple-flow
         //    routing and channels follow the terrain instead of the grid.
         //    The choice is a pure hash of (seed, step, cell), so results stay deterministic.
+        //    Every cell is independent, so rows run in parallel.
         var receivers = [Int32](repeating: 0, count: n)
         var receiverDistance = [Double](repeating: 1, count: n)
         let stepSeed = Hash.mix(params.seed ^ Hash.mix(UInt64(stepIndex)))
-        var slopes = [Double](repeating: 0, count: 8)
-        for i in 0..<n {
-            receivers[i] = Int32(i)
-            if h.isBoundary(i) || h.values[i] <= sea { continue }
-            let x = i % w, y = i / w
-            var best = 0.0, bestK = -1, total = 0.0
-            for k in 0..<8 {
-                let j = (y + D8.dy[k]) * w + (x + D8.dx[k])
-                let s = Double(h.values[i] - h.values[j]) / (D8.distance[k] * h.cellSize)
-                slopes[k] = Swift.max(0, s)
-                total += slopes[k]
-                if s > best { best = s; bestK = k }
-            }
-            guard bestK >= 0 else { continue }
-            var pick = bestK
-            if params.randomRouting && total > 0 {
-                var u = Double(Hash.mix(stepSeed ^ UInt64(i)) >> 11) * 0x1.0p-53 * total
-                for k in 0..<8 where slopes[k] > 0 {
-                    pick = k
-                    u -= slopes[k]
-                    if u < 0 { break }
+        phase("receivers") {
+            let hv = h.values
+            receivers.withUnsafeMutableBufferPointer { recBuf in
+                receiverDistance.withUnsafeMutableBufferPointer { distBuf in
+                    let rec = SharedBuffer(recBuf), dist = SharedBuffer(distBuf)
+                    Parallel.forRanges(rows) { rowRange in
+                        var slopes = [Double](repeating: 0, count: 8)
+                        for y in rowRange {
+                            for x in 0..<w {
+                                let i = y * w + x
+                                rec[i] = Int32(i)
+                                if x == 0 || y == 0 || x == w - 1 || y == rows - 1 || hv[i] <= sea { continue }
+                                var best = 0.0, bestK = -1, total = 0.0
+                                for k in 0..<8 {
+                                    let j = (y + D8.dy[k]) * w + (x + D8.dx[k])
+                                    let s = Double(hv[i] - hv[j]) / (D8.distance[k] * cell)
+                                    slopes[k] = Swift.max(0, s)
+                                    total += slopes[k]
+                                    if s > best { best = s; bestK = k }
+                                }
+                                guard bestK >= 0 else { continue }
+                                var pick = bestK
+                                if params.randomRouting && total > 0 {
+                                    var u = Double(Hash.mix(stepSeed ^ UInt64(i)) >> 11) * 0x1.0p-53 * total
+                                    for k in 0..<8 where slopes[k] > 0 {
+                                        pick = k
+                                        u -= slopes[k]
+                                        if u < 0 { break }
+                                    }
+                                }
+                                rec[i] = Int32((y + D8.dy[pick]) * w + (x + D8.dx[pick]))
+                                dist[i] = D8.distance[pick] * cell
+                            }
+                        }
+                    }
                 }
             }
-            receivers[i] = Int32((y + D8.dy[pick]) * w + (x + D8.dx[pick]))
-            receiverDistance[i] = D8.distance[pick] * h.cellSize
         }
 
-        // 2. Donor lists (counting sort) and the upstream-ordered stack.
-        var donorCount = [Int32](repeating: 0, count: n + 1)
-        for i in 0..<n where Int(receivers[i]) != i { donorCount[Int(receivers[i]) + 1] += 1 }
-        for i in 0..<n { donorCount[i + 1] += donorCount[i] }
-        var donors = [Int32](repeating: 0, count: n)
-        var fill = donorCount
-        for i in 0..<n where Int(receivers[i]) != i {
-            let r = Int(receivers[i])
-            donors[Int(fill[r])] = Int32(i)
-            fill[r] += 1
-        }
-
+        // 2. Donor lists (counting sort) and the upstream-ordered stack. Each outlet's
+        //    basin is one contiguous run of the stack, and basins never share cells, so
+        //    the passes below run basin groups in parallel with serial-identical results.
         var stack = [Int32]()
-        stack.reserveCapacity(n)
-        var work = [Int32]()
-        for i in 0..<n where Int(receivers[i]) == i {
-            work.append(Int32(i))
-            while let c = work.popLast() {
-                stack.append(c)
-                let ci = Int(c)
-                for k in Int(donorCount[ci])..<Int(donorCount[ci + 1]) { work.append(donors[k]) }
+        var basinStarts = [Int]()
+        phase("stack") {
+            var donorCount = [Int32](repeating: 0, count: n + 1)
+            for i in 0..<n where Int(receivers[i]) != i { donorCount[Int(receivers[i]) + 1] += 1 }
+            for i in 0..<n { donorCount[i + 1] += donorCount[i] }
+            var donors = [Int32](repeating: 0, count: n)
+            var fill = donorCount
+            for i in 0..<n where Int(receivers[i]) != i {
+                let r = Int(receivers[i])
+                donors[Int(fill[r])] = Int32(i)
+                fill[r] += 1
             }
+            stack.reserveCapacity(n)
+            var work = [Int32]()
+            for i in 0..<n where Int(receivers[i]) == i {
+                basinStarts.append(stack.count)
+                work.append(Int32(i))
+                while let c = work.popLast() {
+                    stack.append(c)
+                    let ci = Int(c)
+                    for k in Int(donorCount[ci])..<Int(donorCount[ci + 1]) { work.append(donors[k]) }
+                }
+            }
+        }
+        // Group consecutive basins into roughly equal runs of the stack.
+        var grouped = [Range<Int>]()
+        let target = Swift.max(1, n / Parallel.chunkCount)
+        var groupStart = 0
+        for b in basinStarts.indices {
+            let end = b + 1 < basinStarts.count ? basinStarts[b + 1] : n
+            if end - groupStart >= target || end == n {
+                grouped.append(groupStart..<end)
+                groupStart = end
+            }
+        }
+        let groups = grouped
+        let order = stack, flowTo = receivers, distances = receiverDistance
+        func forBasinGroups(_ body: (Range<Int>) -> Void) {
+            DispatchQueue.concurrentPerform(iterations: groups.count) { body(groups[$0]) }
         }
 
         // 3. Drainage area, accumulated from the top of each basin down.
-        var area = Grid(width: w, height: h.height, cellSize: h.cellSize)
+        var area = Grid(width: w, height: rows, cellSize: cell)
         let cellArea = Float(h.cellArea)
-        for i in 0..<n { area.values[i] = cellArea * (rain?.values[i] ?? 1) }
-        for s in stride(from: n - 1, through: 0, by: -1) {
-            let i = Int(stack[s]), r = Int(receivers[i])
-            if r != i { area.values[r] += area.values[i] }
+        let rainValues = rain?.values
+        phase("area") {
+            area.values.withUnsafeMutableBufferPointer { areaBuf in
+                let a = SharedBuffer(areaBuf)
+                forBasinGroups { range in
+                    for s in range { let i = Int(order[s]); a[i] = cellArea * (rainValues?[i] ?? 1) }
+                    for s in range.reversed() {
+                        let i = Int(order[s]), r = Int(flowTo[i])
+                        if r != i { a[r] += a[i] }
+                    }
+                }
+            }
         }
 
         // 4. Implicit fluvial incision, walking downstream-to-upstream so every
         //    receiver already holds its new height.
         let beforeIncision = params.deposition > 0 ? h.values : []
-        for s in 0..<n {
-            let i = Int(stack[s]), r = Int(receivers[i])
-            if r == i { continue }
-            var k = params.erodibility
-            if let hardness { k /= Double(hardness.values[i]) }
-            let f = Float(k * dt * pow(Double(area.values[i]), params.areaExponent) / receiverDistance[i])
-            // Rivers cut down to sea level at the coast, not to the depth of the sea floor.
-            let base = Swift.max(h.values[r], sea)
-            h.values[i] = (h.values[i] + f * base) / (1 + f)
+        let hardnessValues = hardness?.values
+        let areaValues = area.values
+        phase("incision") {
+            h.values.withUnsafeMutableBufferPointer { hBuf in
+                let hv = SharedBuffer(hBuf)
+                forBasinGroups { range in
+                    for s in range {
+                        let i = Int(order[s]), r = Int(flowTo[i])
+                        if r == i { continue }
+                        var k = params.erodibility
+                        if let hardnessValues { k /= Double(hardnessValues[i]) }
+                        let f = Float(k * dt * pow(Double(areaValues[i]), params.areaExponent) / distances[i])
+                        // Rivers cut down to sea level at the coast, not to the depth of the sea floor.
+                        let base = Swift.max(hv[r], sea)
+                        hv[i] = (hv[i] + f * base) / (1 + f)
+                    }
+                }
+            }
         }
 
         // 4b. Deposition, walking upstream-to-downstream and carrying the eroded volume
@@ -153,38 +207,57 @@ public enum StreamPower {
         //     the arriving load. A cell never rises above its lowest donor, so deposits
         //     fill channels and plains without damming them.
         if params.deposition > 0 {
-            var load = [Float](repeating: 0, count: n)
-            var lowestDonor = [Float](repeating: .infinity, count: n)
-            let g = Float(params.deposition)
-            for s in stride(from: n - 1, through: 0, by: -1) {
-                let i = Int(stack[s]), r = Int(receivers[i])
-                let incoming = load[i]
-                var carried = incoming + Swift.max(0, beforeIncision[i] - h.values[i])
-                if r != i && incoming > 0 && h.values[i] > sea && lowestDonor[i].isFinite {
-                    let share = Swift.min(1, g * cellArea * (rain?.values[i] ?? 1) / Swift.max(area.values[i], 1e-6))
-                    let room = Swift.max(0, lowestDonor[i] - h.values[i])
-                    let deposit = Swift.min(incoming * share, room)
-                    h.values[i] += deposit
-                    carried -= deposit
-                }
-                if r != i {
-                    load[r] += carried
-                    lowestDonor[r] = Swift.min(lowestDonor[r], h.values[i])
+            phase("deposition") {
+                var load = [Float](repeating: 0, count: n)
+                var lowestDonor = [Float](repeating: .infinity, count: n)
+                let g = Float(params.deposition)
+                h.values.withUnsafeMutableBufferPointer { hBuf in
+                    load.withUnsafeMutableBufferPointer { loadBuf in
+                        lowestDonor.withUnsafeMutableBufferPointer { lowBuf in
+                            let hv = SharedBuffer(hBuf), ld = SharedBuffer(loadBuf), low = SharedBuffer(lowBuf)
+                            forBasinGroups { range in
+                                for s in range.reversed() {
+                                    let i = Int(order[s]), r = Int(flowTo[i])
+                                    let incoming = ld[i]
+                                    var carried = incoming + Swift.max(0, beforeIncision[i] - hv[i])
+                                    if r != i && incoming > 0 && hv[i] > sea && low[i].isFinite {
+                                        let share = Swift.min(1, g * cellArea * (rainValues?[i] ?? 1) / Swift.max(areaValues[i], 1e-6))
+                                        let room = Swift.max(0, low[i] - hv[i])
+                                        let deposit = Swift.min(incoming * share, room)
+                                        hv[i] += deposit
+                                        carried -= deposit
+                                    }
+                                    if r != i {
+                                        ld[r] += carried
+                                        low[r] = Swift.min(low[r], hv[i])
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
 
-        // 5. Hillslope diffusion (explicit; stable while Kd·dt/dx² < 0.25).
+        // 5. Hillslope diffusion (explicit; stable while Kd·dt/dx² < 0.25). Reads the old
+        //    heights only, so rows run in parallel.
         if params.diffusivity > 0 {
-            let c = Float(params.diffusivity * dt / (h.cellSize * h.cellSize))
+            let c = Float(params.diffusivity * dt / (cell * cell))
             precondition(c < 0.25, "diffusion step unstable; lower timeStep or diffusivity")
-            let old = h.values
-            for y in 1..<(h.height - 1) {
-                for x in 1..<(w - 1) {
-                    let i = y * w + x
-                    if old[i] <= sea { continue }
-                    let lap = old[i - 1] + old[i + 1] + old[i - w] + old[i + w] - 4 * old[i]
-                    h.values[i] = old[i] + c * lap
+            phase("diffusion") {
+                let old = h.values
+                h.values.withUnsafeMutableBufferPointer { hBuf in
+                    let hv = SharedBuffer(hBuf)
+                    Parallel.forRanges(rows - 2) { rowRange in
+                        for y in (rowRange.lowerBound + 1)..<(rowRange.upperBound + 1) {
+                            for x in 1..<(w - 1) {
+                                let i = y * w + x
+                                if old[i] <= sea { continue }
+                                let lap = old[i - 1] + old[i + 1] + old[i - w] + old[i + w] - 4 * old[i]
+                                hv[i] = old[i] + c * lap
+                            }
+                        }
+                    }
                 }
             }
         }
