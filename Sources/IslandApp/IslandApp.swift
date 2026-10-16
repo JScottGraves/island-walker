@@ -94,7 +94,7 @@ final class Coordinator: NSObject, MTKViewDelegate {
         let requested: TerrainRenderer.Shadows = Snapshots.option("--shadows") == "horizon" ? .horizonMap : .rayTraced
         renderer = try? TerrainRenderer(device: device, colorFormat: view.colorPixelFormat,
                                         depthFormat: view.depthStencilPixelFormat, height: grid, seaLevel: 0,
-                                        shadows: requested)
+                                        shadows: requested, clouds: IslandSource.clouds(for: grid))
         hour = Snapshots.option("--time").flatMap { Double($0) } ?? hour
         day = Snapshots.option("--day").flatMap { Int($0) } ?? day
         // Start at the highest point so the whole island is in view.
@@ -134,7 +134,11 @@ final class Coordinator: NSObject, MTKViewDelegate {
         tWasDown = tDown
         // Brackets scrub 1.5 hours a second; running time is an hour every 20 s.
         let scrub = (view.keys.contains(kRightBracket) ? 1.0 : 0) - (view.keys.contains(kLeftBracket) ? 1.0 : 0)
-        hour += scrub * 1.5 * dt + (timeRuns ? dt / 20 : 0)
+        let advance = scrub * 1.5 * dt + (timeRuns ? dt / 20 : 0)
+        hour += advance
+        // The wind keeps blowing in real time even while the sun stands still.
+        renderer.clock += dt + Swift.max(advance, 0) * 3600
+        renderer.hour = hour
         hour = (hour + 24).truncatingRemainder(dividingBy: 24)
         // Rebuilding the sky takes a few milliseconds: only when the sun has moved ~0.1°.
         if abs(hour - litHour) > 1.0 / 120 {
