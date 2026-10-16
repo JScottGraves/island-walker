@@ -193,7 +193,7 @@ float rayTracedSun(float3 p, float3 n, float3 l, float2 pixel, primitive_acceler
     isect.accept_any_intersection(true);
     // The shadow mesh is coarser than the drawn terrain, so a valley floor can sit below
     // it. Rays only stop on faces turned towards them: from below, they pass through.
-    isect.set_triangle_front_facing_winding(winding::counterclockwise);
+    isect.set_triangle_front_facing_winding(winding::clockwise);
     isect.set_triangle_cull_mode(triangle_cull_mode::back);
     float visible = 0.0;
     for (int k = 0; k < 4; k++) {
