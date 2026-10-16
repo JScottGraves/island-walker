@@ -56,7 +56,6 @@ let island = Island.generate(params, timer: timer) { fraction in
     }
 }
 let elapsed = Date().timeIntervalSince(start)
-if let timer { print("time by phase (\(ProcessInfo.processInfo.activeProcessorCount) cores):\n" + timer.report) }
 
 let sea = params.erosion.seaLevel
 try Preview.write(Preview.hillshade(island.height, seaLevel: sea), to: out.appendingPathComponent("hillshade.png"))
@@ -71,8 +70,11 @@ if let scarp = island.scarp {
 }
 
 // Ground-level pictures from a walker's eye height, rendered on the CPU.
+let lighting = timer?.measure("lighting") { TerrainLighting.bake(height: island.height, seaLevel: sea) }
+    ?? TerrainLighting.bake(height: island.height, seaLevel: sea)
+if let timer { print("time by phase (\(ProcessInfo.processInfo.activeProcessorCount) cores):\n" + timer.report) }
 for view in Viewpoints.automatic(height: island.height, drainageArea: island.drainageArea, seaLevel: sea, scarp: island.scarp) {
-    let image = GroundView.render(island.height, camera: view.camera, seaLevel: sea)
+    let image = GroundView.render(island.height, camera: view.camera, seaLevel: sea, lighting: lighting)
     try Preview.write(image, to: out.appendingPathComponent("view-\(view.name).png"))
 }
 

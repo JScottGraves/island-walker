@@ -38,7 +38,7 @@ struct TerrainView: NSViewRepresentable {
         let view = InputMTKView(frame: .zero, device: MTLCreateSystemDefaultDevice())
         view.colorPixelFormat = .bgra8Unorm_srgb
         view.depthStencilPixelFormat = .depth32Float
-        view.clearColor = MTLClearColor(red: 0.62, green: 0.72, blue: 0.85, alpha: 1)
+        view.clearColor = TerrainRenderer.skyClearColor
         view.preferredFramesPerSecond = 120
         context.coordinator.attach(view)
         return view

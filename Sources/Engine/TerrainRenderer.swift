@@ -10,6 +10,7 @@ import IslandCore
 public final class TerrainRenderer {
     struct Uniforms {
         var viewProjection: simd_float4x4
+        var inverseViewProjection: simd_float4x4
         var cameraPosition: SIMD3<Float>
         var seaLevel: Float
         var sunDirection: SIMD3<Float>
@@ -19,7 +20,9 @@ public final class TerrainRenderer {
     let device: MTLDevice
     let queue: MTLCommandQueue
     let pipeline: MTLRenderPipelineState
+    let skyPipeline: MTLRenderPipelineState
     let depthState: MTLDepthStencilState
+    let skyDepthState: MTLDepthStencilState
     let vertices: MTLBuffer
     let indices: MTLBuffer
     let indexCount: Int
@@ -43,19 +46,29 @@ public final class TerrainRenderer {
         desc.colorAttachments[0].pixelFormat = colorFormat
         desc.depthAttachmentPixelFormat = depthFormat
         pipeline = try device.makeRenderPipelineState(descriptor: desc)
+        desc.vertexFunction = library.makeFunction(name: "skyVertex")
+        desc.fragmentFunction = library.makeFunction(name: "skyFragment")
+        skyPipeline = try device.makeRenderPipelineState(descriptor: desc)
 
         let depthDesc = MTLDepthStencilDescriptor()
         depthDesc.depthCompareFunction = .less
         depthDesc.isDepthWriteEnabled = true
         guard let ds = device.makeDepthStencilState(descriptor: depthDesc) else { throw RendererError.setup("depth state") }
         depthState = ds
+        let skyDepthDesc = MTLDepthStencilDescriptor()
+        skyDepthDesc.depthCompareFunction = .always
+        skyDepthDesc.isDepthWriteEnabled = false
+        guard let sds = device.makeDepthStencilState(descriptor: skyDepthDesc) else { throw RendererError.setup("sky depth state") }
+        skyDepthState = sds
 
         // Build the mesh: positions in metres, normals from central differences.
         let n = Swift.min(meshResolution, height.width)
         let scale = Double(height.width - 1) / Double(n - 1)
         let spacing = Float(height.cellSize * scale)
+        // Sky and sun visibility from the full-resolution heightfield, sampled per vertex.
+        let lighting = TerrainLighting.bake(height: height, seaLevel: seaLevel)
         var verts = [Float]()
-        verts.reserveCapacity(n * n * 6)
+        verts.reserveCapacity(n * n * 8)
         func h(_ i: Int, _ j: Int) -> Float {
             height.sample(x: Double(Swift.min(Swift.max(i, 0), n - 1)) * scale,
                           y: Double(Swift.min(Swift.max(j, 0), n - 1)) * scale)
@@ -69,7 +82,9 @@ public final class TerrainRenderer {
                 // Grid sample k sits at the centre of cell k: (k + 0.5) · cellSize.
                 let px = Float((Double(i) * scale + 0.5) * height.cellSize)
                 let py = Float((Double(j) * scale + 0.5) * height.cellSize)
-                verts.append(contentsOf: [px, py, z, normal.x, normal.y, normal.z])
+                let lx = Double(i) * scale, ly = Double(j) * scale
+                verts.append(contentsOf: [px, py, z, normal.x, normal.y, normal.z,
+                                          lighting.sky.sample(x: lx, y: ly), lighting.sun.sample(x: lx, y: ly)])
             }
         }
         var idx = [UInt32]()
@@ -86,6 +101,13 @@ public final class TerrainRenderer {
         vertices = vb
         indices = ib
         indexCount = idx.count
+    }
+
+    /// Clear colour behind the sky pass (which covers every pixel): the horizon haze, tone
+    /// mapped like the terrain (linear, since the target applies the sRGB encoding on write).
+    public static var skyClearColor: MTLClearColor {
+        let c = Look.toneMap(Look.haze)
+        return MTLClearColor(red: c.r, green: c.g, blue: c.b, alpha: 1)
     }
 
     /// Renders one frame into the view's drawable.
@@ -115,7 +137,7 @@ public final class TerrainRenderer {
         pass.colorAttachments[0].texture = color
         pass.colorAttachments[0].loadAction = .clear
         pass.colorAttachments[0].storeAction = .store
-        pass.colorAttachments[0].clearColor = MTLClearColor(red: 0.62, green: 0.72, blue: 0.85, alpha: 1)
+        pass.colorAttachments[0].clearColor = TerrainRenderer.skyClearColor
         pass.depthAttachment.texture = depth
         pass.depthAttachment.loadAction = .clear
         pass.depthAttachment.storeAction = .dontCare
@@ -141,12 +163,19 @@ public final class TerrainRenderer {
                         eye: SIMD3<Double>, forward: SIMD3<Float>) {
         guard let enc = cmd.makeRenderCommandEncoder(descriptor: pass) else { return }
         let proj = Matrix.perspective(fovY: 60 * .pi / 180, aspect: aspect, near: 0.3, far: 150_000)
+        let viewProjection = proj * Matrix.lookDirection(forward)
         var u = Uniforms(
-            viewProjection: proj * Matrix.lookDirection(forward),
+            viewProjection: viewProjection,
+            inverseViewProjection: viewProjection.inverse,
             cameraPosition: SIMD3<Float>(Float(eye.x), Float(eye.y), Float(eye.z)),
             seaLevel: seaLevel,
-            sunDirection: simd_normalize(SIMD3<Float>(-0.4, 0.5, 0.6)),
+            sunDirection: SIMD3<Float>(Float(Look.sunDirection.x), Float(Look.sunDirection.y), Float(Look.sunDirection.z)),
             maxHeight: maxHeight)
+
+        enc.setRenderPipelineState(skyPipeline)
+        enc.setDepthStencilState(skyDepthState)
+        enc.setFragmentBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 1)
+        enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
 
         enc.setRenderPipelineState(pipeline)
         enc.setDepthStencilState(depthState)
