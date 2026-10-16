@@ -7,8 +7,8 @@ import Engine
 import IslandCore
 import Walker
 
-// Launch with `swift run -c release IslandApp [path/to/height.r32]`.
-// With a .r32 from islandgen it shows that island; otherwise it bakes a quick 512² one.
+// Launch with `swift run -c release IslandApp [path/to/island.bundle | path/to/height.r32]`.
+// With a bundle or .r32 from islandgen it shows that island; otherwise it bakes a quick 512² one.
 // `--snapshot DIR` renders the automatic viewpoints offscreen to DIR/app-*.png and exits.
 // Controls: WASD walk, Shift run, drag to look, F toggles fly mode, Space/C up/down in fly mode,
 // [ and ] move the time of day, T lets time run (an hour every 20 s). `--time 16.5` starts at
@@ -68,7 +68,6 @@ final class InputMTKView: MTKView {
 
 final class Coordinator: NSObject, MTKViewDelegate {
     var renderer: TerrainRenderer?
-    var height: IslandCore.Grid?  // qualified: SwiftUI also has a Grid
     var walker: Walker?
     var flying = false
     var flyHeight = 0.0
@@ -80,6 +79,7 @@ final class Coordinator: NSObject, MTKViewDelegate {
     var day = SunPath.defaultDay
     var timeRuns = false
     var shownMinute = -1
+    var shownTick = -1
     var litHour = -1.0
 
     // macOS virtual key codes
@@ -90,25 +90,29 @@ final class Coordinator: NSObject, MTKViewDelegate {
     func attach(_ view: InputMTKView) {
         view.delegate = self
         guard let device = view.device else { return }
-        let grid = IslandSource.load()
-        height = grid
+        let (tiles, clouds) = IslandSource.terrain()
         let requested: TerrainRenderer.Shadows = Snapshots.option("--shadows") == "horizon" ? .horizonMap : .rayTraced
-        renderer = try? TerrainRenderer(device: device, colorFormat: view.colorPixelFormat,
-                                        depthFormat: .depth32Float, height: grid, seaLevel: 0,
-                                        shadows: requested, clouds: IslandSource.clouds(for: grid))
+        do {
+            renderer = try TerrainRenderer(device: device, colorFormat: view.colorPixelFormat,
+                                           depthFormat: .depth32Float, terrain: tiles,
+                                           shadows: requested, clouds: clouds)
+        } catch {
+            print("renderer failed: \(error)")
+            return
+        }
         hour = Snapshots.option("--time").flatMap { Double($0) } ?? hour
         day = Snapshots.option("--day").flatMap { Int($0) } ?? day
         // Start at the highest point so the whole island is in view.
+        guard let overview = try? tiles.grid(level: tiles.overviewLevel()) else { return }
         var best = 0
-        for i in 0..<grid.count where grid.values[i] > grid.values[best] { best = i }
-        let sx = (Double(best % grid.width) + 0.5) * grid.cellSize
-        let sy = (Double(best / grid.width) + 0.5) * grid.cellSize
+        for i in 0..<overview.count where overview.values[i] > overview.values[best] { best = i }
+        let sx = (Double(best % overview.width) + 0.5) * overview.cellSize
+        let sy = (Double(best / overview.width) + 0.5) * overview.cellSize
         walker = Walker(x: sx, y: sy, ground: ground)
     }
 
     func ground(_ x: Double, _ y: Double) -> Double {
-        guard let h = height else { return 0 }
-        return Double(h.sample(x: x / h.cellSize - 0.5, y: y / h.cellSize - 0.5))
+        renderer?.groundHeight(x: x, y: y) ?? 0
     }
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
@@ -146,10 +150,15 @@ final class Coordinator: NSObject, MTKViewDelegate {
             renderer.light = SunPath.light(hour: hour, day: day)
             litHour = hour
         }
+        // Debug overlay in the title bar: time of day, GPU frame time, what's streamed in.
         let minute = Int(hour * 60)
-        if minute != shownMinute {
+        let now10 = Int(now * 4)
+        if minute != shownMinute || now10 != shownTick {
             shownMinute = minute
-            view.window?.title = String(format: "Island Walker · %02d:%02d", minute / 60, minute % 60)
+            shownTick = now10
+            let s = renderer.stats
+            view.window?.title = String(format: "Island Walker · %02d:%02d · GPU %.1f ms · %d nodes · %d tiles (%d loading)",
+                                        minute / 60, minute % 60, s.gpuMilliseconds, s.nodes, s.residentTiles, s.loadingTiles)
         }
 
         let forward = (view.keys.contains(kW) ? 1.0 : 0) - (view.keys.contains(kS) ? 1.0 : 0)

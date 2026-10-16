@@ -13,11 +13,70 @@ using namespace raytracing;
 // horizon map, for GPUs that can't trace rays from a fragment shader.
 constant bool kRayTraced [[function_constant(0)]];
 
-struct Vertex {
-    packed_float3 position; // metres, world space
-    packed_float3 normal;
-    packed_float2 light;    // sky visibility, sun visibility at Look.sunDirection (TerrainLighting)
+// The streamed heightfield (TerrainStreamer) and the CDLOD layout (TerrainQuadtree).
+struct TerrainParams {
+    float cellMetres;       // level-0 sample spacing
+    float heightOffset;     // height = offset + scale × sample
+    float heightScale;
+    float domainSize;       // metres across
+    int levels;             // data mip levels
+    int tileSize;
+    int lodCount;
+    int unused;
+    int4 levelSize[2];      // samples per side, per data level
+    int4 levelTiles[2];     // tiles per side, per data level
+    int4 pageOffset[2];     // first page-table entry, per data level
+    float4 morphStart[4];   // per LOD: distance where vertices start morphing to the next LOD
+    float4 morphEnd[4];
 };
+
+struct TerrainNode {
+    float2 origin;          // metres
+    int lod;
+    int quads;              // quads per side in this draw's grid
+};
+
+int at(constant int4 *a, int i) { return a[i >> 2][i & 3]; }
+float at(constant float4 *a, int i) { return a[i >> 2][i & 3]; }
+
+// A level-`level` sample, falling back to coarser levels while its tile isn't resident.
+float rawHeight(constant TerrainParams &t, const device int *pages,
+                texture2d_array<ushort, access::read> tiles, int level, int2 s) {
+    for (int m = level; m < t.levels; m++) {
+        int size = at(t.levelSize, m);
+        int2 c = clamp(s, int2(0), int2(size - 1));
+        int2 tile = c / t.tileSize;
+        int page = pages[at(t.pageOffset, m) + tile.y * at(t.levelTiles, m) + tile.x];
+        if (page >= 0) return float(tiles.read(uint2(c - tile * t.tileSize), uint(page)).r);
+        s = c / 2;
+    }
+    return 0.0;
+}
+
+// Height in metres at a world position from data level `level`, bilinear between samples
+// (sample k sits at the centre of cell k).
+float levelHeight(constant TerrainParams &t, const device int *pages,
+                  texture2d_array<ushort, access::read> tiles, int level, float2 xy) {
+    float2 s = xy / (t.cellMetres * float(1 << level)) - 0.5;
+    float2 s0 = floor(s);
+    float2 f = s - s0;
+    int2 i = int2(s0);
+    float h00 = rawHeight(t, pages, tiles, level, i);
+    float h10 = rawHeight(t, pages, tiles, level, i + int2(1, 0));
+    float h01 = rawHeight(t, pages, tiles, level, i + int2(0, 1));
+    float h11 = rawHeight(t, pages, tiles, level, i + int2(1, 1));
+    return t.heightOffset + t.heightScale * mix(mix(h00, h10, f.x), mix(h01, h11, f.x), f.y);
+}
+
+// The surface a LOD-`lod` vertex sits on: its own data level, blended into the next one
+// as it morphs, so a fully morphed vertex matches the coarser neighbouring node exactly.
+float terrainHeight(constant TerrainParams &t, const device int *pages,
+                    texture2d_array<ushort, access::read> tiles, int lod, float morph, float2 xy) {
+    int m = min(lod, t.levels - 1);
+    float h = levelHeight(t, pages, tiles, m, xy);
+    if (morph > 0.0 && m + 1 < t.levels) h = mix(h, levelHeight(t, pages, tiles, m + 1, xy), morph);
+    return h;
+}
 
 struct Uniforms {
     float4x4 viewProjection;
@@ -73,23 +132,48 @@ struct VOut {
     float4 horizon3;
 };
 
-vertex VOut terrainVertex(const device Vertex *vertices [[buffer(0)]],
+// One vertex of a CDLOD node's grid. Vertices near the far edge of their LOD ring slide
+// onto the next LOD's grid (odd rows and columns collapse onto even ones), and the height
+// blends to the next data level with them.
+vertex VOut terrainVertex(uint vid [[vertex_id]], uint iid [[instance_id]],
                           constant Uniforms &u [[buffer(1)]],
-                          const device uchar4 *horizon [[buffer(2)]],
-                          uint vid [[vertex_id]]) {
-    Vertex v = vertices[vid];
+                          constant TerrainParams &t [[buffer(3)]],
+                          const device TerrainNode *nodes [[buffer(4)]],
+                          const device int *pages [[buffer(5)]],
+                          texture2d_array<ushort, access::read> tiles [[texture(0)]],
+                          texture2d<float> skyVisibility [[texture(1)]],
+                          texture2d_array<float, access::read> horizons [[texture(2)]]) {
+    TerrainNode node = nodes[iid];
+    uint row = uint(node.quads + 1);
+    float2 g = float2(float(vid % row), float(vid / row));
+    float spacing = t.cellMetres * float(1 << node.lod);
+    float2 xy = node.origin + g * spacing;
+    float h0 = terrainHeight(t, pages, tiles, node.lod, 0.0, xy);
+    float ms = at(t.morphStart, node.lod), me = at(t.morphEnd, node.lod);
+    float morph = saturate((distance(float3(xy, h0), u.cameraPosition) - ms) / max(me - ms, 1.0));
+    xy -= fmod(g, 2.0) * spacing * morph;
+    float h = terrainHeight(t, pages, tiles, node.lod, morph, xy);
+    // Normal from central differences on the same surface, one grid step apart.
+    float hx = terrainHeight(t, pages, tiles, node.lod, morph, xy + float2(spacing, 0.0))
+             - terrainHeight(t, pages, tiles, node.lod, morph, xy - float2(spacing, 0.0));
+    float hy = terrainHeight(t, pages, tiles, node.lod, morph, xy + float2(0.0, spacing))
+             - terrainHeight(t, pages, tiles, node.lod, morph, xy - float2(0.0, spacing));
+
     VOut o;
-    float3 world = float3(v.position);
+    float3 world = float3(xy, h);
     // Camera-relative: subtract before projecting so precision stays high near the viewer.
     o.position = u.viewProjection * float4(world - u.cameraPosition, 1.0);
     o.world = world;
-    o.normal = float3(v.normal);
-    o.light = float2(v.light);
-    const float toRadians = M_PI_2_F / 255.0;
-    o.horizon0 = float4(horizon[vid * 4 + 0]) * toRadians;
-    o.horizon1 = float4(horizon[vid * 4 + 1]) * toRadians;
-    o.horizon2 = float4(horizon[vid * 4 + 2]) * toRadians;
-    o.horizon3 = float4(horizon[vid * 4 + 3]) * toRadians;
+    o.normal = normalize(float3(-hx, -hy, 2.0 * spacing));
+    constexpr sampler linear(filter::linear, address::clamp_to_edge);
+    o.light = float2(skyVisibility.sample(linear, xy / t.domainSize, level(0)).r, 1.0);
+    // The horizon map's nearest cell: horizon angles don't interpolate across a ridge.
+    int side = int(horizons.get_width());
+    uint2 cell = uint2(clamp(int2(xy / t.domainSize * float(side)), int2(0), int2(side - 1)));
+    o.horizon0 = horizons.read(cell, 0) * M_PI_2_F;
+    o.horizon1 = horizons.read(cell, 1) * M_PI_2_F;
+    o.horizon2 = horizons.read(cell, 2) * M_PI_2_F;
+    o.horizon3 = horizons.read(cell, 3) * M_PI_2_F;
     return o;
 }
 
@@ -107,6 +191,10 @@ float rayTracedSun(float3 p, float3 n, float3 l, float2 pixel, primitive_acceler
     float3 origin = p + n * 1.0;
     intersector<triangle_data> isect;
     isect.accept_any_intersection(true);
+    // The shadow mesh is coarser than the drawn terrain, so a valley floor can sit below
+    // it. Rays only stop on faces turned towards them: from below, they pass through.
+    isect.set_triangle_front_facing_winding(winding::counterclockwise);
+    isect.set_triangle_cull_mode(triangle_cull_mode::back);
     float visible = 0.0;
     for (int k = 0; k < 4; k++) {
         float r = kSunConeRadius * sqrt((float(k) + 0.5) / 4.0);

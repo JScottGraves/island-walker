@@ -4,10 +4,27 @@ import MetalKit
 import simd
 import IslandCore
 
-/// First terrain renderer: one static mesh of the whole island at a fixed resolution.
-/// It exists to look at baked islands while the generator is tuned; the streaming,
-/// LOD-morphing renderer from the plan replaces it.
+/// The terrain renderer (plan §4.2): heights stream in tile by tile from the island's mip
+/// pyramid, and a CDLOD quadtree draws them with morphing between levels, 10 m grid
+/// spacing nearest the camera. Sun and sky lighting, ray-traced sun shadows and the cloud
+/// layer are drawn over it.
 public final class TerrainRenderer {
+    struct NodeInstance {
+        var origin: SIMD2<Float>
+        var lod: Int32
+        var quads: Int32
+    }
+
+    struct TerrainParams {
+        var cellMetres: Float, heightOffset: Float, heightScale: Float, domainSize: Float
+        var levels: Int32, tileSize: Int32, lodCount: Int32, unused: Int32 = 0
+        var levelSize: (SIMD4<Int32>, SIMD4<Int32>)
+        var levelTiles: (SIMD4<Int32>, SIMD4<Int32>)
+        var pageOffset: (SIMD4<Int32>, SIMD4<Int32>)
+        var morphStart: (SIMD4<Float>, SIMD4<Float>, SIMD4<Float>, SIMD4<Float>)
+        var morphEnd: (SIMD4<Float>, SIMD4<Float>, SIMD4<Float>, SIMD4<Float>)
+    }
+
     struct Uniforms {
         var viewProjection: simd_float4x4
         var inverseViewProjection: simd_float4x4
@@ -60,13 +77,32 @@ public final class TerrainRenderer {
     var frameNumber = 0
     var previousViewProjection = matrix_identity_float4x4
     var previousCamera = SIMD3<Float>(0, 0, 0)
-    let vertices: MTLBuffer
-    let indices: MTLBuffer
-    let indexCount: Int
-    let horizons: MTLBuffer
+    let terrain: TerrainTiles
+    let heights: TerrainHeights
+    let streamer: TerrainStreamer
+    let quadtree: TerrainQuadtree
+    let terrainParams: TerrainParams
+    let overview: Grid
+    /// Index buffers of a node's full grid and of a quarter node's half-density grid.
+    let nodeIndices: (full: MTLBuffer, half: MTLBuffer)
+    /// Selected nodes, one buffer per frame in flight.
+    let nodeBuffers: [MTLBuffer]
+    var nodeBufferIndex = 0
+    static let maxNodes = 4096
+    let skyVisibility: MTLTexture
+    let horizons: MTLTexture
     let terrainAccel: MTLAccelerationStructure?
     let seaLevel: Float
     let maxHeight: Float
+    /// What the last frame drew and how much is still loading, for the debug overlay.
+    public private(set) var stats = Stats()
+    public struct Stats: Sendable {
+        public var nodes = 0
+        public var residentTiles = 0
+        public var loadingTiles = 0
+        /// GPU time of the last completed frame drawn with `draw(in:)`, in milliseconds.
+        public var gpuMilliseconds = 0.0
+    }
     /// Which shadow path this renderer uses (ray tracing unless unsupported or declined).
     public let shadows: Shadows
     /// The sun and sky to light the next frame with; set it to move the sun.
@@ -91,17 +127,21 @@ public final class TerrainRenderer {
     /// Trade-wind inversion: the flat cap on cloud tops (normal regime ~2,000 m).
     public var inversionHeight = 2000.0
 
-    /// - Parameter meshResolution: vertices per side of the rendered mesh (the height grid
-    ///   is resampled to this). 1024 keeps the mesh around 2 million triangles.
+    /// Number of quads per side of a CDLOD node's grid.
+    public static let nodeQuads = 64
+
+    /// - Parameters:
+    ///   - terrain: the heightfield, streamed tile by tile from its mip pyramid.
+    ///   - clouds: islandgen's standing cloud coverage over the same domain.
     public init(device: MTLDevice, colorFormat: MTLPixelFormat, depthFormat: MTLPixelFormat,
-                height: Grid, seaLevel: Float, meshResolution: Int = 1024,
-                shadows requested: Shadows = .rayTraced, clouds: Grid? = nil) throws {
+                terrain: TerrainTiles, shadows requested: Shadows = .rayTraced, clouds: Grid? = nil) throws {
         self.device = device
         guard let queue = device.makeCommandQueue() else { throw RendererError.setup("command queue") }
         self.queue = queue
-        self.seaLevel = seaLevel
-        self.maxHeight = height.range.max
+        self.terrain = terrain
+        self.seaLevel = terrain.seaLevel
         self.depthFormat = depthFormat
+        heights = TerrainHeights(tiles: terrain)
 
         let shadows: Shadows = requested == .rayTraced && device.supportsRaytracingFromRender ? .rayTraced : .horizonMap
         self.shadows = shadows
@@ -147,64 +187,98 @@ public final class TerrainRenderer {
         guard let sds = device.makeDepthStencilState(descriptor: skyDepthDesc) else { throw RendererError.setup("sky depth state") }
         skyDepthState = sds
 
-        // Build the mesh: positions in metres, normals from central differences.
-        let n = Swift.min(meshResolution, height.width)
-        let scale = Double(height.width - 1) / Double(n - 1)
-        let spacing = Float(height.cellSize * scale)
-        // Sky and sun visibility (and, without ray tracing, the horizon map) from the
-        // full-resolution heightfield, sampled per vertex.
-        let lighting = TerrainLighting.bake(height: height, seaLevel: seaLevel, horizons: shadows == .horizonMap)
-        let sectors = TerrainLighting.sectors
-        var verts = [Float]()
-        verts.reserveCapacity(n * n * 8)
-        // 16 bytes per vertex either way; all zero (open horizon) when ray tracing.
-        var horizonBytes = [UInt8](repeating: 0, count: n * n * sectors)
-        func h(_ i: Int, _ j: Int) -> Float {
-            height.sample(x: Double(Swift.min(Swift.max(i, 0), n - 1)) * scale,
-                          y: Double(Swift.min(Swift.max(j, 0), n - 1)) * scale)
+        // Streaming and LOD. The overview level (at most 1024² samples) stays in memory for
+        // node bounds, the lighting bake and the shadow mesh.
+        let streamer = try TerrainStreamer(device: device, source: terrain)
+        self.streamer = streamer
+        let overview = try terrain.grid(level: terrain.overviewLevel())
+        self.overview = overview
+        maxHeight = overview.range.max
+        domainSize = Float(terrain.domainMetres)
+        let tree = TerrainQuadtree(quads: TerrainRenderer.nodeQuads, cellMetres: terrain.cellMetres,
+                                   domain: terrain.domainMetres, overview: overview)
+        quadtree = tree
+        guard terrain.levels <= 8, tree.lodCount <= 16 else { throw RendererError.setup("terrain too large for the LOD tables") }
+        func ints(_ f: (Int) -> Int) -> (SIMD4<Int32>, SIMD4<Int32>) {
+            let v = (0..<8).map { $0 < terrain.levels ? Int32(f($0)) : 0 }
+            return (SIMD4(v[0], v[1], v[2], v[3]), SIMD4(v[4], v[5], v[6], v[7]))
         }
-        for j in 0..<n {
-            for i in 0..<n {
-                let z = h(i, j)
-                let nx = (h(i - 1, j) - h(i + 1, j)) / (2 * spacing)
-                let ny = (h(i, j - 1) - h(i, j + 1)) / (2 * spacing)
-                let normal = simd_normalize(SIMD3<Float>(nx, ny, 1))
-                // Grid sample k sits at the centre of cell k: (k + 0.5) · cellSize.
-                let px = Float((Double(i) * scale + 0.5) * height.cellSize)
-                let py = Float((Double(j) * scale + 0.5) * height.cellSize)
-                let lx = Double(i) * scale, ly = Double(j) * scale
-                verts.append(contentsOf: [px, py, z, normal.x, normal.y, normal.z,
-                                          lighting.sky.sample(x: lx, y: ly), lighting.sun.sample(x: lx, y: ly)])
-                if !lighting.horizon.isEmpty {
-                    // Nearest cell: horizon angles don't interpolate meaningfully across a ridge.
-                    let cx = Swift.min(height.width - 1, Int(lx.rounded())), cy = Swift.min(height.height - 1, Int(ly.rounded()))
-                    let src = (cy * height.width + cx) * sectors, dst = (j * n + i) * sectors
-                    for k in 0..<sectors { horizonBytes[dst + k] = lighting.horizon[src + k] }
+        func floats(_ a: [Double]) -> (SIMD4<Float>, SIMD4<Float>, SIMD4<Float>, SIMD4<Float>) {
+            let v = (0..<16).map { $0 < a.count ? Float(Swift.min(a[$0], 1e30)) : 1e30 }
+            return (SIMD4(v[0], v[1], v[2], v[3]), SIMD4(v[4], v[5], v[6], v[7]),
+                    SIMD4(v[8], v[9], v[10], v[11]), SIMD4(v[12], v[13], v[14], v[15]))
+        }
+        let pageOffsets = streamer.pageOffsets
+        terrainParams = TerrainParams(
+            cellMetres: Float(terrain.cellMetres), heightOffset: terrain.offset, heightScale: terrain.scale,
+            domainSize: Float(terrain.domainMetres), levels: Int32(terrain.levels), tileSize: Int32(terrain.tileSize),
+            lodCount: Int32(tree.lodCount),
+            levelSize: ints { terrain.levelSize($0) }, levelTiles: ints { terrain.tilesPerSide($0) },
+            pageOffset: ints { pageOffsets[$0] },
+            morphStart: floats(tree.morphStart), morphEnd: floats(tree.morphEnd))
+        func grid(_ quads: Int) -> MTLBuffer? {
+            let n = quads + 1
+            var idx = [UInt16]()
+            idx.reserveCapacity(quads * quads * 6)
+            for j in 0..<quads {
+                for i in 0..<quads {
+                    let a = UInt16(j * n + i), b = a + 1, c = a + UInt16(n), d = c + 1
+                    idx.append(contentsOf: [a, b, d, a, d, c])
                 }
             }
+            return device.makeBuffer(bytes: idx, length: idx.count * 2, options: .storageModeShared)
         }
-        var idx = [UInt32]()
-        idx.reserveCapacity((n - 1) * (n - 1) * 6)
-        for j in 0..<(n - 1) {
-            for i in 0..<(n - 1) {
-                let a = UInt32(j * n + i), b = a + 1, c = a + UInt32(n), d = c + 1
-                idx.append(contentsOf: [a, b, d, a, d, c])
+        guard let full = grid(TerrainRenderer.nodeQuads), let half = grid(TerrainRenderer.nodeQuads / 2) else {
+            throw RendererError.setup("node grids")
+        }
+        nodeIndices = (full, half)
+        nodeBuffers = try (0..<3).map { _ in
+            guard let b = device.makeBuffer(length: TerrainRenderer.maxNodes * MemoryLayout<NodeInstance>.stride,
+                                            options: .storageModeShared) else { throw RendererError.setup("node buffer") }
+            return b
+        }
+
+        // Sky visibility (and, without ray tracing, the horizon map) baked from the overview.
+        let lighting = TerrainLighting.bake(height: overview, seaLevel: terrain.seaLevel, horizons: shadows == .horizonMap)
+        let skyVisDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r32Float, width: overview.width,
+                                                                  height: overview.height, mipmapped: false)
+        skyVisDesc.usage = [.shaderRead]
+        skyVisDesc.storageMode = .shared
+        guard let skyVis = device.makeTexture(descriptor: skyVisDesc) else { throw RendererError.setup("sky visibility") }
+        lighting.sky.values.withUnsafeBytes { raw in
+            skyVis.replace(region: MTLRegionMake2D(0, 0, overview.width, overview.height), mipmapLevel: 0,
+                           withBytes: raw.baseAddress!, bytesPerRow: overview.width * 4)
+        }
+        skyVisibility = skyVis
+        // 16 sectors as 4 RGBA slices; one texel of open horizon when ray tracing.
+        let horizonSide = lighting.horizon.isEmpty ? 1 : overview.width
+        let horizonDesc = MTLTextureDescriptor()
+        horizonDesc.textureType = .type2DArray
+        horizonDesc.pixelFormat = .rgba8Unorm
+        horizonDesc.width = horizonSide
+        horizonDesc.height = horizonSide
+        horizonDesc.arrayLength = 4
+        horizonDesc.usage = [.shaderRead]
+        horizonDesc.storageMode = .shared
+        guard let horizonTexture = device.makeTexture(descriptor: horizonDesc) else { throw RendererError.setup("horizon map") }
+        let sectors = TerrainLighting.sectors
+        for slice in 0..<4 {
+            var bytes = [UInt8](repeating: 0, count: horizonSide * horizonSide * 4)
+            if !lighting.horizon.isEmpty {
+                for i in 0..<(horizonSide * horizonSide) {
+                    for c in 0..<4 { bytes[i * 4 + c] = lighting.horizon[i * sectors + slice * 4 + c] }
+                }
             }
+            horizonTexture.replace(region: MTLRegionMake2D(0, 0, horizonSide, horizonSide), mipmapLevel: 0, slice: slice,
+                                   withBytes: bytes, bytesPerRow: horizonSide * 4, bytesPerImage: bytes.count)
         }
-        guard let vb = device.makeBuffer(bytes: verts, length: verts.count * 4, options: .storageModeShared),
-              let ib = device.makeBuffer(bytes: idx, length: idx.count * 4, options: .storageModeShared),
-              let hb = device.makeBuffer(bytes: horizonBytes, length: horizonBytes.count, options: .storageModeShared)
-        else { throw RendererError.setup("buffers") }
-        vertices = vb
-        indices = ib
-        horizons = hb
-        indexCount = idx.count
+        horizons = horizonTexture
+
         let skyDesc = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .rgba32Float, width: Atmosphere.skyViewSize.width,
             height: Atmosphere.skyViewSize.height, mipmapped: false)
         skyDesc.usage = [.shaderRead]
         skyDesc.storageMode = .shared
-        domainSize = Float(Double(height.width) * height.cellSize)
         let coverage = clouds ?? Grid(width: 1, height: 1, cellSize: 1)
         let cloudDesc = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .r32Float, width: coverage.width, height: coverage.height, mipmapped: false)
@@ -220,11 +294,46 @@ public final class TerrainRenderer {
             guard let t = device.makeTexture(descriptor: skyDesc) else { throw RendererError.setup("sky-view texture") }
             return t
         }
+        // Sun shadows are traced against a mesh of the overview: coarser than the drawn
+        // terrain, but it holds the whole island (the shader lets rays out from below it).
         terrainAccel = shadows == .rayTraced
-            ? try TerrainRenderer.buildAccelerationStructure(device: device, queue: queue, vertices: vb,
-                                                              stride: 8 * 4, indices: ib, triangles: idx.count / 3)
+            ? try TerrainRenderer.buildShadowMesh(device: device, queue: queue, overview: overview)
             : nil
         uploadSkyView()
+    }
+
+    /// Convenience for an in-memory heightfield (a height.r32 or a quick bake).
+    public convenience init(device: MTLDevice, colorFormat: MTLPixelFormat, depthFormat: MTLPixelFormat,
+                            height: Grid, seaLevel: Float, shadows: Shadows = .rayTraced, clouds: Grid? = nil) throws {
+        try self.init(device: device, colorFormat: colorFormat, depthFormat: depthFormat,
+                      terrain: GridTerrain(height: height, seaLevel: seaLevel), shadows: shadows, clouds: clouds)
+    }
+
+    /// Ground height (metres) under a world position, as drawn up close: for the walker.
+    public func groundHeight(x: Double, y: Double) -> Double { heights.height(x: x, y: y) }
+
+    static func buildShadowMesh(device: MTLDevice, queue: MTLCommandQueue, overview g: Grid) throws -> MTLAccelerationStructure {
+        let n = g.width
+        var positions = [Float]()
+        positions.reserveCapacity(n * n * 3)
+        for j in 0..<n {
+            for i in 0..<n {
+                positions.append(contentsOf: [Float((Double(i) + 0.5) * g.cellSize), Float((Double(j) + 0.5) * g.cellSize), g[i, j]])
+            }
+        }
+        var idx = [UInt32]()
+        idx.reserveCapacity((n - 1) * (n - 1) * 6)
+        for j in 0..<(n - 1) {
+            for i in 0..<(n - 1) {
+                let a = UInt32(j * n + i), b = a + 1, c = a + UInt32(n), d = c + 1
+                idx.append(contentsOf: [a, b, d, a, d, c])
+            }
+        }
+        guard let vb = device.makeBuffer(bytes: positions, length: positions.count * 4, options: .storageModeShared),
+              let ib = device.makeBuffer(bytes: idx, length: idx.count * 4, options: .storageModeShared)
+        else { throw RendererError.setup("shadow mesh") }
+        return try buildAccelerationStructure(device: device, queue: queue, vertices: vb, stride: 12,
+                                              indices: ib, triangles: idx.count / 3)
     }
 
     /// Cloud base (lifting condensation level): ~400 m at night, ~800 m early afternoon
@@ -295,6 +404,10 @@ public final class TerrainRenderer {
         guard let drawable = view.currentDrawable, let cmd = queue.makeCommandBuffer() else { return }
         encode(cmd, color: drawable.texture, eye: eye, forward: forward)
         cmd.present(drawable)
+        cmd.addCompletedHandler { [weak self] done in
+            let ms = (done.gpuEndTime - done.gpuStartTime) * 1000
+            DispatchQueue.main.async { self?.stats.gpuMilliseconds = ms }
+        }
         cmd.commit()
     }
 
@@ -309,15 +422,21 @@ public final class TerrainRenderer {
         let colorDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: colorFormat, width: width, height: height, mipmapped: false)
         colorDesc.usage = [.renderTarget]
         colorDesc.storageMode = .shared
-        guard let color = device.makeTexture(descriptor: colorDesc), let cmd = queue.makeCommandBuffer()
+        guard let color = device.makeTexture(descriptor: colorDesc), let cmd = queue.makeCommandBuffer(),
+              let last = queue.makeCommandBuffer()
         else { throw RendererError.setup("snapshot targets") }
         // A fresh history, then enough frames at this camera for it to settle.
         historyValid = false
-        for _ in 0..<TerrainRenderer.snapshotFrames {
-            encode(cmd, color: color, eye: eye, forward: forward)
+        for k in 0..<(TerrainRenderer.snapshotFrames - 1) {
+            // Load every tile the view needs before the first frame: snapshots don't stream.
+            encode(cmd, color: color, eye: eye, forward: forward, synchronousStreaming: k == 0)
         }
         cmd.commit()
-        cmd.waitUntilCompleted()
+        // The last frame on its own, timed: one settled frame, as the app would draw it.
+        encode(last, color: color, eye: eye, forward: forward)
+        last.commit()
+        last.waitUntilCompleted()
+        stats.gpuMilliseconds = (last.gpuEndTime - last.gpuStartTime) * 1000
 
         var bgra = [UInt8](repeating: 0, count: width * height * 4)
         bgra.withUnsafeMutableBytes { buf in
@@ -351,7 +470,83 @@ public final class TerrainRenderer {
                        history: [h0, h1], historyDistance: [d0, d1])
     }
 
-    private func encode(_ cmd: MTLCommandBuffer, color: MTLTexture, eye: SIMD3<Double>, forward: SIMD3<Float>) {
+    struct FrameTerrain {
+        var pages: MTLBuffer
+        var nodes: MTLBuffer
+        var full: Int
+        var half: Int
+    }
+
+    /// Picks this frame's nodes, asks for their tiles and uploads what has loaded.
+    func prepareTerrain(eye: SIMD3<Double>, viewProjection m: simd_float4x4, synchronously: Bool) -> FrameTerrain {
+        // Frustum planes in camera-relative space, from the rows of the view-projection.
+        func row(_ i: Int) -> SIMD4<Double> {
+            SIMD4(Double(m.columns.0[i]), Double(m.columns.1[i]), Double(m.columns.2[i]), Double(m.columns.3[i]))
+        }
+        let r0 = row(0), r1 = row(1), r2 = row(2), r3 = row(3)
+        let planes = [r3 + r0, r3 - r0, r3 + r1, r3 - r1, r2, r3 - r2]
+        let selected = quadtree.select(eye: (eye.x, eye.y, eye.z)) { lo, hi in
+            let a = lo - eye, b = hi - eye
+            for p in planes {
+                let v = SIMD3(p.x > 0 ? b.x : a.x, p.y > 0 ? b.y : a.y, p.z > 0 ? b.z : a.z)
+                if p.x * v.x + p.y * v.y + p.z * v.z + p.w < 0 { return false }
+            }
+            return true
+        }
+        var keys: [TerrainStreamer.Key] = []
+        for node in selected {
+            let level = Swift.min(node.lod, terrain.levels - 1)
+            keys += streamer.keys(level: level, x: node.x, y: node.y, size: node.size)
+            if level + 1 < terrain.levels {
+                keys += streamer.keys(level: level + 1, x: node.x, y: node.y, size: node.size)
+            }
+        }
+        streamer.request(keys, synchronously: synchronously)
+        let pages = streamer.update()
+
+        nodeBufferIndex = (nodeBufferIndex + 1) % nodeBuffers.count
+        let buffer = nodeBuffers[nodeBufferIndex]
+        let out = buffer.contents().bindMemory(to: NodeInstance.self, capacity: TerrainRenderer.maxNodes)
+        let full = selected.filter { !$0.half }, half = selected.filter { $0.half }
+        var count = 0
+        for node in full + half where count < TerrainRenderer.maxNodes {
+            out[count] = NodeInstance(origin: SIMD2(Float(node.x), Float(node.y)), lod: Int32(node.lod),
+                                      quads: Int32(node.half ? TerrainRenderer.nodeQuads / 2 : TerrainRenderer.nodeQuads))
+            count += 1
+        }
+        stats.nodes = count
+        stats.residentTiles = streamer.residentCount
+        stats.loadingTiles = streamer.backlog
+        let fullCount = Swift.min(full.count, count)
+        return FrameTerrain(pages: pages, nodes: buffer, full: fullCount, half: count - fullCount)
+    }
+
+    func bindTerrain(_ enc: MTLRenderCommandEncoder, frame: FrameTerrain) {
+        var params = terrainParams
+        enc.setVertexBytes(&params, length: MemoryLayout<TerrainParams>.stride, index: 3)
+        enc.setVertexBuffer(frame.pages, offset: 0, index: 5)
+        enc.setVertexTexture(streamer.tiles, index: 0)
+        enc.setVertexTexture(skyVisibility, index: 1)
+        enc.setVertexTexture(horizons, index: 2)
+    }
+
+    func drawTerrain(_ enc: MTLRenderCommandEncoder, frame: FrameTerrain) {
+        let stride = MemoryLayout<NodeInstance>.stride
+        let quads = TerrainRenderer.nodeQuads
+        if frame.full > 0 {
+            enc.setVertexBuffer(frame.nodes, offset: 0, index: 4)
+            enc.drawIndexedPrimitives(type: .triangle, indexCount: quads * quads * 6, indexType: .uint16,
+                                      indexBuffer: nodeIndices.full, indexBufferOffset: 0, instanceCount: frame.full)
+        }
+        if frame.half > 0 {
+            enc.setVertexBuffer(frame.nodes, offset: frame.full * stride, index: 4)
+            enc.drawIndexedPrimitives(type: .triangle, indexCount: (quads / 2) * (quads / 2) * 6, indexType: .uint16,
+                                      indexBuffer: nodeIndices.half, indexBufferOffset: 0, instanceCount: frame.half)
+        }
+    }
+
+    private func encode(_ cmd: MTLCommandBuffer, color: MTLTexture, eye: SIMD3<Double>, forward: SIMD3<Float>,
+                        synchronousStreaming: Bool = false) {
         let width = color.width, height = color.height
         if targets?.width != width || targets?.height != height {
             targets = makeTargets(width: width, height: height)
@@ -383,6 +578,7 @@ public final class TerrainRenderer {
             previousCamera: SIMD4(previousCamera, 0),
             frame: SIMD4(Float(width), Float(height), Float(frameNumber % 4096), historyValid ? 1 : 0))
         let skyView = skyViews[skyViewIndex]
+        let frameTerrain = prepareTerrain(eye: eye, viewProjection: viewProjection, synchronously: synchronousStreaming)
 
         // 1. Terrain depth.
         let depthPass = MTLRenderPassDescriptor()
@@ -394,11 +590,9 @@ public final class TerrainRenderer {
         enc.setRenderPipelineState(depthPipeline)
         enc.setDepthStencilState(prepassDepthState)
         enc.setCullMode(.none)
-        enc.setVertexBuffer(vertices, offset: 0, index: 0)
         enc.setVertexBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 1)
-        enc.setVertexBuffer(horizons, offset: 0, index: 2)
-        enc.drawIndexedPrimitives(type: .triangle, indexCount: indexCount, indexType: .uint32,
-                                  indexBuffer: indices, indexBufferOffset: 0)
+        bindTerrain(enc, frame: frameTerrain)
+        drawTerrain(enc, frame: frameTerrain)
         enc.endEncoding()
 
         // 2. Clouds at half resolution, marched up to that depth, then blended into the history.
@@ -435,15 +629,13 @@ public final class TerrainRenderer {
 
         shade.setRenderPipelineState(pipeline)
         shade.setDepthStencilState(depthState)
-        shade.setVertexBuffer(vertices, offset: 0, index: 0)
         shade.setVertexBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 1)
-        shade.setVertexBuffer(horizons, offset: 0, index: 2)
+        bindTerrain(shade, frame: frameTerrain)
         if let terrainAccel {
             shade.setFragmentAccelerationStructure(terrainAccel, bufferIndex: 2)
             shade.useResource(terrainAccel, usage: .read, stages: .fragment)
         }
-        shade.drawIndexedPrimitives(type: .triangle, indexCount: indexCount, indexType: .uint32,
-                                    indexBuffer: indices, indexBufferOffset: 0)
+        drawTerrain(shade, frame: frameTerrain)
         shade.endEncoding()
 
         historyIndex = next
