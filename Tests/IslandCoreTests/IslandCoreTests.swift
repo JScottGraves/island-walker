@@ -52,6 +52,49 @@ final class IslandCoreTests: XCTestCase {
         XCTAssertGreaterThan(light.sky[10, 32], 0.9)
     }
 
+    func testReferenceSunReproducesLookConstants() {
+        let l = SunLight.reference
+        XCTAssertEqual(l.sun.r, Look.sun.r, accuracy: 1e-9)
+        XCTAssertEqual(l.sun.b, Look.sun.b, accuracy: 1e-9)
+        XCTAssertEqual(l.sky.g, Look.sky.g, accuracy: 1e-9)
+        XCTAssertEqual(l.exposure, 1, accuracy: 1e-9)
+        XCTAssertEqual(l.hazeTint.r, 1, accuracy: 1e-9)
+    }
+
+    func testSunPathCrossesTheSouthAtNoonInOctober() {
+        let noon = SunPath.direction(hour: 12)
+        let elevation = asin(noon.z) * 180 / .pi
+        XCTAssertEqual(elevation, 59.5, accuracy: 1.5)
+        XCTAssertEqual(noon.x, 0, accuracy: 1e-9)
+        XCTAssertLessThan(noon.y, 0)
+        XCTAssertGreaterThan(SunPath.direction(hour: 8).x, 0.5)   // morning sun in the east
+        XCTAssertLessThan(SunPath.direction(hour: 3).z, 0)         // night
+    }
+
+    func testLowSunIsRedderAndDimmer() {
+        let noon = SunPath.light(hour: 12), dusk = SunPath.light(hour: 17.6)
+        XCTAssertLessThan(dusk.sun.b / dusk.sun.r, noon.sun.b / noon.sun.r * 0.8)
+        XCTAssertLessThan(dusk.sun.g, noon.sun.g)
+        XCTAssertGreaterThan(dusk.exposure, noon.exposure)
+        XCTAssertEqual(SunPath.light(hour: 0).sun.g, 0)
+    }
+
+    func testHorizonMapSeesAWall() {
+        // A wall to the east of the plain: the east sector's horizon rises, the west stays flat.
+        var g = Grid(width: 64, height: 64, cellSize: 50)
+        for y in 0..<64 { for x in 0..<64 { g[x, y] = x > 40 ? 2000 : 10 } }
+        let light = TerrainLighting.bake(height: g, seaLevel: 0, horizons: true)
+        let n = TerrainLighting.sectors
+        let i = (32 * 64 + 20) * n
+        XCTAssertEqual(light.horizon.count, g.count * n)
+        // Sectors 0 and n-1 straddle due east; n/2 - 1 and n/2 straddle due west.
+        XCTAssertGreaterThan(light.horizon[i], 100)
+        XCTAssertGreaterThan(light.horizon[i + n - 1], 100)
+        XCTAssertLessThan(light.horizon[i + n / 2], 5)
+        // Asking for horizons leaves sky visibility unchanged.
+        XCTAssertEqual(TerrainLighting.bake(height: g, seaLevel: 0).sky.values, light.sky.values)
+    }
+
     func testDistantSeaMeetsTheHorizonSky() {
         // Seen at a grazing angle, water is mostly reflected sky, so it can't form a dark
         // band against the sky just above the horizon.
