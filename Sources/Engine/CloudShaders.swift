@@ -18,10 +18,11 @@ constant float kEarthRadius = 6360000.0;
 // Cumulus extinction per metre at full density (~40 m visibility inside a dense cloud core).
 constant float kCloudExtinction = 0.025;
 // Noise tiles (metres): the Perlin–Worley shape texture repeats every kCloudShapeTile,
-// the finest octave of Worley edge erosion every kCloudDetailTile (coarser octaves at 3×
-// and 9× that).
+// the Worley edge erosion every kCloudDetailTile, and the same Worley texture swings the
+// coverage of big clouds every kCloudBankTile.
 constant float kCloudShapeTile = 4000.0;
 constant float kCloudDetailTile = 700.0;
+constant float kCloudBankTile = 6300.0;
 // The light march and shadow map sample the shape at kCloudLightScale, without edge
 // erosion, but fine enough that the shape keeps its gaps (a blurred, uniform shape lets
 // less light into the cloud, since transmittance is convex in density).
@@ -178,32 +179,33 @@ float cloudDensity(constant Uniforms &u, texture2d<float> cloudMap, texture3d<fl
     // Matched to the spread of the value noise the coverage was tuned for (its quantiles
     // from 10% to 99% agree within 0.02), so a coverage of c still fills about c of the sky.
     shape = saturate(shape * 1.762 - 0.613) * profile;
+    // Big clouds are ragged at the kilometre scale as well (Lovejoy 1982): swing the
+    // coverage by up to ±60% over cells of 0.8–3 km, so banks get bays, gaps and towers.
+    // The swing is zero-mean, so the sky keeps the amount of cloud the weather map asks
+    // for, and multiplicative, so clear sky stays clear. It shapes the bulk cloud, so the
+    // light march and shadows see it too.
+    if (shape <= 1.0 - 1.6 * coverage) return 0.0;  // clear even at the largest swing
+    float bankLod = clamp(log2(scale * float(detailNoise.get_width()) / kCloudBankTile), 0.0, 5.0);
+    float3 bank = detailNoise.sample(s, q / kCloudBankTile + float3(0.31, 0.17, 0.53), level(bankLod)).rgb;
+    // Median 0.48 and spread 0.10 of this Worley mix, measured on the baked noise.
+    float swing = clamp((bank.r * 0.6 + bank.g * 0.4 - 0.48) / 0.10, -2.5, 2.5);
+    coverage = saturate(coverage * (1.0 + 0.24 * swing));
     float d = saturate(remapRange(shape, 1.0 - coverage, 1.0, 0.0, 1.0));
-    if (erode) {
+    float fade = 1.0 - smoothstep(kCloudDetailTile / 16.0, kCloudDetailTile / 8.0, scale);
+    if (erode && fade > 0.0 && d > 0.0 && d < 0.9) {
         // Erode the rim, not the core (Schneider 2015/2017; edges mix with dry air, the core
-        // doesn't: Heus & Jonker 2008), at three scales: real cloud edges are ragged at
-        // every scale (Lovejoy 1982), so a big cloud needs big bites as well as small ones.
-        // Each octave fades out once a texel spans its finest Worley cells (tile / 8).
-        // Coarse first, gently, so it bites big clouds without erasing small ones; the
-        // finest last, so its billows sit on the final edge.
-        float tile = kCloudDetailTile * 9.0;
-        const float strength[3] = { 0.12, 0.2, 0.3 };
-        for (int o = 0; o < 3; o++, tile /= 3.0) {
-            if (d <= 0.0 || d >= 0.9) break;
-            float fade = 1.0 - smoothstep(tile / 16.0, tile / 8.0, scale);
-            if (fade <= 0.0) continue;
-            float lod = clamp(log2(scale * float(detailNoise.get_width()) / tile), 0.0, 5.0);
-            // Each octave from a different place in the texture, warped so edges swirl.
-            float3 dq = q / tile + float3(0.31, 0.17, 0.53) * float(o);
-            float warp = detailNoise.sample(s, dq * 0.37, level(lod)).a;
-            dq += (warp - 0.5) * float3(0.6, 0.6, 0.3);
-            float3 w = detailNoise.sample(s, dq, level(lod)).rgb;
-            float fine = w.r * 0.625 + w.g * 0.25 + w.b * 0.125;
-            // Inverted Worley low in the cloud tears it into wisps; plain Worley higher up
-            // leaves rounded billows (Schneider 2015).
-            float erosion = mix(1.0 - fine, fine, saturate(hn * 4.0));
-            d = saturate(remapRange(d, strength[o] * fade * erosion, 1.0, 0.0, 1.0));
-        }
+        // doesn't: Heus & Jonker 2008). Warp the detail so edges swirl and tear. Fades out
+        // once a texel spans its finest Worley cells (tile / 8).
+        float lod = clamp(log2(scale * float(detailNoise.get_width()) / kCloudDetailTile), 0.0, 5.0);
+        float3 dq = q / kCloudDetailTile;
+        float warp = detailNoise.sample(s, dq * 0.37, level(lod)).a;
+        dq += (warp - 0.5) * float3(0.6, 0.6, 0.3);
+        float3 w = detailNoise.sample(s, dq, level(lod)).rgb;
+        float fine = w.r * 0.625 + w.g * 0.25 + w.b * 0.125;
+        // Inverted Worley low in the cloud tears it into wisps; plain Worley higher up
+        // leaves rounded billows (Schneider 2015).
+        float erosion = mix(1.0 - fine, fine, saturate(hn * 4.0));
+        d = saturate(remapRange(d, 0.45 * fade * erosion, 1.0, 0.0, 1.0));
     }
     // Real cumulus edges are abrupt: liquid water appears within metres of the boundary.
     // Seen from outside, raise thin density so an edge goes from clear to solid quickly
@@ -279,7 +281,7 @@ CloudResult marchClouds(constant Uniforms &u, texture2d<float> cloudMap, texture
 
     end = min(end, start + 60000.0);
     if (end <= start) return result;
-    // Steps of ~1% of the distance (15–250 m), so a cloud lobe gets several samples at any
+    // Steps of ~1.25% of the distance (15–300 m), so a cloud lobe gets several samples at any
     // range: a few long fixed steps sliced distant banks into regular ridges. Empty air is
     // crossed two steps at a time; the first hit backs up and re-enters at the short step,
     // which holds until several samples in a row come up empty (Schneider 2017). Longer
@@ -287,11 +289,11 @@ CloudResult marchClouds(constant Uniforms &u, texture2d<float> cloudMap, texture
     // The start moves every frame and the history averages the jitter out.
     float jitter = fract(52.9829189 * fract(dot(pixel, float2(0.06711056, 0.00583715))));
     float weightedDistance = 0.0, weight = 0.0;
-    float t = start + jitter * clamp(start * 0.01, 15.0, 250.0);
+    float t = start + jitter * clamp(start * 0.0125, 15.0, 300.0);
     bool fine = false;
     int empty = 0;
-    for (int k = 0; k < 192 && t < end; k++) {
-        float dt = clamp(t * 0.01, 15.0, 250.0);
+    for (int k = 0; k < 160 && t < end; k++) {
+        float dt = clamp(t * 0.0125, 15.0, 300.0);
         float3 p = u.cameraPosition + dir * t;
         float density = cloudDensity(u, cloudMap, shapeNoise, detailNoise, p, max(t * kCloudPixelAngle, 1.0), true);
         if (density <= 0.0) {
