@@ -252,8 +252,9 @@ public final class TerrainRenderer {
             return b
         }
 
-        // Sky visibility (and, without ray tracing, the horizon map) baked from the overview.
-        let lighting = TerrainLighting.bake(height: overview, seaLevel: terrain.seaLevel, horizons: shadows == .horizonMap)
+        // Sky visibility and the horizon map, baked from the overview. With ray tracing the
+        // horizon map decides which pixels need rays at all.
+        let lighting = TerrainLighting.bake(height: overview, seaLevel: terrain.seaLevel, horizons: true)
         let skyVisDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r32Float, width: overview.width,
                                                                   height: overview.height, mipmapped: false)
         skyVisDesc.usage = [.shaderRead]
@@ -264,7 +265,7 @@ public final class TerrainRenderer {
                            withBytes: raw.baseAddress!, bytesPerRow: overview.width * 4)
         }
         skyVisibility = skyVis
-        // 16 sectors as 4 RGBA slices; one texel of open horizon when ray tracing.
+        // 16 sectors as 4 RGBA slices.
         let horizonSide = lighting.horizon.isEmpty ? 1 : overview.width
         let horizonDesc = MTLTextureDescriptor()
         horizonDesc.textureType = .type2DArray

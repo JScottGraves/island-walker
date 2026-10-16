@@ -213,8 +213,10 @@ float rayTracedSun(float3 p, float3 n, float3 l, float2 pixel, float distance, p
 }
 
 // How far the sun stands above the terrain's horizon (radians), from the 16-sector
-// horizon map interpolated at the sun's azimuth.
-float horizonMargin(VOut in, float3 l) {
+// horizon map interpolated at the sun's azimuth. `bounds` gets the margin against the
+// higher and the lower of the two sectors either side: where even the higher one leaves
+// the sun clear, or even the lower one hides it, the answer can't be in doubt.
+float horizonMargin(VOut in, float3 l, thread float2 &bounds) {
     float h[16] = {
         in.horizon0.x, in.horizon0.y, in.horizon0.z, in.horizon0.w,
         in.horizon1.x, in.horizon1.y, in.horizon1.z, in.horizon1.w,
@@ -227,12 +229,15 @@ float horizonMargin(VOut in, float3 l) {
     int a = (int(f0) + 16) % 16;
     int b = (a + 1) % 16;
     float horizonAngle = mix(h[a], h[b], f - f0);
-    return asin(clamp(l.z, -1.0, 1.0)) - horizonAngle;
+    float elevation = asin(clamp(l.z, -1.0, 1.0));
+    bounds = float2(elevation - max(h[a], h[b]), elevation - min(h[a], h[b]));
+    return elevation - horizonAngle;
 }
 
 // Sun visibility from the horizon map, with the same soft edge as the CPU bake.
 float horizonSun(VOut in, float3 l) {
-    float margin = horizonMargin(in, l);
+    float2 bounds;
+    float margin = horizonMargin(in, l, bounds);
     return smoothstep(0.0, 1.0, saturate((margin + 0.01) / 0.02));
 }
 
@@ -267,12 +272,14 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
     float sunVisibility = 0.0;
     if (nDotL > 0.0 && l.z > -0.01 && cloudSun > 0.01) {
         // The horizon map comes from the same mesh the rays trace, so where it puts the sun
-        // well clear of the horizon, or well below it, the rays would only agree with it.
-        float margin = horizonMargin(in, l);
-        if (kRayTraced && abs(margin) < 0.05) {
-            sunVisibility = rayTracedSun(surface, n, l, in.position.xy, length(u.cameraPosition - in.world), terrain);
-        } else if (kRayTraced) {
-            sunVisibility = margin > 0.0 ? 1.0 : 0.0;
+        // well clear of every nearby horizon, or well below them all, the rays would only
+        // agree with it; the slack covers the drawn surface sitting off the coarse mesh.
+        if (kRayTraced) {
+            float2 bounds;
+            horizonMargin(in, l, bounds);
+            if (bounds.x > 0.05) sunVisibility = 1.0;
+            else if (bounds.y < -0.05) sunVisibility = 0.0;
+            else sunVisibility = rayTracedSun(surface, n, l, in.position.xy, length(u.cameraPosition - in.world), terrain);
         } else {
             sunVisibility = horizonSun(in, l);
         }
