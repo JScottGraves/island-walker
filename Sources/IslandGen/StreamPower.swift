@@ -70,11 +70,12 @@ public enum StreamPower {
         public var uplift: Double = 0
         /// Sea-cliff retreat by wave attack in m / yr on a coast facing straight into the
         /// wind. Without it, every coast grades down to a near-flat fringe at sea level,
-        /// where Oahu's coast rises at about 5° (6° on the windward side). 0 disables it.
-        public var waveRetreat: Double = 0
+        /// where Oahu's coast rises at about 5° (6° on the windward side). 0.004 gives the
+        /// 600 m coastal belt Oahu's 4.8° mean slope on seeds 7, 42 and 123. 0 disables it.
+        public var waveRetreat: Double = 0.004
         /// Share of `waveRetreat` that coasts facing away from the wind still get (swell
         /// wraps around an island).
-        public var leewardWaves: Double = 0.3
+        public var leewardWaves: Double = 0.2
         /// Direction the wind blows towards, in radians (Climate.Params.windDirection).
         public var windDirection: Double = 5 * Double.pi / 4
         /// Time step in years.

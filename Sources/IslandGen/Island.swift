@@ -20,8 +20,9 @@ public enum Island {
         /// Shield land profile exponent (see VolcanicBase.generate); 0 is the classic shape.
         public var landExponent: Double = 2
         /// Straight-cone share of the land profile and rift crest drop (see VolcanicBase.generate).
-        public var coastSlope: Double = 0
-        public var riftDescent: Double = 0
+        /// 0.3 and 0.4 score closest to Oahu with wave retreat on (realism sweep, 2026-10-16).
+        public var coastSlope: Double = 0.3
+        public var riftDescent: Double = 0.4
         public init() {}
     }
 

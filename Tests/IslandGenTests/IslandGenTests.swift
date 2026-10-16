@@ -52,6 +52,23 @@ final class IslandGenTests: XCTestCase {
         XCTAssertEqual(outletArea, Double(h.count) * h.cellArea, accuracy: Double(h.count) * h.cellArea * 1e-4)
     }
 
+    func testWavesCutTheWindwardCoastFaster() {
+        // A flat 100 m plateau with sea along its east (upwind of the default trade wind,
+        // which blows towards the southwest) and west edges. Only wave attack is on.
+        var h = Grid(width: 32, height: 32, cellSize: 100, fill: 100)
+        for y in 0..<32 { for x in 0..<32 where x < 4 || x >= 28 { h[x, y] = -20 } }
+        var p = StreamPower.Params()
+        p.erodibility = 0
+        p.diffusivity = 0
+        p.deposition = 0
+        p.waterfallRetreat = 0
+        _ = StreamPower.step(&h, params: p)
+        let windward = h[27, 16], leeward = h[4, 16], inland = h[16, 16]
+        XCTAssertEqual(inland, 100, "waves only reach the shoreline")
+        XCTAssertLessThan(windward, leeward, "the windward cliff retreats faster")
+        XCTAssertLessThan(leeward, 100, "swell still reaches the leeward coast")
+    }
+
     func testPNGChecksumsMatchKnownValues() {
         XCTAssertEqual(PNG.crc32(Array("IEND".utf8)), 0xAE42_6082)
         XCTAssertEqual(PNG.adler32(Array("Wikipedia".utf8)), 0x11E6_0398)
