@@ -19,6 +19,10 @@ public enum Island {
         public var flankCollapse = true
         /// Shield land profile exponent (see VolcanicBase.generate); 0 is the classic shape.
         public var landExponent: Double = 2
+        /// Straight-cone share of the land profile and rift crest drop (see VolcanicBase.generate).
+        /// 0.3 and 0.4 score closest to Oahu with wave retreat on (realism sweep, 2026-10-16).
+        public var coastSlope: Double = 0.3
+        public var riftDescent: Double = 0.4
         public init() {}
     }
 
@@ -38,12 +42,14 @@ public enum Island {
         func phase<T>(_ name: String, _ body: () -> T) -> T { timer?.measure(name, body) ?? body() }
         var erosion = p.erosion
         erosion.seed = Hash.mix(p.seed ^ 0x524F_5554_45)
+        erosion.windDirection = p.climate.windDirection
         // Keep diffusion stable at coarse and fine resolutions alike.
         let cell = p.domainSize / Double(p.size)
         let maxDt = 0.2 * cell * cell / Swift.max(erosion.diffusivity, 1e-9)
         erosion.timeStep = Swift.min(erosion.timeStep, maxDt)
 
-        var base = phase("volcano") { VolcanicBase.generate(seed: p.seed, size: p.size, domainSize: p.domainSize, landExponent: p.landExponent) }
+        var base = phase("volcano") { VolcanicBase.generate(seed: p.seed, size: p.size, domainSize: p.domainSize, landExponent: p.landExponent,
+                                                                coastSlope: p.coastSlope, riftDescent: p.riftDescent) }
         let scarp = p.flankCollapse
             ? FlankCollapse.choose(shields: base.shields, height: base.height, windDirection: p.climate.windDirection, seed: p.seed)
             : nil
