@@ -9,7 +9,7 @@ import IslandGen
 func usage() -> Never {
     print("""
     usage: islandgen --score HEIGHT.r32 --cell METRES [--width N] [--sea-level M]
-             score an existing float32 heightfield (square unless --width) and print realism metrics
+             score an existing float32 heightfield (square unless --width; pits are filled first) and print realism metrics
            islandgen [--seed N] [--size N] [--steps N] [--domain METRES] [--deposition G] [--slope-exponent N] [--reference-slope S] [--critical-slope S] [--knickpoint-slope S] [--waterfall-retreat R] [--headwall-retreat R] [--waterfall-min-q Q] [--profile] [--out DIR]
       --seed    random seed (default 1)
       --size    grid samples per side (default 1024)
@@ -58,8 +58,14 @@ if args.first == "--score" {
     guard w > 0, values.count % w == 0 else { print("size \(values.count) is not a multiple of width \(w)"); exit(1) }
     var grid = Grid(width: w, height: values.count / w, cellSize: cellSize)
     grid.values = values
-    let json = try JSONSerialization.data(withJSONObject: Realism.measure(grid, seaLevel: seaLevel).json,
-                                          options: [.prettyPrinted, .sortedKeys])
+    // A real DEM has flat floors, harbours and resampling noise that stop flow, which
+    // would understate drainage density and Hack's exponent: fill pits first, as the
+    // generator does, and report how many there were.
+    let rawPits = Realism.measure(grid, seaLevel: seaLevel).pits
+    PriorityFlood.fill(&grid, seaLevel: seaLevel)
+    var scored = Realism.measure(grid, seaLevel: seaLevel).json
+    scored["pitsBeforeFill"] = rawPits
+    let json = try JSONSerialization.data(withJSONObject: scored, options: [.prettyPrinted, .sortedKeys])
     print(String(decoding: json, as: UTF8.self))
     exit(0)
 }
