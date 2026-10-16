@@ -18,8 +18,8 @@ func usage() -> Never {
       --reference-slope  slope at which n leaves erosion rates unchanged (default 0.1)
       --critical-slope   steepest stable wall, rise over run; 0 disables (default 0)
       --knickpoint-slope  with n > 1: erode as n = 1 below this slope, boosted above it (default 0 = pure power law)
-      --waterfall-retreat  headwall retreat in m/yr at the reference discharge; 0 disables (default 0)
-      --waterfall-min-q    smallest rain-weighted drainage (m³/yr) that drives waterfall retreat (default 1e6)
+      --waterfall-retreat  headwall retreat in m/yr at the reference discharge; 0 disables (default 0.05)
+      --waterfall-min-q    smallest rain-weighted drainage (m³/yr) that drives waterfall retreat (default 3e5)
       --headwall-retreat   retreat of every face steeper than 0.6, m/yr at 3 m/yr rain; 0 disables (default 0)
       --profile print time spent in each pipeline phase
       --out     output directory (default ./out)

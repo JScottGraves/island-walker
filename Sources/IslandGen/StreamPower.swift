@@ -52,18 +52,20 @@ public enum StreamPower {
         /// above a channel cell carrying at least `waterfallMinDischarge` (rain-weighted
         /// area, m³/yr) retreats horizontally at this rate in m/yr, scaled by
         /// sqrt(discharge / referenceDischarge). The lip at the head of a waterfall and the
-        /// walls around its plunge pool both retreat, so heads cut back along the biggest
-        /// streams and widen into amphitheaters. 0 disables it.
-        public var waterfallRetreat: Double = 0
+        /// walls around its plunge pool both retreat, so valley heads cut back and widen into
+        /// bowls between knife-edge ridges. 0.05 with a 3e5 threshold keeps the pali and
+        /// summit; faster rates eat the summit plateau down to beaded crests. 0 disables it.
+        public var waterfallRetreat: Double = 0.05
         public var waterfallSlope: Double = 0.6
         /// Headwall retreat by seepage and weathering: every face steeper than
         /// `waterfallSlope` retreats horizontally at this rate in m/yr, scaled by local rain
         /// over `referenceRain`, whatever its drainage area. Hawaiian amphitheater heads sit
         /// at the crest where discharge is tiny, so discharge-driven waterfall retreat
-        /// alone barely reaches them. 0 disables it.
+        /// alone barely reaches them. In practice it lays faces back and rounds ridges
+        /// rather than carving bowls, so it is off by default. 0 disables it.
         public var headwallRetreat: Double = 0
         public var referenceRain: Double = 3
-        public var waterfallMinDischarge: Double = 1e6
+        public var waterfallMinDischarge: Double = 3e5
         /// Uplift (positive) or subsidence (negative) in m / yr, applied to land and sea floor.
         public var uplift: Double = 0
         /// Time step in years.
