@@ -51,4 +51,20 @@ final class IslandGenTests: XCTestCase {
         for i in 0..<h.count where Int(flow.receivers[i]) == i { outletArea += Double(flow.area.values[i]) }
         XCTAssertEqual(outletArea, Double(h.count) * h.cellArea, accuracy: Double(h.count) * h.cellArea * 1e-4)
     }
+
+    func testPNGChecksumsMatchKnownValues() {
+        XCTAssertEqual(PNG.crc32(Array("IEND".utf8)), 0xAE42_6082)
+        XCTAssertEqual(PNG.adler32(Array("Wikipedia".utf8)), 0x11E6_0398)
+    }
+
+    func testGroundViewDrawsSkyAndTerrain() {
+        let base = VolcanicBase.generate(seed: 2, size: 128, domainSize: 80_000).height
+        var summit = 0
+        for i in 0..<base.count where base.values[i] > base.values[summit] { summit = i }
+        let x = (Double(summit % 128) + 0.5) * base.cellSize, y = (Double(summit / 128) + 0.5) * base.cellSize
+        let cam = GroundView.Camera(x: x, y: y, z: Double(base.values[summit]) + 1.7, yaw: 0, pitch: -0.1)
+        let img = GroundView.render(base, camera: cam, width: 64, height: 36)
+        XCTAssertEqual(img.rgb.count, 64 * 36 * 3)
+        XCTAssertNotEqual(img.rgb[0..<3], img.rgb[(img.rgb.count - 3)...], "top row (sky) and bottom row (ground) should differ")
+    }
 }

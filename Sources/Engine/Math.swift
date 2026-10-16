@@ -1,3 +1,4 @@
+#if canImport(simd)
 import Foundation
 import simd
 
@@ -27,3 +28,4 @@ public enum Matrix {
             SIMD4(0, 0, 0, 1)))
     }
 }
+#endif
