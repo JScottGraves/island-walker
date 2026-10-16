@@ -86,7 +86,7 @@ public enum Look {
             return smoothstep(-0.2, 0.6, a * b)
         }
         return Swift.max(blobs(x, y) * (0.4 + 0.6 * blobs(y / 3.1 + 900, x / 3.1 + 400)),
-                         0.8 * blobs(x / 2.7 + 500, y / 2.7 + 300))
+                         0.6 * pow(blobs(x / 2.7 + 500, y / 2.7 + 300), 2))
     }
 
     /// Water colour by depth below the sea surface (metres).
@@ -199,7 +199,7 @@ public enum Look {
 
         float exposure(float2 p) {
             return max(exposureBlobs(p) * (0.4 + 0.6 * exposureBlobs(p.yx / 3.1 + float2(900.0, 400.0))),
-                       0.8 * exposureBlobs(p / 2.7 + float2(500.0, 300.0)));
+                       0.6 * pow(exposureBlobs(p / 2.7 + float2(500.0, 300.0)), 2.0));
         }
 
         float3 terrainAlbedo(float2 p, float above, float slope, float maxHeight) {
