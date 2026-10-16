@@ -179,17 +179,17 @@ float cloudDensity(constant Uniforms &u, texture2d<float> cloudMap, texture3d<fl
     // Matched to the spread of the value noise the coverage was tuned for (its quantiles
     // from 10% to 99% agree within 0.02), so a coverage of c still fills about c of the sky.
     shape = saturate(shape * 1.762 - 0.613) * profile;
-    // Big clouds are ragged at the kilometre scale as well (Lovejoy 1982): swing the
-    // coverage by up to ±60% over cells of 0.8–3 km, so banks get bays, gaps and towers.
-    // The swing is zero-mean, so the sky keeps the amount of cloud the weather map asks
-    // for, and multiplicative, so clear sky stays clear. It shapes the bulk cloud, so the
+    // Big clouds are ragged at the kilometre scale as well (Lovejoy 1982): cut the
+    // coverage by up to 75% over cells of 0.8–3 km, so banks get bays, gaps and towers.
+    // It barely raises coverage elsewhere, since that merged separate cumulus into one
+    // mass; multiplicative, so clear sky stays clear. It shapes the bulk cloud, so the
     // light march and shadows see it too.
-    if (shape <= 1.0 - 1.6 * coverage) return 0.0;  // clear even at the largest swing
+    if (shape <= 1.0 - 1.2 * coverage) return 0.0;  // clear even at the largest swing
     float bankLod = clamp(log2(scale * float(detailNoise.get_width()) / kCloudBankTile), 0.0, 5.0);
     float3 bank = detailNoise.sample(s, q / kCloudBankTile + float3(0.31, 0.17, 0.53), level(bankLod)).rgb;
     // Median 0.48 and spread 0.10 of this Worley mix, measured on the baked noise.
     float swing = clamp((bank.r * 0.6 + bank.g * 0.4 - 0.48) / 0.10, -2.5, 2.5);
-    coverage = saturate(coverage * (1.0 + 0.24 * swing));
+    coverage = saturate(coverage * (1.0 + (swing < 0.0 ? 0.3 : 0.08) * swing));
     float d = saturate(remapRange(shape, 1.0 - coverage, 1.0, 0.0, 1.0));
     float fade = 1.0 - smoothstep(kCloudDetailTile / 16.0, kCloudDetailTile / 8.0, scale);
     if (erode && fade > 0.0 && d > 0.0 && d < 0.9) {
@@ -210,9 +210,9 @@ float cloudDensity(constant Uniforms &u, texture2d<float> cloudMap, texture3d<fl
     // Real cumulus edges are abrupt: liquid water appears within metres of the boundary.
     // Seen from outside, raise thin density so an edge goes from clear to solid quickly
     // instead of through a few hundred metres of haze (Nubis³ sharpens low densities the
-    // same way). Not within ~1 km of the camera, where a walker in the cloud should still
+    // same way). Not within ~300 m of the camera, where a walker in the cloud should still
     // see through its thin parts, nor in the light march.
-    float sharpen = erode ? smoothstep(3.0, 9.0, scale) : 0.0;
+    float sharpen = erode ? smoothstep(1.0, 3.0, scale) : 0.0;
     return d > 0.0 ? pow(d, mix(1.0, 0.6, sharpen)) : 0.0;
 }
 
