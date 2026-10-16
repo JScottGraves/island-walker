@@ -84,6 +84,7 @@ final class IslandGenTests: XCTestCase {
         XCTAssertLessThan(m.hypsometry[10], 0.01)
         XCTAssertGreaterThan(m.slopeHistogram[2], 0.8, "most of a 11° cone falls in the 10–15° band")
         XCTAssertEqual(m.cliffFraction, 0)
-        XCTAssertGreaterThan(m.drainageDensity, 0)
+        // Flow on a cone runs straight outward and never gathers into a 1 km² channel.
+        XCTAssertEqual(m.drainageDensity, 0)
     }
 }
