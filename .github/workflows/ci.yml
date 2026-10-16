@@ -1,0 +1,21 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: swift build -c release
+      - name: Test
+        run: swift test
+      - name: Bake a small island
+        run: .build/release/islandgen --seed 42 --size 512 --steps 150 --out out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: island-preview
+          path: out/*.png
