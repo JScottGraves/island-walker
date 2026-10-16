@@ -12,7 +12,7 @@ import IslandCore
 public enum StreamPower {
     public struct Params: Sendable {
         /// Fluvial erodibility. Units with m = 0.5: m^(1-2m) / yr = 1 / yr.
-        public var erodibility: Double = 1e-5
+        public var erodibility: Double = 5e-6
         public var areaExponent: Double = 0.5
         /// Hillslope diffusivity in m² / yr (soil creep).
         public var diffusivity: Double = 0.02

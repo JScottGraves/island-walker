@@ -55,7 +55,8 @@ public enum GroundView {
                 let px = c.x + dx * d, py = c.y + dy * d
                 let gx = px / h.cellSize - 0.5, gy = py / h.cellSize - 0.5
                 if gx < 0 || gy < 0 || gx > Double(h.width - 1) || gy > Double(h.height - 1) { break }
-                let ground = Double(h.sample(x: gx, y: gy)) + detail(px, py, ground: Double(h.sample(x: gx, y: gy)), sea: sea, distance: d)
+                let base = Double(h.sampleCubic(x: gx, y: gy))
+                let ground = base + detail(px, py, ground: base, sea: sea, distance: d)
                 let surface = Swift.max(ground, sea)
                 let depth = d * depthScale
                 let screenY = horizon - (surface - c.z) * focal / depth
@@ -86,8 +87,8 @@ public enum GroundView {
             albedo = (0.20 + (0.02 - 0.20) * t, 0.55 + (0.10 - 0.55) * t, 0.60 + (0.25 - 0.60) * t)
         } else {
             let e = 1.0
-            var hx = Double(h.sample(x: gx + e, y: gy) - h.sample(x: gx - e, y: gy)) / (2 * e * h.cellSize)
-            var hy = Double(h.sample(x: gx, y: gy + e) - h.sample(x: gx, y: gy - e)) / (2 * e * h.cellSize)
+            var hx = Double(h.sampleCubic(x: gx + e, y: gy) - h.sampleCubic(x: gx - e, y: gy)) / (2 * e * h.cellSize)
+            var hy = Double(h.sampleCubic(x: gx, y: gy + e) - h.sampleCubic(x: gx, y: gy - e)) / (2 * e * h.cellSize)
             // Detail-noise gradient, faded out with distance like the displacement itself.
             let de = 2.0
             let fade = detailFade(distance)
@@ -101,7 +102,8 @@ public enum GroundView {
             let grass = (0.20, 0.36, 0.14), soil = (0.45, 0.25, 0.15), rock = (0.32, 0.27, 0.24)
             albedo = mix(grass, soil, smoothstep(0.15, 0.30, slope))
             albedo = mix(albedo, rock, smoothstep(0.35, 0.55, slope))
-            albedo = mix((0.76, 0.70, 0.55), albedo, smoothstep(1.5, 6, above)) // beach
+            // Beach: a narrow band just above the waterline on gentle slopes only.
+            albedo = mix((0.76, 0.70, 0.55), albedo, Swift.max(smoothstep(1, 3, above), smoothstep(0.1, 0.25, slope)))
         }
         let diffuse = Swift.max(0, n.0 * sun.0 + n.1 * sun.1 + n.2 * sun.2)
         let ambient = 0.5 * (0.5 + 0.5 * n.2)
@@ -115,7 +117,9 @@ public enum GroundView {
     /// Metre-scale relief the 10–80 m base grid can't hold: hummocks, lava-flow lumps.
     /// Stand-in for the runtime detail amplification in the plan.
     static func detailNoise(_ x: Double, _ y: Double) -> Double {
-        3.0 * Noise.fbm(x / 60, y / 60, seed: 0xD37A_11, octaves: 4) + 0.6 * Noise.fbm(x / 8, y / 8, seed: 0xD37A_12, octaves: 3)
+        6.0 * Noise.fbm(x / 90, y / 90, seed: 0xD37A_11, octaves: 4)
+            + 1.5 * Noise.fbm(x / 15, y / 15, seed: 0xD37A_12, octaves: 3)
+            + 0.3 * Noise.fbm(x / 3, y / 3, seed: 0xD37A_13, octaves: 2)
     }
 
     private static func detailFade(_ distance: Double) -> Double {

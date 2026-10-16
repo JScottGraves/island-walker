@@ -66,8 +66,9 @@ public final class TerrainRenderer {
                 let nx = (h(i - 1, j) - h(i + 1, j)) / (2 * spacing)
                 let ny = (h(i, j - 1) - h(i, j + 1)) / (2 * spacing)
                 let normal = simd_normalize(SIMD3<Float>(nx, ny, 1))
-                let px: Float = Float(i) * spacing
-                let py: Float = Float(j) * spacing
+                // Grid sample k sits at the centre of cell k: (k + 0.5) · cellSize.
+                let px = Float((Double(i) * scale + 0.5) * height.cellSize)
+                let py = Float((Double(j) * scale + 0.5) * height.cellSize)
                 verts.append(contentsOf: [px, py, z, normal.x, normal.y, normal.z])
             }
         }

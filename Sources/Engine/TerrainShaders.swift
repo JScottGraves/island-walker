@@ -67,6 +67,7 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
     color = mix(color, float3(0.62, 0.72, 0.85), fog);
 
     color = color * (1.0 + color / 6.25) / (1.0 + color);   // extended Reinhard, white = 2.5
-    return float4(pow(color, float3(1.0 / 2.2)), 1.0);
+    // The render target is an _srgb format, which applies the sRGB encoding on write.
+    return float4(color, 1.0);
 }
 """

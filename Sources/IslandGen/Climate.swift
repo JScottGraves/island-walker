@@ -18,7 +18,7 @@ public enum Climate {
         /// 6e-5 leaves about 30% of the rain behind a 1,000 m, 20 km wide range.
         public var shadowStrength: Double = 6e-5
         /// Terrain smoothing radius before measuring slopes, in metres.
-        public var smoothing: Double = 2000
+        public var smoothing: Double = 1500
         public init() {}
     }
 
@@ -29,7 +29,9 @@ public enum Climate {
         var surface = height
         for i in 0..<surface.count { surface.values[i] = Swift.max(surface.values[i], seaLevel) }
         let radius = Swift.max(1, Int(params.smoothing / height.cellSize))
-        let smooth = boxBlur(surface, radius: radius)
+        // Three box passes approximate a Gaussian. A single box blur has a stepped
+        // derivative, which showed up as axis-aligned streaks in the rain map.
+        let smooth = boxBlur(boxBlur(boxBlur(surface, radius: radius), radius: radius), radius: radius)
         let wx = cos(params.windDirection), wy = sin(params.windDirection)
 
         // Rain shadow: on a coarse grid (~1 km cells), march each cell's ray back upwind to
