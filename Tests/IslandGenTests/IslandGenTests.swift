@@ -79,6 +79,26 @@ final class IslandGenTests: XCTestCase {
         XCTAssertEqual(h[30, 4], 30, accuracy: 0.01, "full lift beyond the flexure distance")
     }
 
+    func testRefineAddsDetailWithoutPits() {
+        var p = Island.Params()
+        p.size = 64
+        p.steps = 20
+        let island = Island.generate(p)
+        var rp = Refine.Params()
+        rp.factor = 4
+        let fine = Refine.refine(island.height, drainageArea: island.drainageArea, seaLevel: 0, params: rp)
+        XCTAssertEqual(fine.width, 256)
+        XCTAssertEqual(fine.cellSize, island.height.cellSize / 4, accuracy: 1e-9)
+        XCTAssertEqual(Realism.measure(fine).pits, 0, "every refined land cell drains to the sea")
+        // Same island: land area within a few percent, summit within the detail amplitude.
+        let coarseLand = Double(island.height.values.filter { $0 > 0 }.count) * island.height.cellArea
+        let fineLand = Double(fine.values.filter { $0 > 0 }.count) * fine.cellArea
+        XCTAssertEqual(fineLand / coarseLand, 1, accuracy: 0.05)
+        XCTAssertEqual(fine.range.max, island.height.range.max, accuracy: Float(rp.detail) + 20)
+        XCTAssertEqual(Refine.refine(island.height, drainageArea: island.drainageArea, seaLevel: 0, params: rp), fine,
+                       "refinement is deterministic")
+    }
+
     func testPondBuriesOnlyTheDeepestShareOfTheSaddle() {
         // A saddle surface at 200 m over eroded ground whose height rises 0..99 m by column.
         var h = Grid(width: 100, height: 4, cellSize: 100)

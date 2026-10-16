@@ -10,7 +10,7 @@ func usage() -> Never {
     print("""
     usage: islandgen --score HEIGHT.r32 --cell METRES [--width N] [--sea-level M]
              score an existing float32 heightfield (square unless --width; pits are filled first) and print realism metrics
-           islandgen [--seed N] [--size N] [--steps N] [--domain METRES] [--deposition G] [--slope-exponent N] [--reference-slope S] [--critical-slope S] [--knickpoint-slope S] [--waterfall-retreat R] [--headwall-retreat R] [--waterfall-min-q Q] [--land-exponent P] [--coast-slope A] [--rift-descent D] [--saddle-fill M] [--pond-time F] [--pond-hardness H] [--pond-share S] [--wave-retreat R] [--leeward-waves S] [--uplift U] [--flexure M] [--flexure-distance M] [--profile] [--out DIR]
+           islandgen [--seed N] [--size N] [--steps N] [--domain METRES] [--deposition G] [--slope-exponent N] [--reference-slope S] [--critical-slope S] [--knickpoint-slope S] [--waterfall-retreat R] [--headwall-retreat R] [--waterfall-min-q Q] [--land-exponent P] [--coast-slope A] [--rift-descent D] [--saddle-fill M] [--pond-time F] [--pond-hardness H] [--pond-share S] [--wave-retreat R] [--leeward-waves S] [--uplift U] [--flexure M] [--flexure-distance M] [--refine N] [--bundle DIR] [--profile] [--out DIR]
       --seed    random seed (default 1)
       --size    grid samples per side (default 1024)
       --steps   erosion time steps (default 400)
@@ -33,6 +33,8 @@ func usage() -> Never {
       --leeward-waves      share of wave retreat on coasts facing away from the wind (default 0.2)
       --uplift             uplift in m/yr, negative for subsidence (default 0)
       --flexure            flexural uplift in metres after erosion, growing inland from the coast (default 20)
+      --refine             also refine the height N times finer (8 takes 1024² at 78 m to 8192² at 10 m) with detail and pit filling
+      --bundle             write the island bundle (tiled, mip-mapped maps for the runtime) to DIR
       --flexure-distance   distance inland in metres at which flexure reaches its full height (default 1500)
       --headwall-retreat   retreat of every face steeper than 0.6, m/yr at 3 m/yr rain; 0 disables (default 0)
       --profile print time spent in each pipeline phase
@@ -48,6 +50,8 @@ func parsed<T>(_ value: T?) -> T {
 
 var params = Island.Params()
 var outDir = "out"
+var refineFactor = 0
+var bundleDir: String? = nil
 var timer: PhaseTimer?
 var args = CommandLine.arguments.dropFirst()
 
@@ -112,6 +116,8 @@ while let flag = args.popFirst() {
     case "--uplift": params.erosion.uplift = parsed(Double(value))
     case "--flexure": params.flexure = parsed(Double(value))
     case "--flexure-distance": params.flexureDistance = parsed(Double(value))
+    case "--refine": refineFactor = parsed(Int(value))
+    case "--bundle": bundleDir = value
     case "--out": outDir = value
     default: usage()
     }
@@ -245,4 +251,29 @@ let info: [String: Any] = [
 ]
 let json = try JSONSerialization.data(withJSONObject: info, options: [.prettyPrinted, .sortedKeys])
 try json.write(to: out.appendingPathComponent("info.json"))
+
+// Final refinement to ~10 m (plan §3.8) and the island bundle for the runtime.
+var bundleHeight = island.height
+if refineFactor > 1 {
+    var refineParams = Refine.Params()
+    refineParams.factor = refineFactor
+    refineParams.seed = params.seed
+    let refineStart = Date()
+    let fine = Refine.refine(island.height, drainageArea: island.drainageArea, seaLevel: sea, params: refineParams)
+    print(String(format: "refined to %d² at %.1f m in %.1f s", fine.width, fine.cellSize, Date().timeIntervalSince(refineStart)))
+    try Preview.writeRaw(fine, to: out.appendingPathComponent("height-fine.r32"))
+    bundleHeight = fine
+}
+if let bundleDir {
+    let bundleStart = Date()
+    let bundle = try IslandBundle.write([
+        ("height", bundleHeight),
+        ("rain", island.rain),
+        ("drainage", island.drainageArea),
+        ("hardness", island.hardness),
+        ("clouds-trades", clouds),
+    ], seaLevel: Double(sea), to: URL(fileURLWithPath: bundleDir, isDirectory: true))
+    let h = try bundle.channel("height")
+    print(String(format: "wrote bundle %@: height %d² in %d levels, in %.1f s", bundleDir, h.size, h.levels, Date().timeIntervalSince(bundleStart)))
+}
 print(String(decoding: json, as: UTF8.self))
