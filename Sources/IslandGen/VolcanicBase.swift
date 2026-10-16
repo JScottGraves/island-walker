@@ -95,8 +95,16 @@ public enum VolcanicBase {
     ///   - size: grid samples per side
     ///   - domainSize: domain edge length in metres
     ///   - seaFloor: depth of the surrounding ocean floor in metres (negative)
+    ///   - landExponent: 0 keeps the classic exp(−3·d^1.4) shield, whose land is only the
+    ///     steep summit cap; scored against real Oahu it has half the flat ground and four
+    ///     times the cliffs. Above 0, land follows top·(1 − r/r_shore)^landExponent: steep near
+    ///     the summit and flattening to the shore, so overlapping shields meet in low saddles
+    ///     and coastal plains, like Oahu (2 gives a hypsometric integral near Oahu's 0.18).
+    ///     The coastline sits where the classic profile put it, and below sea level the flank
+    ///     drops at `submarineSlope` to the sea floor.
     public static func generate(seed: UInt64, size: Int, domainSize: Double, seaFloor: Double = -1800,
-                                shields: [ShieldVolcano]? = nil) -> Output {
+                                shields: [ShieldVolcano]? = nil, landExponent: Double = 2,
+                                submarineSlope: Double = 0.15) -> Output {
         let cell = domainSize / Double(size)
         let volcanoes = shields ?? randomShields(seed: seed, domainSize: domainSize)
         var height = Grid(width: size, height: size, cellSize: cell)
@@ -115,13 +123,27 @@ public enum VolcanicBase {
                 var riftNear = Double.infinity
                 for v in volcanoes {
                     let d = v.skeletonDistance(wx, wy) / v.radius
-                    // Shield profile: convex near the summit, long gentle apron at the base.
-                    let profile = exp(-3.0 * pow(d, 1.4))
-                    h = Swift.max(h, seaFloor + v.summitHeight * profile)
+                    if landExponent > 0 {
+                        // Same coastline as the classic profile, a concave land surface above it.
+                        let top = v.summitHeight + seaFloor
+                        let shore = v.radius * pow(log(v.summitHeight / -seaFloor) / 3, 1 / 1.4)
+                        let r = d * v.radius
+                        let shield = r < shore
+                            ? top * pow(1 - r / shore, landExponent)
+                            : Swift.max(seaFloor, submarineDepth(r - shore, slope: submarineSlope))
+                        h = Swift.max(h, shield)
+                    } else {
+                        // Shield profile: convex near the summit, long gentle apron at the base.
+                        let profile = exp(-3.0 * pow(d, 1.4))
+                        h = Swift.max(h, seaFloor + v.summitHeight * profile)
+                    }
                     riftNear = Swift.min(riftNear, v.riftDistance(wx, wy))
                 }
-                // Lava-flow scale roughness (tens of metres), stronger on land.
-                h += 35 * Noise.fbm(px / 1800, py / 1800, seed: noiseSeed &+ 7, octaves: 5)
+                // Lava-flow scale roughness (tens of metres). With the concave profile the coastal
+                // plain sits only metres above the sea, so the roughness fades out near sea level
+                // there instead of fraying the coast into lagoons and islets.
+                let roughness = landExponent > 0 ? Swift.min(1, abs(h) / 80) : 1
+                h += 35 * roughness * Noise.fbm(px / 1800, py / 1800, seed: noiseSeed &+ 7, octaves: 5)
 
                 height[x, y] = Float(h)
                 // Dike swarms along rift zones resist erosion; ash and weathered flows are soft.
@@ -133,5 +155,12 @@ public enum VolcanicBase {
             }
         }
         return Output(height: height, hardness: hardness, shields: volcanoes)
+    }
+
+    /// Depth below sea level `offshore` metres out from the shoreline: a shelf that steepens
+    /// smoothly over its first 2 km to `slope`, so the gentle coastal plain doesn't meet a
+    /// steep sea floor in a hard break.
+    static func submarineDepth(_ offshore: Double, slope: Double, shelf: Double = 2000) -> Double {
+        offshore < shelf ? -slope * offshore * offshore / (2 * shelf) : -slope * (offshore - shelf / 2)
     }
 }

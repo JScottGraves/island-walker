@@ -8,7 +8,9 @@ import IslandGen
 
 func usage() -> Never {
     print("""
-    usage: islandgen [--seed N] [--size N] [--steps N] [--domain METRES] [--deposition G] [--slope-exponent N] [--reference-slope S] [--critical-slope S] [--knickpoint-slope S] [--waterfall-retreat R] [--headwall-retreat R] [--waterfall-min-q Q] [--profile] [--out DIR]
+    usage: islandgen --score HEIGHT.r32 --cell METRES [--width N] [--sea-level M]
+             score an existing float32 heightfield (square unless --width; pits are filled first) and print realism metrics
+           islandgen [--seed N] [--size N] [--steps N] [--domain METRES] [--deposition G] [--slope-exponent N] [--reference-slope S] [--critical-slope S] [--knickpoint-slope S] [--waterfall-retreat R] [--headwall-retreat R] [--waterfall-min-q Q] [--land-exponent P] [--profile] [--out DIR]
       --seed    random seed (default 1)
       --size    grid samples per side (default 1024)
       --steps   erosion time steps (default 400)
@@ -20,6 +22,7 @@ func usage() -> Never {
       --knickpoint-slope  with n > 1: erode as n = 1 below this slope, boosted above it (default 0 = pure power law)
       --waterfall-retreat  headwall retreat in m/yr at the reference discharge; 0 disables (default 0.05)
       --waterfall-min-q    smallest rain-weighted drainage (m³/yr) that drives waterfall retreat (default 3e5)
+      --land-exponent      shield land profile top·(1 − r/shore)^P; 0 keeps the classic shape (default 2)
       --headwall-retreat   retreat of every face steeper than 0.6, m/yr at 3 m/yr rain; 0 disables (default 0)
       --profile print time spent in each pipeline phase
       --out     output directory (default ./out)
@@ -36,6 +39,38 @@ var params = Island.Params()
 var outDir = "out"
 var timer: PhaseTimer?
 var args = CommandLine.arguments.dropFirst()
+
+// Scoring mode: realism metrics for any heightfield, such as a real DEM.
+if args.first == "--score" {
+    var path: String?, cellSize: Double?, width: Int?, seaLevel: Float = 0
+    while let flag = args.popFirst() {
+        guard let value = args.popFirst() else { usage() }
+        switch flag {
+        case "--score": path = value
+        case "--cell": cellSize = parsed(Double(value))
+        case "--width": width = parsed(Int(value))
+        case "--sea-level": seaLevel = parsed(Float(value))
+        default: usage()
+        }
+    }
+    guard let path, let cellSize, let data = FileManager.default.contents(atPath: path) else { usage() }
+    let values = data.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
+    let w = width ?? Int(Double(values.count).squareRoot())
+    guard w > 0, values.count % w == 0 else { print("size \(values.count) is not a multiple of width \(w)"); exit(1) }
+    var grid = Grid(width: w, height: values.count / w, cellSize: cellSize)
+    grid.values = values
+    // A real DEM has flat floors, harbours and resampling noise that stop flow, which
+    // would understate drainage density and Hack's exponent: fill pits first, as the
+    // generator does, and report how many there were.
+    let rawPits = Realism.measure(grid, seaLevel: seaLevel).pits
+    PriorityFlood.fill(&grid, seaLevel: seaLevel)
+    var scored = Realism.measure(grid, seaLevel: seaLevel).json
+    scored["pitsBeforeFill"] = rawPits
+    let json = try JSONSerialization.data(withJSONObject: scored, options: [.prettyPrinted, .sortedKeys])
+    print(String(decoding: json, as: UTF8.self))
+    exit(0)
+}
+
 while let flag = args.popFirst() {
     if flag == "--profile" { timer = PhaseTimer(); continue }
     guard let value = args.popFirst() else { usage() }
@@ -54,6 +89,7 @@ while let flag = args.popFirst() {
     case "--waterfall-retreat": params.erosion.waterfallRetreat = parsed(Double(value))
     case "--headwall-retreat": params.erosion.headwallRetreat = parsed(Double(value))
     case "--waterfall-min-q": params.erosion.waterfallMinDischarge = parsed(Double(value))
+    case "--land-exponent": params.landExponent = parsed(Double(value))
     case "--out": outDir = value
     default: usage()
     }
@@ -161,6 +197,7 @@ let info: [String: Any] = [
     "waterfallRetreat": params.erosion.waterfallRetreat,
     "headwallRetreat": params.erosion.headwallRetreat,
     "waterfallMinDischarge": params.erosion.waterfallMinDischarge,
+    "landExponent": params.landExponent,
     "landAreaKm2": (landKm2 * 10).rounded() / 10,
     "maxHeightMetres": Double(island.height.range.max),
     "steepFraction": rounded(Double(steep) / Double(Swift.max(land, 1)), 10000),
@@ -168,6 +205,7 @@ let info: [String: Any] = [
     "meanSlopeWindward": rounded(slopeSum.windward / Double(Swift.max(slopeCount.windward, 1))),
     "meanSlopeLeeward": rounded(slopeSum.leeward / Double(Swift.max(slopeCount.leeward, 1))),
     "seconds": (elapsed * 10).rounded() / 10,
+    "realism": Realism.measure(island.height, seaLevel: sea).json,
     "cloudLand": rounded(cloudStats.land),
     "cloudWindward": rounded(cloudStats.windward),
     "cloudLeeward": rounded(cloudStats.leeward),

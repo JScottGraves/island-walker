@@ -17,6 +17,8 @@ public enum Island {
         public var climate = Climate.Params()
         /// Cut a giant landslide sector from the windward flank before erosion (see FlankCollapse).
         public var flankCollapse = true
+        /// Shield land profile exponent (see VolcanicBase.generate); 0 is the classic shape.
+        public var landExponent: Double = 2
         public init() {}
     }
 
@@ -41,7 +43,7 @@ public enum Island {
         let maxDt = 0.2 * cell * cell / Swift.max(erosion.diffusivity, 1e-9)
         erosion.timeStep = Swift.min(erosion.timeStep, maxDt)
 
-        var base = phase("volcano") { VolcanicBase.generate(seed: p.seed, size: p.size, domainSize: p.domainSize) }
+        var base = phase("volcano") { VolcanicBase.generate(seed: p.seed, size: p.size, domainSize: p.domainSize, landExponent: p.landExponent) }
         let scarp = p.flankCollapse
             ? FlankCollapse.choose(shields: base.shields, height: base.height, windDirection: p.climate.windDirection, seed: p.seed)
             : nil
