@@ -92,8 +92,8 @@ public enum FlankCollapse {
         scarp.plainWidth = rng.uniform(2500, 4500)
         let count = 4 + Int(rng.unit() * 5)
         for _ in 0..<count {
-            scarp.notches.append((perp: rng.uniform(-0.8, 0.8) * scarp.halfLength,
-                                  width: rng.uniform(300, 700),
+            scarp.notches.append((perp: rng.uniform(-0.6, 0.6) * scarp.halfLength,
+                                  width: rng.uniform(500, 1000),
                                   depth: scarp.offset * rng.uniform(0.6, 1.0) + 300))
         }
         return scarp
@@ -146,8 +146,8 @@ public enum FlankCollapse {
                 guard abs(perp) < reach else { continue }
                 // Fade the cut where the crest falls away (past the rift's end) and beyond
                 // the scarp's ends, so the cliff dies out instead of ending in a seam.
-                let strength = smoothstep(0.3, 0.55, lookup(crestHeight, perp) / scarp.summitHeight)
-                    * (1 - smoothstep(0.75 * scarp.halfLength, scarp.halfLength, abs(perp)))
+                let strength = smoothstep(0.25, 0.6, lookup(crestHeight, perp) / scarp.summitHeight)
+                    * (1 - smoothstep(0.5 * scarp.halfLength, scarp.halfLength, abs(perp)))
                 guard strength > 0 else { continue }
 
                 var notch = 0.0
@@ -164,10 +164,13 @@ public enum FlankCollapse {
                 }
                 let i = height.index(x, y)
 
-                // Weak rock along the notch axes, from behind the notch head out to the
-                // plain, so streams concentrate there and cut back into the cliff.
-                if notch > 0.05 && along > crest - 2000 && along < crest + scarp.faceWidth + scarp.plainWidth {
-                    hardness.values[i] = Float(Double(hardness.values[i]) * (1 - 0.4 * notch * strength))
+                // Weak rock along the notch axes, from behind the notch head to the scarp
+                // foot, so streams concentrate there and cut back into the cliff. Smooth
+                // edges: a hard-edged band shows up as right-angled bites in the coast.
+                if notch > 0.01 {
+                    let band = smoothstep(crest - 2500, crest - 1000, along)
+                        * (1 - smoothstep(crest + scarp.faceWidth, crest + scarp.faceWidth + 1000, along))
+                    hardness.values[i] = Float(Double(hardness.values[i]) * (1 - 0.45 * notch * band * strength))
                 }
 
                 let t = smoothstep(crest, crest + scarp.faceWidth, along) * strength

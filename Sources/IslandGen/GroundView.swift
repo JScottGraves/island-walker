@@ -214,8 +214,9 @@ public enum Viewpoints {
             return GroundView.Camera(x: x, y: y, z: z, yaw: atan2(ux, uy), pitch: pitch)
         }
 
-        /// The lowland spot with the most relief 1.2–2.5 km away: standing on a coastal plain
-        /// looking up at a cliff (a pali). Searches a coarse lattice in 24 directions.
+        /// The lowland spot with the most relief 2–3.5 km away: standing on a coastal plain
+        /// looking up at a cliff (a pali), far enough back to see its brink. Searches a
+        /// coarse lattice in 24 directions.
         func cliff() -> (Int, Int)? {
             let stride = 4, directions = 24
             var bestFoot = -1, bestTop = -1, bestRelief: Float = 150
@@ -226,8 +227,8 @@ public enum Viewpoints {
                     guard z > 5 && z < 80 else { continue }
                     for k in 0..<directions {
                         let a = Double(k) * 2 * Double.pi / Double(directions)
-                        var d = 1200.0
-                        while d <= 2500 {
+                        var d = 2000.0
+                        while d <= 3500 {
                             let tx = cx + Int((cos(a) * d / h.cellSize).rounded())
                             let ty = cy + Int((sin(a) * d / h.cellSize).rounded())
                             if h.contains(tx, ty) {

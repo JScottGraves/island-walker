@@ -5,9 +5,14 @@ import IslandCore
 /// (Braun & Willett 2013, "A very efficient O(n), implicit and parallel method to solve
 /// the stream power equation governing fluvial incision and landscape evolution").
 ///
-///     dh/dt = U − K · A^m · S^n + Kd · ∇²h
+///     dh/dt = U − K · A^m · S^n + G · Qs / Q + Kd · ∇²h
 ///
 /// with n = 1, A the rain-weighted upstream drainage area, S the slope to the receiver.
+/// The G term is deposition (Yuan et al. 2019, "A new efficient method to solve the
+/// stream power law model taking into account sediment deposition"): sediment settles at
+/// G · p · Qs / Q (p local rain, Qs sediment flux, Q discharge), so small, loaded streams
+/// drop much of their load and big rivers carry theirs to sea. This builds alluvial plains
+/// and fans below cliffs instead of grading them to sea level.
 /// This is the reference CPU implementation; a Metal port comes after it is validated.
 public enum StreamPower {
     public struct Params: Sendable {
@@ -16,6 +21,9 @@ public enum StreamPower {
         public var areaExponent: Double = 0.5
         /// Hillslope diffusivity in m² / yr (soil creep).
         public var diffusivity: Double = 0.02
+        /// Dimensionless deposition coefficient G (settling velocity over rain rate).
+        /// 0 is detachment-limited (no deposition); Yuan et al. use values around 1.
+        public var deposition: Double = 1
         /// Uplift (positive) or subsidence (negative) in m / yr, applied to land and sea floor.
         public var uplift: Double = 0
         /// Time step in years.
@@ -125,6 +133,7 @@ public enum StreamPower {
 
         // 4. Implicit fluvial incision, walking downstream-to-upstream so every
         //    receiver already holds its new height.
+        let beforeIncision = params.deposition > 0 ? h.values : []
         for s in 0..<n {
             let i = Int(stack[s]), r = Int(receivers[i])
             if r == i { continue }
@@ -134,6 +143,33 @@ public enum StreamPower {
             // Rivers cut down to sea level at the coast, not to the depth of the sea floor.
             let base = Swift.max(h.values[r], sea)
             h.values[i] = (h.values[i] + f * base) / (1 + f)
+        }
+
+        // 4b. Deposition, walking upstream-to-downstream and carrying the eroded volume
+        //     (in metres of height over one cell) along with the flow. Over one step the
+        //     rate G · p · Qs / Q settles a share G · (own discharge / total discharge) of
+        //     the arriving load. A cell never rises above its lowest donor, so deposits
+        //     fill channels and plains without damming them.
+        if params.deposition > 0 {
+            var load = [Float](repeating: 0, count: n)
+            var lowestDonor = [Float](repeating: .infinity, count: n)
+            let g = Float(params.deposition)
+            for s in stride(from: n - 1, through: 0, by: -1) {
+                let i = Int(stack[s]), r = Int(receivers[i])
+                let incoming = load[i]
+                var carried = incoming + Swift.max(0, beforeIncision[i] - h.values[i])
+                if r != i && incoming > 0 && h.values[i] > sea && lowestDonor[i].isFinite {
+                    let share = Swift.min(1, g * cellArea * (rain?.values[i] ?? 1) / Swift.max(area.values[i], 1e-6))
+                    let room = Swift.max(0, lowestDonor[i] - h.values[i])
+                    let deposit = Swift.min(incoming * share, room)
+                    h.values[i] += deposit
+                    carried -= deposit
+                }
+                if r != i {
+                    load[r] += carried
+                    lowestDonor[r] = Swift.min(lowestDonor[r], h.values[i])
+                }
+            }
         }
 
         // 5. Hillslope diffusion (explicit; stable while Kd·dt/dx² < 0.25).

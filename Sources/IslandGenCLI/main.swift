@@ -8,11 +8,12 @@ import IslandGen
 
 func usage() -> Never {
     print("""
-    usage: islandgen [--seed N] [--size N] [--steps N] [--domain METRES] [--out DIR]
+    usage: islandgen [--seed N] [--size N] [--steps N] [--domain METRES] [--deposition G] [--out DIR]
       --seed    random seed (default 1)
       --size    grid samples per side (default 1024)
       --steps   erosion time steps (default 400)
       --domain  domain edge length in metres (default 80000)
+      --deposition  sediment deposition coefficient G, 0 for none (default 1)
       --out     output directory (default ./out)
     """)
     exit(2)
@@ -33,6 +34,7 @@ while let flag = args.popFirst() {
     case "--size": params.size = parsed(Int(value))
     case "--steps": params.steps = parsed(Int(value))
     case "--domain": params.domainSize = parsed(Double(value))
+    case "--deposition": params.erosion.deposition = parsed(Double(value))
     case "--out": outDir = value
     default: usage()
     }
