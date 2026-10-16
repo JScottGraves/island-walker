@@ -72,7 +72,10 @@ public enum GroundView {
                 let screenY = horizon - (surface - c.z) * focal / depth
                 let row = Swift.max(0, Int(screenY.rounded(.up)))
                 if row < top {
-                    let color = shade(h, gx: gx, gy: gy, px: px, py: py, ground: ground, sea: sea, distance: d, light: light, maxHeight: maxHeight)
+                    let drop = c.z - surface
+                    let cosView = drop / (d * d + drop * drop).squareRoot()
+                    let color = shade(h, gx: gx, gy: gy, px: px, py: py, ground: ground, sea: sea, distance: d,
+                                      cosView: cosView, light: light, maxHeight: maxHeight)
                     for r in row..<top { put(col, r, color) }
                     top = row
                 }
@@ -80,15 +83,17 @@ public enum GroundView {
             }
             // Sky above whatever terrain was drawn.
             for r in 0..<top {
-                let t = Swift.min(1, Swift.max(0, (horizon - Double(r)) / Double(height)))
-                put(col, r, Look.haze.mix(Look.zenith, t))
+                // Elevation of the ray through this pixel (row offset over the focal length,
+                // corrected for the column's distance from the centre).
+                let up = (horizon - (Double(r) + 0.5)) / (focal / depthScale)
+                put(col, r, Look.skyColor(sinElevation: up / (1 + up * up).squareRoot()))
             }
         }
         return Preview.Image(width: width, height: height, rgb: rgb)
     }
 
     private static func shade(_ h: Grid, gx: Double, gy: Double, px: Double, py: Double, ground: Double, sea: Double,
-                              distance: Double, light: TerrainLighting, maxHeight: Double) -> RGB {
+                              distance: Double, cosView: Double, light: TerrainLighting, maxHeight: Double) -> RGB {
         var albedo: RGB
         var n = (0.0, 0.0, 1.0)
         let depthBelow = sea - ground
@@ -106,19 +111,19 @@ public enum GroundView {
                 hy += (detailNoise(px, py + de) - detailNoise(px, py - de)) / (2 * de) * fade
             }
             n = normalize((-hx, -hy, 1))
-            let slope = 1 - n.2
-            let above = ground - sea
-            let grass = Look.grassLow.mix(Look.grassHigh, Swift.min(1, Swift.max(0, above / maxHeight)))
-            albedo = grass.mix(Look.soil, smoothstep(0.15, 0.30, slope))
-            albedo = albedo.mix(Look.rock, smoothstep(0.35, 0.55, slope))
-            // Beach: a narrow band just above the waterline on gentle slopes only.
-            albedo = Look.sand.mix(albedo, Swift.max(smoothstep(1, 3, above), smoothstep(0.1, 0.25, slope)))
+            albedo = Look.albedo(above: ground - sea, slope: 1 - n.2, maxHeight: maxHeight)
         }
         let s = Look.sunDirection
         let color = Look.lit(albedo: albedo, normalZ: n.2, nDotL: n.0 * s.x + n.1 * s.y + n.2 * s.z,
                              sunVisibility: Double(light.sun.sample(x: gx, y: gy)),
                              skyVisibility: Double(light.sky.sample(x: gx, y: gy)))
-        return color.mix(Look.haze, Look.hazeAmount(distance: distance))
+        var surface = color
+        if depthBelow > 0 {
+            // Flat water mirrors the sky at the reflected elevation, which equals the
+            // view ray's depression angle.
+            surface = color.mix(Look.skyColor(sinElevation: cosView), Look.waterReflectance(cosView: cosView))
+        }
+        return surface.mix(Look.haze, Look.hazeAmount(distance: distance))
     }
 
     /// Metre-scale relief the 10–80 m base grid can't hold: hummocks, lava-flow lumps.

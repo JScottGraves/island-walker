@@ -51,4 +51,21 @@ final class IslandCoreTests: XCTestCase {
         XCTAssertLessThan(light.sky[32, 32], light.sky[10, 32] - 0.2)
         XCTAssertGreaterThan(light.sky[10, 32], 0.9)
     }
+
+    func testDistantSeaMeetsTheHorizonSky() {
+        // Seen at a grazing angle, water is mostly reflected sky, so it can't form a dark
+        // band against the sky just above the horizon.
+        let water = Look.lit(albedo: Look.deepWater, normalZ: 1, nDotL: Look.sunDirection.z, sunVisibility: 1, skyVisibility: 1)
+        let cosView = 0.01
+        let sea = water.mix(Look.skyColor(sinElevation: cosView), Look.waterReflectance(cosView: cosView))
+        let sky = Look.skyColor(sinElevation: 0)
+        XCTAssertGreaterThan(sea.b, 0.85 * sky.b)
+        XCTAssertLessThan(Look.waterReflectance(cosView: 1), 0.03)
+    }
+
+    func testSteepPaliStaysGreen() {
+        // A 55° wall is still mostly vegetation: green dominates red.
+        let wall = Look.albedo(above: 400, slope: 1 - cos(55 * Double.pi / 180), maxHeight: 1000)
+        XCTAssertGreaterThan(wall.g, wall.r)
+    }
 }

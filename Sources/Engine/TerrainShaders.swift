@@ -15,6 +15,7 @@ struct Vertex {
 
 struct Uniforms {
     float4x4 viewProjection;
+    float4x4 inverseViewProjection; // clip space → camera-relative world directions
     float3 cameraPosition;  // metres, world space
     float seaLevel;
     float3 sunDirection;    // towards the sun
@@ -54,13 +55,7 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
         albedo = mix(kShallowWater, kDeepWater, d);
         n = float3(0.0, 0.0, 1.0);
     } else {
-        float t = saturate(h / max(u.maxHeight, 1.0));
-        float3 grass = mix(kGrassLow, kGrassHigh, t);
-        albedo = mix(grass, kSoil, smoothstep(0.15, 0.30, slope));
-        albedo = mix(albedo, kRock, smoothstep(0.35, 0.55, slope));
-        // Beach: narrow band just above the waterline on gentle slopes.
-        float land = max(smoothstep(1.0, 3.0, h), smoothstep(0.1, 0.25, slope));
-        albedo = mix(kSand, albedo, land);
+        albedo = terrainAlbedo(h, slope, u.maxHeight);
     }
 
     float skyVisibility = saturate(in.light.x);
@@ -70,11 +65,38 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
     float3 bounced = kSun * (kBounce * kSunDirection.z * (0.5 - 0.5 * n.z));
     float3 color = albedo * (direct + ambient + bounced);
 
-    float dist = length(in.world - u.cameraPosition);
+    float3 toEye = u.cameraPosition - in.world;
+    float dist = length(toEye);
+    if (h < 0.0) {
+        // Flat water mirrors the sky at the view ray's depression angle.
+        float cosView = toEye.z / max(dist, 1e-3);
+        color = mix(color, skyColor(cosView), waterReflectance(cosView));
+    }
     color = mix(color, kHaze, kHazeMax * (1.0 - exp(-dist / kHazeDistance)));
 
     color = pbrNeutral(color);
     // The render target is an _srgb format, which applies the sRGB encoding on write.
     return float4(color, 1.0);
+}
+
+// Sky: one full-screen triangle drawn before the terrain, coloured by the elevation of
+// each pixel's view ray (mirrors GroundView's sky).
+struct SkyOut {
+    float4 position [[position]];
+    float2 ndc;
+};
+
+vertex SkyOut skyVertex(uint vid [[vertex_id]]) {
+    float2 p = float2((vid << 1) & 2, vid & 2) * 2.0 - 1.0;
+    SkyOut o;
+    o.position = float4(p, 0.0, 1.0);
+    o.ndc = p;
+    return o;
+}
+
+fragment float4 skyFragment(SkyOut in [[stage_in]], constant Uniforms &u [[buffer(1)]]) {
+    float4 far = u.inverseViewProjection * float4(in.ndc, 1.0, 1.0);
+    float3 dir = normalize(far.xyz / far.w);
+    return float4(pbrNeutral(skyColor(dir.z)), 1.0);
 }
 """
