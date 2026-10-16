@@ -70,7 +70,7 @@ public enum Look {
         let grass = grassLow.mix(grassHigh, Swift.min(1, Swift.max(0, above / Swift.max(maxHeight, 1))))
         let bare = exposure(x: x, y: y)
         var a = grass.mix(cliffGreen, smoothstep(0.2, 0.45, slope))
-        a = a.mix(soil, smoothstep(0.15, 0.35, slope) * (0.2 + 0.75 * bare))
+        a = a.mix(soil, smoothstep(0.15, 0.35, slope) * (0.12 + 0.65 * bare))
         a = a.mix(rock, smoothstep(0.4, 0.7, slope) * (0.2 + 0.6 * (1 - bare)))
         // Beach: a narrow band just above the waterline on gentle slopes only.
         return sand.mix(a, Swift.max(smoothstep(1, 3, above), smoothstep(0.1, 0.25, slope)))
@@ -206,7 +206,7 @@ public enum Look {
             float3 grass = mix(kGrassLow, kGrassHigh, saturate(above / max(maxHeight, 1.0)));
             float bare = exposure(p);
             float3 a = mix(grass, kCliffGreen, smoothstep(0.2, 0.45, slope));
-            a = mix(a, kSoil, smoothstep(0.15, 0.35, slope) * (0.2 + 0.75 * bare));
+            a = mix(a, kSoil, smoothstep(0.15, 0.35, slope) * (0.12 + 0.65 * bare));
             a = mix(a, kRock, smoothstep(0.4, 0.7, slope) * (0.2 + 0.6 * (1.0 - bare)));
             return mix(kSand, a, max(smoothstep(1.0, 3.0, above), smoothstep(0.1, 0.25, slope)));
         }
