@@ -85,6 +85,30 @@ if let scarp = island.scarp {
     try JSONSerialization.data(withJSONObject: json, options: [.sortedKeys]).write(to: out.appendingPathComponent("scarp.json"))
 }
 
+// Standing trade-wind cloud coverage for the renderer, for normal and strong trades
+// (research/clouds.md §3). The runtime adds drifting cumulus and the daily cycle.
+var cloudParams = Clouds.Params()
+cloudParams.windDirection = params.climate.windDirection
+var strongCloudParams = Clouds.Params.strongTrades
+strongCloudParams.windDirection = params.climate.windDirection
+let clouds = timer?.measure("clouds") { Clouds.coverage(height: island.height, seaLevel: sea, params: cloudParams) }
+    ?? Clouds.coverage(height: island.height, seaLevel: sea, params: cloudParams)
+let strongClouds = Clouds.coverage(height: island.height, seaLevel: sea, params: strongCloudParams)
+try Preview.writeRaw(clouds, to: out.appendingPathComponent("clouds-trades.r32"))
+try Preview.writeRaw(strongClouds, to: out.appendingPathComponent("clouds-strong.r32"))
+try Preview.write(Preview.clouds(clouds, over: Preview.hillshade(island.height, seaLevel: sea)), to: out.appendingPathComponent("clouds.png"))
+let cloudInfo: [String: Any] = [
+    "size": clouds.width,
+    "cellMetres": clouds.cellSize,
+    "windDirection": params.climate.windDirection,
+    "regimes": [
+        "trades": ["file": "clouds-trades.r32", "windSpeed": cloudParams.windSpeed],
+        "strong": ["file": "clouds-strong.r32", "windSpeed": strongCloudParams.windSpeed],
+    ],
+]
+try JSONSerialization.data(withJSONObject: cloudInfo, options: [.prettyPrinted, .sortedKeys]).write(to: out.appendingPathComponent("clouds.json"))
+let cloudStats = Clouds.stats(coverage: clouds, height: island.height, seaLevel: sea, windDirection: params.climate.windDirection)
+
 // Ground-level pictures from a walker's eye height, rendered on the CPU.
 let lighting = timer?.measure("lighting") { TerrainLighting.bake(height: island.height, seaLevel: sea) }
     ?? TerrainLighting.bake(height: island.height, seaLevel: sea)
@@ -144,6 +168,9 @@ let info: [String: Any] = [
     "meanSlopeWindward": rounded(slopeSum.windward / Double(Swift.max(slopeCount.windward, 1))),
     "meanSlopeLeeward": rounded(slopeSum.leeward / Double(Swift.max(slopeCount.leeward, 1))),
     "seconds": (elapsed * 10).rounded() / 10,
+    "cloudLand": rounded(cloudStats.land),
+    "cloudWindward": rounded(cloudStats.windward),
+    "cloudLeeward": rounded(cloudStats.leeward),
 ]
 let json = try JSONSerialization.data(withJSONObject: info, options: [.prettyPrinted, .sortedKeys])
 try json.write(to: out.appendingPathComponent("info.json"))
