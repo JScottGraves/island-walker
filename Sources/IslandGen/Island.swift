@@ -18,7 +18,7 @@ public enum Island {
         /// Cut a giant landslide sector from the windward flank before erosion (see FlankCollapse).
         public var flankCollapse = true
         /// Shield land profile exponent (see VolcanicBase.generate); 0 is the classic shape.
-        public var landExponent: Double = 0
+        public var landExponent: Double = 2
         public init() {}
     }
 
