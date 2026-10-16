@@ -39,6 +39,10 @@ public enum StreamPower {
         /// average and buried the foot of the pali under a 2–3 km ramp; 0.3 keeps the cliff
         /// and still builds fans and a coastal plain.
         public var deposition: Double = 0.3
+        /// Steepest slope rock walls hold before they fail (rise over run); steeper ground
+        /// collapses back to it each step. Retreating headwalls then widen valley heads into
+        /// bowls instead of narrow slots. 0 disables it.
+        public var criticalSlope: Double = 0
         /// Uplift (positive) or subsidence (negative) in m / yr, applied to land and sea floor.
         public var uplift: Double = 0
         /// Time step in years.
@@ -268,6 +272,33 @@ public enum StreamPower {
                                         low[r] = Swift.min(low[r], hv[i])
                                     }
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4c. Threshold hillslopes: land standing more than criticalSlope above any
+        //     neighbour fails down to that angle (shallow landslides on over-steepened
+        //     walls). Reads the old heights only, so rows run in parallel.
+        if params.criticalSlope > 0 {
+            let sc = Float(params.criticalSlope * cell)
+            phase("landslides") {
+                let old = h.values
+                h.values.withUnsafeMutableBufferPointer { hBuf in
+                    let hv = SharedBuffer(hBuf)
+                    Parallel.forRanges(rows - 2) { rowRange in
+                        for y in (rowRange.lowerBound + 1)..<(rowRange.upperBound + 1) {
+                            for x in 1..<(w - 1) {
+                                let i = y * w + x
+                                if old[i] <= sea { continue }
+                                var cap = old[i]
+                                for k in 0..<8 {
+                                    let j = (y + D8.dy[k]) * w + (x + D8.dx[k])
+                                    cap = Swift.min(cap, Swift.max(old[j], sea) + sc * Float(D8.distance[k]))
+                                }
+                                hv[i] = cap
                             }
                         }
                     }
