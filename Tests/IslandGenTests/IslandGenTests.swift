@@ -97,6 +97,8 @@ final class IslandGenTests: XCTestCase {
         XCTAssertEqual(fine.range.max, island.height.range.max, accuracy: Float(rp.detail) + 20)
         XCTAssertEqual(Refine.refine(island.height, drainageArea: island.drainageArea, seaLevel: 0, params: rp), fine,
                        "refinement is deterministic")
+    }
+
     func testPondBuriesOnlyTheDeepestShareOfTheSaddle() {
         // A saddle surface at 200 m over eroded ground whose height rises 0..99 m by column.
         var h = Grid(width: 100, height: 4, cellSize: 100)
