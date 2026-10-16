@@ -171,7 +171,10 @@ public enum Viewpoints {
         public var camera: GroundView.Camera
     }
 
-    public static func automatic(height h: Grid, drainageArea area: Grid, seaLevel: Float = 0) -> [Named] {
+    /// With `scarp`, the pali view looks at that flank-collapse cliff from its plain;
+    /// without it, at the biggest cliff anywhere.
+    public static func automatic(height h: Grid, drainageArea area: Grid, seaLevel: Float = 0,
+                                 scarp: FlankCollapse.Scarp? = nil) -> [Named] {
         var summit = 0
         for i in 0..<h.count where h.values[i] > h.values[summit] { summit = i }
         let maxH = h.values[summit] - seaLevel
@@ -214,6 +217,61 @@ public enum Viewpoints {
             return GroundView.Camera(x: x, y: y, z: z, yaw: atan2(ux, uy), pitch: pitch)
         }
 
+        /// The lowland spot with the most relief 2–3.5 km away: standing on a coastal plain
+        /// looking up at a cliff (a pali), far enough back to see its brink. The first
+        /// kilometre toward the cliff must stay low, so the camera is on open plain rather
+        /// than in a valley or at the foot of a hummock. Searches a coarse lattice in 24
+        /// directions.
+        func cliff() -> (Int, Int)? {
+            let stride = 4, directions = 24
+            var bestFoot = -1, bestTop = -1, bestRelief: Float = 150
+            for cy in Swift.stride(from: 0, to: h.height, by: stride) {
+                for cx in Swift.stride(from: 0, to: h.width, by: stride) {
+                    let i = cy * h.width + cx
+                    let z = h.values[i] - seaLevel
+                    guard z > 5 && z < 150 else { continue }
+                    if let scarp {
+                        // Only in front of the scarp's middle, on its plain.
+                        let (px, py) = position(i)
+                        let rx = px - scarp.x, ry = py - scarp.y
+                        let along = rx * cos(scarp.direction) + ry * sin(scarp.direction)
+                        let perp = -rx * sin(scarp.direction) + ry * cos(scarp.direction)
+                        guard along > 0 && abs(perp) < 0.5 * scarp.halfLength else { continue }
+                    }
+                    for k in 0..<directions {
+                        let a = Double(k) * 2 * Double.pi / Double(directions)
+                        if let scarp {
+                            // Facing inland, within 40° of straight at the cliff.
+                            var off = abs(a - (scarp.direction + Double.pi)).truncatingRemainder(dividingBy: 2 * Double.pi)
+                            if off > Double.pi { off = 2 * Double.pi - off }
+                            if off > 40 * Double.pi / 180 { continue }
+                        }
+                        var clear = true
+                        var near = h.cellSize
+                        while near <= 1000 && clear {
+                            let nx = cx + Int((cos(a) * near / h.cellSize).rounded())
+                            let ny = cy + Int((sin(a) * near / h.cellSize).rounded())
+                            clear = h.contains(nx, ny) && h.values[ny * h.width + nx] - h.values[i] < 60
+                            near += h.cellSize
+                        }
+                        guard clear else { continue }
+                        var d = 2000.0
+                        while d <= 3500 {
+                            let tx = cx + Int((cos(a) * d / h.cellSize).rounded())
+                            let ty = cy + Int((sin(a) * d / h.cellSize).rounded())
+                            if h.contains(tx, ty) {
+                                let j = ty * h.width + tx
+                                let relief = h.values[j] - h.values[i]
+                                if relief > bestRelief { bestRelief = relief; bestFoot = i; bestTop = j }
+                            }
+                            d += h.cellSize
+                        }
+                    }
+                }
+            }
+            return bestFoot >= 0 ? (bestFoot, bestTop) : nil
+        }
+
         var views: [Named] = []
         if coast >= 0 {
             views.append(Named(name: "summit", camera: camera(from: summit, to: coast, brink: true, pitchOffset: 0.05)))
@@ -236,6 +294,9 @@ public enum Viewpoints {
         }
         if coast >= 0 {
             views.append(Named(name: "coast", camera: camera(from: coast, to: summit, pitchOffset: 0.02)))
+        }
+        if let (foot, top) = cliff() {
+            views.append(Named(name: "pali", camera: camera(from: foot, to: top, pitchOffset: 0.03)))
         }
         return views
     }

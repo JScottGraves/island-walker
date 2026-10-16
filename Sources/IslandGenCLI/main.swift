@@ -8,11 +8,12 @@ import IslandGen
 
 func usage() -> Never {
     print("""
-    usage: islandgen [--seed N] [--size N] [--steps N] [--domain METRES] [--out DIR]
+    usage: islandgen [--seed N] [--size N] [--steps N] [--domain METRES] [--deposition G] [--out DIR]
       --seed    random seed (default 1)
       --size    grid samples per side (default 1024)
       --steps   erosion time steps (default 400)
       --domain  domain edge length in metres (default 80000)
+      --deposition  sediment deposition coefficient G, 0 for none (default 0.3)
       --out     output directory (default ./out)
     """)
     exit(2)
@@ -33,6 +34,7 @@ while let flag = args.popFirst() {
     case "--size": params.size = parsed(Int(value))
     case "--steps": params.steps = parsed(Int(value))
     case "--domain": params.domainSize = parsed(Double(value))
+    case "--deposition": params.erosion.deposition = parsed(Double(value))
     case "--out": outDir = value
     default: usage()
     }
@@ -58,9 +60,14 @@ try Preview.write(Preview.flow(island.drainageArea), to: out.appendingPathCompon
 try Preview.write(Preview.gray(island.rain), to: out.appendingPathComponent("rain.png"))
 try Preview.write(Preview.gray(island.hardness), to: out.appendingPathComponent("hardness.png"))
 try Preview.writeRaw(island.height, to: out.appendingPathComponent("height.r32"))
+if let scarp = island.scarp {
+    // Lets IslandApp's snapshots aim the pali view at the same cliff.
+    let json: [String: Double] = ["x": scarp.x, "y": scarp.y, "direction": scarp.direction, "halfLength": scarp.halfLength]
+    try JSONSerialization.data(withJSONObject: json, options: [.sortedKeys]).write(to: out.appendingPathComponent("scarp.json"))
+}
 
 // Ground-level pictures from a walker's eye height, rendered on the CPU.
-for view in Viewpoints.automatic(height: island.height, drainageArea: island.drainageArea, seaLevel: sea) {
+for view in Viewpoints.automatic(height: island.height, drainageArea: island.drainageArea, seaLevel: sea, scarp: island.scarp) {
     let image = GroundView.render(island.height, camera: view.camera, seaLevel: sea)
     try Preview.write(image, to: out.appendingPathComponent("view-\(view.name).png"))
 }
@@ -75,6 +82,7 @@ var summitIndex = 0
 for i in 0..<island.height.count where island.height.values[i] > island.height.values[summitIndex] { summitIndex = i }
 let sx = summitIndex % params.size, sy = summitIndex / params.size
 var slopeSum = (windward: 0.0, leeward: 0.0), slopeCount = (windward: 0, leeward: 0)
+var steep = 0 // land steeper than 35°: cliffs such as a pali
 for y in 1..<(params.size - 1) {
     for x in 1..<(params.size - 1) {
         let g = island.height
@@ -82,6 +90,7 @@ for y in 1..<(params.size - 1) {
         let gx = Double(g[x + 1, y] - g[x - 1, y]) / (2 * g.cellSize)
         let gy = Double(g[x, y + 1] - g[x, y - 1]) / (2 * g.cellSize)
         let slope = (gx * gx + gy * gy).squareRoot()
+        if slope > 0.7 { steep += 1 }
         // Upwind of the summit means against the wind direction.
         if Double(x - sx) * wind.0 + Double(y - sy) * wind.1 < 0 {
             slopeSum.windward += slope; slopeCount.windward += 1
@@ -100,6 +109,7 @@ let info: [String: Any] = [
     "steps": params.steps,
     "landAreaKm2": (landKm2 * 10).rounded() / 10,
     "maxHeightMetres": Double(island.height.range.max),
+    "steepFraction": rounded(Double(steep) / Double(Swift.max(land, 1)), 10000),
     "lowlandFraction": rounded(Double(lowland) / Double(Swift.max(land, 1))),
     "meanSlopeWindward": rounded(slopeSum.windward / Double(Swift.max(slopeCount.windward, 1))),
     "meanSlopeLeeward": rounded(slopeSum.leeward / Double(Swift.max(slopeCount.leeward, 1))),

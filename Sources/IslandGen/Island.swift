@@ -15,6 +15,8 @@ public enum Island {
         public var rainInterval: Int = 50
         public var erosion = StreamPower.Params()
         public var climate = Climate.Params()
+        /// Cut a giant landslide sector from the windward flank before erosion (see FlankCollapse).
+        public var flankCollapse = true
         public init() {}
     }
 
@@ -24,6 +26,8 @@ public enum Island {
         public var rain: Grid
         public var drainageArea: Grid
         public var params: Params
+        /// The flank collapse's headscarp, if one was cut.
+        public var scarp: FlankCollapse.Scarp?
     }
 
     /// Generates an island. `progress` is called with values in 0...1.
@@ -35,7 +39,13 @@ public enum Island {
         let maxDt = 0.2 * cell * cell / Swift.max(erosion.diffusivity, 1e-9)
         erosion.timeStep = Swift.min(erosion.timeStep, maxDt)
 
-        let base = VolcanicBase.generate(seed: p.seed, size: p.size, domainSize: p.domainSize)
+        var base = VolcanicBase.generate(seed: p.seed, size: p.size, domainSize: p.domainSize)
+        let scarp = p.flankCollapse
+            ? FlankCollapse.choose(shields: base.shields, height: base.height, windDirection: p.climate.windDirection, seed: p.seed)
+            : nil
+        if let scarp {
+            FlankCollapse.apply(scarp, height: &base.height, hardness: &base.hardness, seed: p.seed)
+        }
         var height = base.height
         var rain = Climate.precipitation(height: height, seaLevel: erosion.seaLevel, params: p.climate)
         var area = Grid(width: p.size, height: p.size, cellSize: cell)
@@ -56,6 +66,6 @@ public enum Island {
         if p.steps == 0 {
             PriorityFlood.fill(&height, seaLevel: erosion.seaLevel)
         }
-        return Result(height: height, hardness: base.hardness, rain: rain, drainageArea: area, params: p)
+        return Result(height: height, hardness: base.hardness, rain: rain, drainageArea: area, params: p, scarp: scarp)
     }
 }
