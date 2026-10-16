@@ -29,9 +29,15 @@ public enum Island {
         /// ravines; Oahu's Schofield plateau is young Koolau lava banked against the older
         /// Waianae range, too young and permeable to be dissected much. The ponded lava is
         /// also `pondHardness` times harder to erode.
+        ///
+        /// Flooding all the way up to the uneroded saddle surface built a 200 m tableland
+        /// over a third of the island. Instead the lava surface keeps the saddle's gentle
+        /// shape but is lowered so that only the deepest `pondShare` of the saddle (by how
+        /// far erosion has cut below that shape) is buried; ridges still stand above it.
         public var saddleFill: Double = 0
-        public var pondTime: Double = 0.75
+        public var pondTime: Double = 0.9
         public var pondHardness: Float = 2
+        public var pondShare: Double = 0.5
         /// Flexural uplift after erosion, in metres, reached `flexureDistance` inland and
         /// held beyond it. Oahu rides the bulge raised by the Big Island's weight, which has
         /// lifted its old reefs and lowland a few tens of metres; tilting the coastal fringe
@@ -83,12 +89,7 @@ public enum Island {
         let pondStep = p.saddleFill > 0 ? Int((p.pondTime * Double(p.steps)).rounded()) : -1
         for s in 0..<p.steps {
             if s == pondStep {
-                phase("ponding") {
-                    for i in 0..<height.count where base.ponded.values[i] > height.values[i] {
-                        height.values[i] = base.ponded.values[i]
-                        base.hardness.values[i] *= p.pondHardness
-                    }
-                }
+                phase("ponding") { Self.pond(&height, hardness: &base.hardness, surface: base.ponded, p: p) }
             }
             if s > 0 && s % p.rainInterval == 0 {
                 rain = phase("rain") { Climate.precipitation(height: height, seaLevel: erosion.seaLevel, params: p.climate) }
@@ -141,6 +142,27 @@ public enum Island {
         }
         for i in 0..<h.count where h.values[i] > seaLevel && d[i].isFinite {
             h.values[i] += Float(lift * Swift.min(1, d[i] * h.cellSize / distance))
+        }
+    }
+
+    /// Floods the saddle with lava: `surface` (the uneroded saddle) lowered by the
+    /// `pondShare` quantile of how far erosion has cut below it, so that share of the
+    /// saddle is buried under a gently sloping plain and the rest stands above it.
+    static func pond(_ h: inout Grid, hardness: inout Grid, surface: Grid, p: Params) {
+        var cut: [Float] = []
+        for i in 0..<h.count where surface.values[i].isFinite && h.values[i] > 0 {
+            cut.append(surface.values[i] - h.values[i])
+        }
+        guard !cut.isEmpty else { return }
+        cut.sort()
+        let k = Swift.min(cut.count - 1, Swift.max(0, Int(Double(cut.count) * (1 - p.pondShare))))
+        let lowering = Swift.max(0, cut[k])
+        for i in 0..<h.count where surface.values[i].isFinite {
+            let lava = surface.values[i] - lowering
+            if lava > h.values[i] {
+                h.values[i] = lava
+                hardness.values[i] *= p.pondHardness
+            }
         }
     }
 }

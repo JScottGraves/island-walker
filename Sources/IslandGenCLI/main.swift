@@ -10,7 +10,7 @@ func usage() -> Never {
     print("""
     usage: islandgen --score HEIGHT.r32 --cell METRES [--width N] [--sea-level M]
              score an existing float32 heightfield (square unless --width; pits are filled first) and print realism metrics
-           islandgen [--seed N] [--size N] [--steps N] [--domain METRES] [--deposition G] [--slope-exponent N] [--reference-slope S] [--critical-slope S] [--knickpoint-slope S] [--waterfall-retreat R] [--headwall-retreat R] [--waterfall-min-q Q] [--land-exponent P] [--coast-slope A] [--rift-descent D] [--saddle-fill M] [--pond-time F] [--pond-hardness H] [--wave-retreat R] [--leeward-waves S] [--uplift U] [--flexure M] [--flexure-distance M] [--profile] [--out DIR]
+           islandgen [--seed N] [--size N] [--steps N] [--domain METRES] [--deposition G] [--slope-exponent N] [--reference-slope S] [--critical-slope S] [--knickpoint-slope S] [--waterfall-retreat R] [--headwall-retreat R] [--waterfall-min-q Q] [--land-exponent P] [--coast-slope A] [--rift-descent D] [--saddle-fill M] [--pond-time F] [--pond-hardness H] [--pond-share S] [--wave-retreat R] [--leeward-waves S] [--uplift U] [--flexure M] [--flexure-distance M] [--profile] [--out DIR]
       --seed    random seed (default 1)
       --size    grid samples per side (default 1024)
       --steps   erosion time steps (default 400)
@@ -26,8 +26,9 @@ func usage() -> Never {
       --coast-slope        share of a straight cone mixed into the land profile, steepening the coast (default 0.3)
       --rift-descent       drop of each rift crest from summit to tip, as a share of its height (default 0.4)
       --saddle-fill        soft-maximum width in metres blending neighbouring shields, filling the saddle (default 0)
-      --pond-time          share of the erosion run after which saddle lava floods in (default 0.75)
+      --pond-time          share of the erosion run after which saddle lava floods in (default 0.9)
       --pond-hardness      erosion resistance multiplier of the ponded lava (default 2)
+      --pond-share         share of the saddle the lava buries; the rest stands above it (default 0.5)
       --wave-retreat       sea-cliff retreat in m/yr on coasts facing the wind (default 0.004)
       --leeward-waves      share of wave retreat on coasts facing away from the wind (default 0.2)
       --uplift             uplift in m/yr, negative for subsidence (default 0)
@@ -105,6 +106,7 @@ while let flag = args.popFirst() {
     case "--saddle-fill": params.saddleFill = parsed(Double(value))
     case "--pond-time": params.pondTime = parsed(Double(value))
     case "--pond-hardness": params.pondHardness = parsed(Float(value))
+    case "--pond-share": params.pondShare = parsed(Double(value))
     case "--wave-retreat": params.erosion.waveRetreat = parsed(Double(value))
     case "--leeward-waves": params.erosion.leewardWaves = parsed(Double(value))
     case "--uplift": params.erosion.uplift = parsed(Double(value))
@@ -223,6 +225,7 @@ let info: [String: Any] = [
     "saddleFill": params.saddleFill,
     "pondTime": params.pondTime,
     "pondHardness": params.pondHardness,
+    "pondShare": params.pondShare,
     "waveRetreat": params.erosion.waveRetreat,
     "leewardWaves": params.erosion.leewardWaves,
     "uplift": params.erosion.uplift,
