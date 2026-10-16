@@ -31,6 +31,9 @@ struct Uniforms {
     float4 skySH[9];        // SunLight.skySH: sky irradiance for any normal (rgb)
     float4 cloudLayer;      // cloud base, inversion (m above sea), clock (s), domain size (m)
     float4 cloudWind;       // trade wind velocity xy (m/s), orographic coverage gain, unused
+    float4x4 previousViewProjection; // last frame's, for reprojecting the cloud history
+    float4 previousCamera;  // last frame's camera position (xyz)
+    float4 frame;           // render target width, height (px), frame number, history valid (0/1)
 };
 
 // Sky radiance along a direction, from the sky-view LUT (Atmosphere.skyView).
@@ -139,6 +142,8 @@ float horizonSun(VOut in, float3 l) {
 fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buffer(1)]],
                                 texture2d<float> skyView [[texture(0)]],
                                 texture2d<float> cloudMap [[texture(1)]],
+                                texture2d<float> clouds [[texture(2)]],
+                                texture2d<float> cloudDistance [[texture(3)]],
                                 primitive_acceleration_structure terrain [[buffer(2), function_constant(kRayTraced)]]) {
     float3 n = normalize(in.normal);
     float slope = 1.0 - n.z;
@@ -166,15 +171,15 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
         }
     }
     // Cloud shadows drifting over the terrain.
-    float clouds = cloudShadow(u, cloudMap, surface);
-    sunVisibility *= clouds;
+    float cloudSun = cloudShadow(u, cloudMap, surface);
+    sunVisibility *= cloudSun;
     float3 direct = u.sunRadiance * (nDotL * sunVisibility);
     // Sky light from the part of the sky the terrain leaves open.
     float3 ambient = skyIrradiance(u, n) * skyVisibility;
     // One bounce off the surrounding terrain (global-illumination.md §6, cheap version):
     // it fills the sky the terrain blocks, plus the ground a tilted face looks down at.
     // Neighbours are taken to share this albedo and to be half in sun.
-    float3 groundLight = u.sunRadiance * (0.5 * max(l.z, 0.0) * clouds) + skyIrradiance(u, float3(0.0, 0.0, 1.0));
+    float3 groundLight = u.sunRadiance * (0.5 * max(l.z, 0.0) * cloudSun) + skyIrradiance(u, float3(0.0, 0.0, 1.0));
     float terrainSeen = (1.0 - skyVisibility) * (0.5 + 0.5 * n.z) + (0.5 - 0.5 * n.z);
     float3 bounced = albedo * groundLight * terrainSeen;
     float3 color = albedo * (direct + ambient + bounced);
@@ -190,7 +195,7 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
     // Aerial perspective: haze takes the colour of the sky behind it, so it brightens
     // towards the sun and warms at sunset.
     color = mix(color, skyAbove(skyView, -toEye), kHazeMax * (1.0 - exp(-dist / kHazeDistance)));
-    color = applyClouds(u, cloudMap, skyView, color, -toEye / max(dist, 1e-3), dist, in.position.xy);
+    color = compositeClouds(clouds, cloudDistance, color, in.position.xy, dist);
 
     color = pbrNeutral(color * u.exposure);
     // The render target is an _srgb format, which applies the sRGB encoding on write.
@@ -198,7 +203,7 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
 }
 
 // Sky: one full-screen triangle at the far plane, drawn after the terrain's depth prepass
-// so it shades (and marches clouds) only where no terrain covers it.
+// so it shades only where no terrain covers it.
 struct SkyOut {
     float4 position [[position]];
     float2 ndc;
@@ -214,7 +219,8 @@ vertex SkyOut skyVertex(uint vid [[vertex_id]]) {
 
 fragment float4 skyFragment(SkyOut in [[stage_in]], constant Uniforms &u [[buffer(1)]],
                             texture2d<float> skyView [[texture(0)]],
-                            texture2d<float> cloudMap [[texture(1)]]) {
+                            texture2d<float> clouds [[texture(2)]],
+                            texture2d<float> cloudDistance [[texture(3)]]) {
     float4 far = u.inverseViewProjection * float4(in.ndc, 1.0, 1.0);
     float3 dir = normalize(far.xyz / far.w);
     float3 color = skyRadiance(skyView, dir);
@@ -233,8 +239,7 @@ fragment float4 skyFragment(SkyOut in [[stage_in]], constant Uniforms &u [[buffe
     float cosSun = dot(dir, normalize(u.sunDirection));
     color += u.sunRadiance * (2000.0 * smoothstep(cos(0.0050), cos(0.0042), cosSun));
     // Below the horizon the view ends on the sea; clouds in between still count.
-    float viewEnd = dir.z < 0.0 ? max(u.cameraPosition.z - u.seaLevel, 1.0) / max(-dir.z, 1e-5) : 1e9;
-    color = applyClouds(u, cloudMap, skyView, color, dir, viewEnd, in.position.xy);
+    color = compositeClouds(clouds, cloudDistance, color, in.position.xy, skyViewEnd(u, dir));
     return float4(pbrNeutral(color * u.exposure), 1.0);
 }
 """

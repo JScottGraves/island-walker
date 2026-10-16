@@ -1,6 +1,8 @@
 /// Metal source for the trade-wind cloud layer (research/clouds.md): a 2.5D cloud layer
-/// in the Horizon Zero Dawn / Frostbite style, marched per pixel by the sky and terrain
-/// shaders so clouds composite in HDR before tone mapping.
+/// in the Horizon Zero Dawn / Frostbite style. A compute pass marches it at half
+/// resolution up to the terrain depth, a second pass blends each frame into a history
+/// (temporal accumulation, which turns the per-pixel step jitter into smooth cloud), and
+/// the sky and terrain shaders composite the result in HDR before tone mapping.
 ///
 /// Where clouds are comes from islandgen's baked orographic coverage (standing over the
 /// windward slopes and crest) plus drifting ocean cumulus; a height profile between the
@@ -160,8 +162,8 @@ CloudResult marchClouds(constant Uniforms &u, texture2d<float> cloudMap, float3 
 
     end = min(end, start + 60000.0);
     if (end <= start) return result;
-    // Fewer steps for the sky: they still reach the cloud bottoms over the sea.
-    const int steps = maxDistance > 1e8 ? 40 : 32;
+    // Few steps: the jitter moves every frame and the history averages it out.
+    const int steps = maxDistance > 1e8 ? 32 : 24;
     float span = end - start;
     // Short steps near the camera (fog around a walker inside the cloud), longer far out.
     float jitter = fract(52.9829189 * fract(dot(pixel, float2(0.06711056, 0.00583715))));
@@ -213,15 +215,133 @@ CloudResult marchClouds(constant Uniforms &u, texture2d<float> cloudMap, float3 
     return result;
 }
 
-// Composites clouds over a colour that lies `maxDistance` away along `dir`, with haze
-// (aerial perspective) over the cloud at its own distance.
-float3 applyClouds(constant Uniforms &u, texture2d<float> cloudMap, texture2d<float> skyView,
-                   float3 color, float3 dir, float maxDistance, float2 pixel) {
-    CloudResult c = marchClouds(u, cloudMap, dir, maxDistance, pixel);
-    if (c.transmittance >= 0.999) return color;
-    float haze = kHazeMax * (1.0 - exp(-c.distance / kHazeDistance));
-    float3 cloud = mix(c.light, skyAbove(skyView, dir) * (1.0 - c.transmittance), haze);
-    return color * c.transmittance + cloud;
+// Where the view along `dir` ends with no terrain in the way: the sea below the horizon,
+// else far away.
+float skyViewEnd(constant Uniforms &u, float3 dir) {
+    return dir.z < 0.0 ? max(u.cameraPosition.z - u.seaLevel, 1.0) / max(-dir.z, 1e-5) : 1e9;
+}
+
+// The full-resolution pixel that half-resolution cloud texel `g` is marched through
+// (centre at 2g + 1.5 in pixel coordinates), and the view direction through it.
+uint2 cloudPixel(constant Uniforms &u, uint2 g) {
+    return min(g * 2 + 1, uint2(u.frame.xy) - 1);
+}
+
+float3 pixelDirection(constant Uniforms &u, float2 pixelCentre, float depth, thread float &distance) {
+    float2 ndc = float2(pixelCentre.x / u.frame.x * 2.0 - 1.0, 1.0 - pixelCentre.y / u.frame.y * 2.0);
+    float4 farPoint = u.inverseViewProjection * float4(ndc, 1.0, 1.0);
+    float3 dir = normalize(farPoint.xyz / farPoint.w);
+    if (depth >= 1.0) {
+        distance = skyViewEnd(u, dir);
+    } else {
+        float4 q = u.inverseViewProjection * float4(ndc, depth, 1.0);
+        distance = length(q.xyz / q.w);
+    }
+    return dir;
+}
+
+// Pass 1: march the clouds for each half-resolution texel up to the terrain (or sea, or
+// sky) behind it. Writes hazed cloud light and transmittance, plus (distance to what lies
+// behind, distance to the cloud) for upsampling and reprojection.
+kernel void cloudMarch(constant Uniforms &u [[buffer(0)]],
+                       depth2d<float, access::read> depth [[texture(0)]],
+                       texture2d<float> skyView [[texture(1)]],
+                       texture2d<float> cloudMap [[texture(2)]],
+                       texture2d<float, access::write> cloudOut [[texture(3)]],
+                       texture2d<float, access::write> distanceOut [[texture(4)]],
+                       uint2 g [[thread_position_in_grid]]) {
+    if (g.x >= cloudOut.get_width() || g.y >= cloudOut.get_height()) return;
+    uint2 pixel = cloudPixel(u, g);
+    float behind;
+    float3 dir = pixelDirection(u, float2(pixel) + 0.5, depth.read(pixel), behind);
+    // Interleaved gradient noise shifted every frame (Jimenez 2014): over the history's
+    // ~10 frames each texel sees evenly spread step offsets.
+    float2 jitter = float2(g) + 5.588238 * fmod(u.frame.z, 64.0);
+    CloudResult c = marchClouds(u, cloudMap, dir, behind, jitter);
+    float3 light = 0.0;
+    if (c.transmittance < 0.999) {
+        // Aerial perspective over the cloud, at the cloud's own distance.
+        float haze = kHazeMax * (1.0 - exp(-c.distance / kHazeDistance));
+        light = mix(c.light, skyAbove(skyView, dir) * (1.0 - c.transmittance), haze);
+    }
+    cloudOut.write(float4(light, c.transmittance), g);
+    distanceOut.write(float4(behind, c.transmittance < 0.999 ? c.distance : behind, 0.0, 0.0), g);
+}
+
+// Pass 2: blend this frame's clouds into the history. The history is reprojected through
+// the cloud's own distance, kept only where it saw the same surface behind, and clamped to
+// this frame's neighbourhood so moving clouds and a moving sun don't leave ghosts.
+kernel void cloudResolve(constant Uniforms &u [[buffer(0)]],
+                         texture2d<float> current [[texture(0)]],
+                         texture2d<float> currentDistance [[texture(1)]],
+                         texture2d<float> history [[texture(2)]],
+                         texture2d<float> historyDistance [[texture(3)]],
+                         texture2d<float, access::write> resolved [[texture(4)]],
+                         texture2d<float, access::write> resolvedDistance [[texture(5)]],
+                         uint2 g [[thread_position_in_grid]]) {
+    int2 size = int2(current.get_width(), current.get_height());
+    if (int(g.x) >= size.x || int(g.y) >= size.y) return;
+    float4 c = current.read(g);
+    float2 d = currentDistance.read(g).xy;
+    float4 lo = c, hi = c;
+    for (int y = -1; y <= 1; y++) {
+        for (int x = -1; x <= 1; x++) {
+            float4 s = current.read(uint2(clamp(int2(g) + int2(x, y), int2(0), size - 1)));
+            lo = min(lo, s);
+            hi = max(hi, s);
+        }
+    }
+    float4 result = c;
+    if (u.frame.w > 0.5) {
+        uint2 pixel = cloudPixel(u, g);
+        float unused;
+        float3 dir = pixelDirection(u, float2(pixel) + 0.5, 1.0, unused);
+        float3 world = u.cameraPosition + dir * min(d.y, 200000.0);
+        float4 clip = u.previousViewProjection * float4(world - u.previousCamera.xyz, 1.0);
+        if (clip.w > 0.0) {
+            float2 ndc = clip.xy / clip.w;
+            float2 previousPixel = float2((0.5 + 0.5 * ndc.x) * u.frame.x, (0.5 - 0.5 * ndc.y) * u.frame.y);
+            float2 uv = ((previousPixel - 1.5) * 0.5 + 0.5) / float2(size);
+            if (all(uv >= 0.0) && all(uv <= 1.0)) {
+                constexpr sampler s(filter::linear, address::clamp_to_edge);
+                float previousBehind = historyDistance.sample(s, uv).x;
+                if (abs(previousBehind - d.x) < 0.05 * d.x) {
+                    float4 h = clamp(history.sample(s, uv), lo, hi);
+                    result = mix(h, c, 0.1);
+                }
+            }
+        }
+    }
+    resolved.write(result, g);
+    resolvedDistance.write(float4(d, 0.0, 0.0), g);
+}
+
+// Composites the resolved half-resolution clouds over a colour `distance` away, at full
+// resolution: a bilinear upsample that favours texels which saw the same distance behind,
+// so clouds don't bleed across the terrain's silhouette.
+float3 compositeClouds(texture2d<float> clouds, texture2d<float> cloudDistance,
+                       float3 color, float2 pixelCentre, float distance) {
+    float2 h = (pixelCentre - 1.5) * 0.5;
+    float2 g0 = floor(h);
+    float2 f = h - g0;
+    int2 size = int2(clouds.get_width(), clouds.get_height());
+    float4 sum = 0.0;
+    float weight = 0.0;
+    float4 closest = 0.0;
+    float closestError = 1e30;
+    for (int k = 0; k < 4; k++) {
+        int2 o = int2(k & 1, k >> 1);
+        uint2 q = uint2(clamp(int2(g0) + o, int2(0), size - 1));
+        float4 s = clouds.read(q);
+        float error = abs(cloudDistance.read(q).x - distance) / max(distance, 1.0);
+        float bilinear = (o.x == 1 ? f.x : 1.0 - f.x) * (o.y == 1 ? f.y : 1.0 - f.y);
+        float w = max(bilinear, 1e-3) * exp(-(error / 0.05) * (error / 0.05));
+        sum += s * w;
+        weight += w;
+        if (error < closestError) { closestError = error; closest = s; }
+    }
+    float4 c = weight > 1e-4 ? sum / weight : closest;
+    return color * c.a + c.rgb;
 }
 
 // Sunlight reaching a terrain point through the cloud layer (cloud shadows), from a

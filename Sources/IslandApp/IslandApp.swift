@@ -39,7 +39,8 @@ struct TerrainView: NSViewRepresentable {
     func makeNSView(context: Context) -> InputMTKView {
         let view = InputMTKView(frame: .zero, device: MTLCreateSystemDefaultDevice())
         view.colorPixelFormat = .bgra8Unorm_srgb
-        view.depthStencilPixelFormat = .depth32Float
+        // The renderer keeps its own depth buffer: the cloud pass reads it.
+        view.depthStencilPixelFormat = .invalid
         view.clearColor = TerrainRenderer.skyClearColor
         view.preferredFramesPerSecond = 120
         context.coordinator.attach(view)
@@ -93,7 +94,7 @@ final class Coordinator: NSObject, MTKViewDelegate {
         height = grid
         let requested: TerrainRenderer.Shadows = Snapshots.option("--shadows") == "horizon" ? .horizonMap : .rayTraced
         renderer = try? TerrainRenderer(device: device, colorFormat: view.colorPixelFormat,
-                                        depthFormat: view.depthStencilPixelFormat, height: grid, seaLevel: 0,
+                                        depthFormat: .depth32Float, height: grid, seaLevel: 0,
                                         shadows: requested, clouds: IslandSource.clouds(for: grid))
         hour = Snapshots.option("--time").flatMap { Double($0) } ?? hour
         day = Snapshots.option("--day").flatMap { Int($0) } ?? day
