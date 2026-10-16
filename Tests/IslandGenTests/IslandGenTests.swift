@@ -87,4 +87,29 @@ final class IslandGenTests: XCTestCase {
         // Flow on a cone runs straight outward and never gathers into a 1 km² channel.
         XCTAssertEqual(m.drainageDensity, 0)
     }
+
+    /// A north–south ridge under an easterly wind: the cloud sits on the windward (east)
+    /// flank and crest, and the lee flank and the open sea upwind stay clear.
+    func testCloudsSitOnWindwardSlopes() {
+        var h = Grid(width: 160, height: 160, cellSize: 200, fill: -100)
+        for y in 0..<160 {
+            for x in 0..<160 {
+                let d = Double(x - 80) * 200
+                h[x, y] = Float(900 * exp(-d * d / (2 * 3000 * 3000)) - 100)
+            }
+        }
+        var p = Clouds.Params()
+        p.windDirection = Double.pi // blowing towards -x, so east is windward
+        let c = Clouds.coverage(height: h, seaLevel: 0, params: p)
+        func at(_ metresEast: Double) -> Float {
+            let x = (16_000 + metresEast) / c.cellSize - 0.5
+            return c.sample(x: x, y: Double(c.height) / 2)
+        }
+        XCTAssertGreaterThan(at(2_000), 0.3, "windward flank should be cloudy")
+        XCTAssertGreaterThan(at(2_000), 3 * at(-4_000), "lee flank should be much clearer")
+        XCTAssertLessThan(at(14_000), 0.01, "open sea upwind should be clear")
+
+        let flat = Clouds.coverage(height: Grid(width: 64, height: 64, cellSize: 200, fill: -50), seaLevel: 0)
+        XCTAssertEqual(flat.range.max, 0)
+    }
 }
