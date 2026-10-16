@@ -8,7 +8,12 @@ import IslandCore
 ///
 ///     dh/dt = U − K · A^m · S^n + G · Qs / Q + Kd · ∇²h
 ///
-/// with n = 1, A the rain-weighted upstream drainage area, S the slope to the receiver.
+/// with A the rain-weighted upstream drainage area and S the slope to the receiver.
+/// n > 1 makes steep reaches erode disproportionately fast, so a step in a river profile
+/// (a waterfall at a landslide scarp) stays sharp and retreats upstream instead of
+/// smoothing out: the knickpoint mechanism behind Hawaiian amphitheater-headed valleys
+/// (Lamb et al. 2007; research/hawaiian-geology.md §4). For n ≠ 1 the implicit update is
+/// solved per cell by Newton's method (Braun & Willett 2013, eq. 23).
 /// The G term is deposition (Yuan et al. 2019, "A new efficient method to solve the
 /// stream power law model taking into account sediment deposition"): sediment settles at
 /// G · p · Qs / Q (p local rain, Qs sediment flux, Q discharge), so small, loaded streams
@@ -17,9 +22,21 @@ import IslandCore
 /// This is the reference CPU implementation; a Metal port comes after it is validated.
 public enum StreamPower {
     public struct Params: Sendable {
-        /// Fluvial erodibility. Units with m = 0.5: m^(1-2m) / yr = 1 / yr.
+        /// Fluvial erodibility, defined at n = 1, m = 0.5 (units 1 / yr with rain-weighted
+        /// area). Other exponents are rescaled so a channel with `referenceDischarge` and
+        /// `referenceSlope` erodes at the same rate whatever m and n are.
         public var erodibility: Double = 5e-6
         public var areaExponent: Double = 0.5
+        /// Slope exponent n. 1 is linear; 1.5–2 keeps knickpoints sharp.
+        public var slopeExponent: Double = 1
+        /// When > 0, incision is K·A^0.5·S·(1 + (S / knickpointSlope)^(n−1)) instead of a
+        /// pure power law: gentle reaches (coastal plains, valley floors) erode as at n = 1,
+        /// and only reaches steeper than this slope get the extra nonlinear boost that keeps
+        /// waterfalls sharp. referenceDischarge/referenceSlope and areaExponent are unused then.
+        public var knickpointSlope: Double = 0
+        /// Rain-weighted drainage area (m³/yr) and slope at which m and n leave the rate unchanged.
+        public var referenceDischarge: Double = 1e7
+        public var referenceSlope: Double = 0.1
         /// Hillslope diffusivity in m² / yr (soil creep).
         public var diffusivity: Double = 0.02
         /// Dimensionless deposition coefficient G (settling velocity over rain rate).
@@ -27,6 +44,28 @@ public enum StreamPower {
         /// average and buried the foot of the pali under a 2–3 km ramp; 0.3 keeps the cliff
         /// and still builds fans and a coastal plain.
         public var deposition: Double = 0.3
+        /// Steepest slope rock walls hold before they fail (rise over run); steeper ground
+        /// collapses back to it each step. Retreating headwalls then widen valley heads into
+        /// bowls instead of narrow slots. 0 disables it.
+        public var criticalSlope: Double = 0
+        /// Waterfall retreat (Lamb et al. 2007): ground standing steeper than `waterfallSlope`
+        /// above a channel cell carrying at least `waterfallMinDischarge` (rain-weighted
+        /// area, m³/yr) retreats horizontally at this rate in m/yr, scaled by
+        /// sqrt(discharge / referenceDischarge). The lip at the head of a waterfall and the
+        /// walls around its plunge pool both retreat, so valley heads cut back and widen into
+        /// bowls between knife-edge ridges. 0.05 with a 3e5 threshold keeps the pali and
+        /// summit; faster rates eat the summit plateau down to beaded crests. 0 disables it.
+        public var waterfallRetreat: Double = 0.05
+        public var waterfallSlope: Double = 0.6
+        /// Headwall retreat by seepage and weathering: every face steeper than
+        /// `waterfallSlope` retreats horizontally at this rate in m/yr, scaled by local rain
+        /// over `referenceRain`, whatever its drainage area. Hawaiian amphitheater heads sit
+        /// at the crest where discharge is tiny, so discharge-driven waterfall retreat
+        /// alone barely reaches them. In practice it lays faces back and rounds ridges
+        /// rather than carving bowls, so it is off by default. 0 disables it.
+        public var headwallRetreat: Double = 0
+        public var referenceRain: Double = 3
+        public var waterfallMinDischarge: Double = 3e5
         /// Uplift (positive) or subsidence (negative) in m / yr, applied to land and sea floor.
         public var uplift: Double = 0
         /// Time step in years.
@@ -183,6 +222,11 @@ public enum StreamPower {
         let beforeIncision = params.deposition > 0 ? h.values : []
         let hardnessValues = hardness?.values
         let areaValues = area.values
+        let slopeN = params.slopeExponent
+        let hybrid = params.knickpointSlope > 0 && slopeN != 1
+        let linear = slopeN == 1 && params.areaExponent == 0.5
+        let areaScale = pow(params.referenceDischarge, 0.5)
+        let slopeScale = pow(params.referenceSlope, 1 - slopeN)
         phase("incision") {
             h.values.withUnsafeMutableBufferPointer { hBuf in
                 let hv = SharedBuffer(hBuf)
@@ -192,10 +236,84 @@ public enum StreamPower {
                         if r == i { continue }
                         var k = params.erodibility
                         if let hardnessValues { k /= Double(hardnessValues[i]) }
-                        let f = Float(k * dt * pow(Double(areaValues[i]), params.areaExponent) / distances[i])
                         // Rivers cut down to sea level at the coast, not to the depth of the sea floor.
                         let base = Swift.max(hv[r], sea)
-                        hv[i] = (hv[i] + f * base) / (1 + f)
+                        if linear {
+                            let f = Float(k * dt * pow(Double(areaValues[i]), params.areaExponent) / distances[i])
+                            hv[i] = (hv[i] + f * base) / (1 + f)
+                        } else {
+                            let h0 = Double(hv[i]), b = Double(base)
+                            guard h0 > b else { continue }
+                            // g(x) = x − h0 + f1 · (x − b) + f · (x − b)^n, with f1 = 0 for the
+                            // pure power law.
+                            let f1: Double, f: Double
+                            if hybrid {
+                                f1 = k * dt * pow(Double(areaValues[i]), 0.5) / distances[i]
+                                f = f1 / pow(params.knickpointSlope * distances[i], slopeN - 1)
+                            } else {
+                                let a = Double(areaValues[i]) / params.referenceDischarge
+                                f1 = 0
+                                f = k * dt * areaScale * pow(Swift.max(a, 0), params.areaExponent)
+                                    * slopeScale / pow(distances[i], slopeN)
+                            }
+                            // Solve g(x) = 0 for x in (b, h0]; g is increasing and convex there,
+                            // so Newton from h0 converges from above.
+                            var x = h0
+                            for _ in 0..<20 {
+                                let d = x - b
+                                let g = x - h0 + f1 * d + f * pow(d, slopeN)
+                                let dg = 1 + f1 + slopeN * f * pow(d, slopeN - 1)
+                                let next = Swift.max(b + 1e-9, x - g / dg)
+                                if abs(next - x) < 1e-4 { x = next; break }
+                                x = next
+                            }
+                            hv[i] = Float(x)
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4a. Waterfall and headwall retreat. A cell standing steeper than waterfallSlope
+        //     above a neighbour retreats horizontally: it is lowered by slope × retreat
+        //     distance (never below that neighbour), which moves the whole face back while
+        //     keeping it steep. Waterfall retreat needs a channel neighbour with enough
+        //     discharge; headwall retreat applies to any steep face, scaled by local rain.
+        //     Every cell reads the pre-pass heights, so rows run in parallel.
+        if params.waterfallRetreat > 0 || params.headwallRetreat > 0 {
+            let minQ = Float(params.waterfallMinDischarge)
+            let sw = params.waterfallSlope
+            let waterfallRate = params.waterfallRetreat * dt / cell
+            let headwallRate = params.headwallRetreat * dt / cell
+            let qRef = params.referenceDischarge
+            let rainValues = rain?.values
+            let rainRef = params.referenceRain
+            phase("waterfalls") {
+                let old = h.values
+                h.values.withUnsafeMutableBufferPointer { hBuf in
+                    let hv = SharedBuffer(hBuf)
+                    Parallel.forRanges(rows - 2) { rowRange in
+                        for y in (rowRange.lowerBound + 1)..<(rowRange.upperBound + 1) {
+                            for x in 1..<(w - 1) {
+                                let i = y * w + x
+                                if old[i] <= sea { continue }
+                                let headwall = headwallRate * Double(rainValues?[i] ?? Float(rainRef)) / rainRef
+                                var drop: Float = 0
+                                for k in 0..<8 {
+                                    let p = (y + D8.dy[k]) * w + (x + D8.dx[k])
+                                    let base = Swift.max(old[p], sea)
+                                    let rise = Double(old[i] - base)
+                                    guard rise > sw * D8.distance[k] * cell else { continue }
+                                    var rate = headwall
+                                    let q = areaValues[p]
+                                    if q >= minQ { rate = Swift.max(rate, waterfallRate * (Double(q) / qRef).squareRoot()) }
+                                    guard rate > 0 else { continue }
+                                    let fraction = Swift.min(1, rate / D8.distance[k])
+                                    drop = Swift.max(drop, Float(rise * fraction))
+                                }
+                                if drop > 0 { hv[i] = old[i] - drop }
+                            }
+                        }
                     }
                 }
             }
@@ -232,6 +350,33 @@ public enum StreamPower {
                                         low[r] = Swift.min(low[r], hv[i])
                                     }
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4c. Threshold hillslopes: land standing more than criticalSlope above any
+        //     neighbour fails down to that angle (shallow landslides on over-steepened
+        //     walls). Reads the old heights only, so rows run in parallel.
+        if params.criticalSlope > 0 {
+            let sc = Float(params.criticalSlope * cell)
+            phase("landslides") {
+                let old = h.values
+                h.values.withUnsafeMutableBufferPointer { hBuf in
+                    let hv = SharedBuffer(hBuf)
+                    Parallel.forRanges(rows - 2) { rowRange in
+                        for y in (rowRange.lowerBound + 1)..<(rowRange.upperBound + 1) {
+                            for x in 1..<(w - 1) {
+                                let i = y * w + x
+                                if old[i] <= sea { continue }
+                                var cap = old[i]
+                                for k in 0..<8 {
+                                    let j = (y + D8.dy[k]) * w + (x + D8.dx[k])
+                                    cap = Swift.min(cap, Swift.max(old[j], sea) + sc * Float(D8.distance[k]))
+                                }
+                                hv[i] = cap
                             }
                         }
                     }

@@ -8,12 +8,19 @@ import IslandGen
 
 func usage() -> Never {
     print("""
-    usage: islandgen [--seed N] [--size N] [--steps N] [--domain METRES] [--deposition G] [--profile] [--out DIR]
+    usage: islandgen [--seed N] [--size N] [--steps N] [--domain METRES] [--deposition G] [--slope-exponent N] [--reference-slope S] [--critical-slope S] [--knickpoint-slope S] [--waterfall-retreat R] [--headwall-retreat R] [--waterfall-min-q Q] [--profile] [--out DIR]
       --seed    random seed (default 1)
       --size    grid samples per side (default 1024)
       --steps   erosion time steps (default 400)
       --domain  domain edge length in metres (default 80000)
       --deposition  sediment deposition coefficient G, 0 for none (default 0.3)
+      --slope-exponent  stream power slope exponent n, area exponent follows as n/2 (default 1)
+      --reference-slope  slope at which n leaves erosion rates unchanged (default 0.1)
+      --critical-slope   steepest stable wall, rise over run; 0 disables (default 0)
+      --knickpoint-slope  with n > 1: erode as n = 1 below this slope, boosted above it (default 0 = pure power law)
+      --waterfall-retreat  headwall retreat in m/yr at the reference discharge; 0 disables (default 0.05)
+      --waterfall-min-q    smallest rain-weighted drainage (m³/yr) that drives waterfall retreat (default 3e5)
+      --headwall-retreat   retreat of every face steeper than 0.6, m/yr at 3 m/yr rain; 0 disables (default 0)
       --profile print time spent in each pipeline phase
       --out     output directory (default ./out)
     """)
@@ -38,6 +45,15 @@ while let flag = args.popFirst() {
     case "--steps": params.steps = parsed(Int(value))
     case "--domain": params.domainSize = parsed(Double(value))
     case "--deposition": params.erosion.deposition = parsed(Double(value))
+    case "--slope-exponent":
+        params.erosion.slopeExponent = parsed(Double(value))
+        params.erosion.areaExponent = params.erosion.slopeExponent / 2
+    case "--reference-slope": params.erosion.referenceSlope = parsed(Double(value))
+    case "--critical-slope": params.erosion.criticalSlope = parsed(Double(value))
+    case "--knickpoint-slope": params.erosion.knickpointSlope = parsed(Double(value))
+    case "--waterfall-retreat": params.erosion.waterfallRetreat = parsed(Double(value))
+    case "--headwall-retreat": params.erosion.headwallRetreat = parsed(Double(value))
+    case "--waterfall-min-q": params.erosion.waterfallMinDischarge = parsed(Double(value))
     case "--out": outDir = value
     default: usage()
     }
@@ -113,6 +129,14 @@ let info: [String: Any] = [
     "domainMetres": params.domainSize,
     "cellMetres": island.height.cellSize,
     "steps": params.steps,
+    "slopeExponent": params.erosion.slopeExponent,
+    "deposition": params.erosion.deposition,
+    "referenceSlope": params.erosion.referenceSlope,
+    "criticalSlope": params.erosion.criticalSlope,
+    "knickpointSlope": params.erosion.knickpointSlope,
+    "waterfallRetreat": params.erosion.waterfallRetreat,
+    "headwallRetreat": params.erosion.headwallRetreat,
+    "waterfallMinDischarge": params.erosion.waterfallMinDischarge,
     "landAreaKm2": (landKm2 * 10).rounded() / 10,
     "maxHeightMetres": Double(island.height.range.max),
     "steepFraction": rounded(Double(steep) / Double(Swift.max(land, 1)), 10000),
