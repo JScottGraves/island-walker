@@ -45,7 +45,7 @@ public struct TerrainLighting: Sendable {
         /// Steepest rise (tan of the horizon angle) along a direction, in grid units: within
         /// `near` metres, and within `range` metres (the same samples, so the near value
         /// is what a march stopping at `near` would give).
-        func horizon(_ gx: Double, _ gy: Double, _ z0: Double, _ dir: (Double, Double),
+        func march(_ gx: Double, _ gy: Double, _ z0: Double, _ dir: (Double, Double),
                      near: Double, range: Double) -> (near: Double, far: Double) {
             var best = 0.0, bestNear = 0.0
             var d = 1.0
@@ -75,15 +75,15 @@ public struct TerrainLighting: Sendable {
                             let z0 = ground(gx, gy) + 2
                             var visible = 0.0
                             for (k, dir) in directions.enumerated() {
-                                let t = horizon(gx, gy, z0, dir, near: skyRange,
-                                                range: horizons ? sunRange : skyRange)
+                                let t = march(gx, gy, z0, dir, near: skyRange,
+                                              range: horizons ? sunRange : skyRange)
                                 visible += 1 / (1 + t.near * t.near) // cos² of the horizon angle
                                 if let out = horizonOut {
                                     out[i * sectors + k] = UInt8((atan(t.far) / (.pi / 2) * 255).rounded())
                                 }
                             }
                             skyOut[i] = Float(visible / Double(sectors))
-                            let t = horizon(gx, gy, z0, sunDir, near: sunRange, range: sunRange).far
+                            let t = march(gx, gy, z0, sunDir, near: sunRange, range: sunRange).far
                             // Soft edge over about a degree: the sun's disc plus some blur.
                             let margin = sunElevation - atan(t)
                             let v = Swift.min(1, Swift.max(0, (margin + 0.01) / 0.02))
