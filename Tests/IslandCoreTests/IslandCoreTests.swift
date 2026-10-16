@@ -2,6 +2,28 @@ import XCTest
 @testable import IslandCore
 
 final class IslandCoreTests: XCTestCase {
+    func testBundleRoundTripsTilesAndMips() throws {
+        // 300² is not a multiple of the 128 tile, so edge tiles are padded.
+        var g = Grid(width: 300, height: 300, cellSize: 10)
+        for y in 0..<300 { for x in 0..<300 { g[x, y] = Float(x) * 2 - Float(y) + 0.37 } }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("bundle-test-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let bundle = try IslandBundle.write([("height", g)], seaLevel: 0, to: url, tileSize: 128)
+        let c = try bundle.channel("height")
+        XCTAssertEqual(c.levels, 3, "300 → 150 → 75")
+        let back = try bundle.grid("height")
+        XCTAssertEqual(back.width, 300)
+        XCTAssertEqual(back.cellSize, 10)
+        for i in stride(from: 0, to: g.count, by: 97) {
+            XCTAssertEqual(back.values[i], g.values[i], accuracy: Float(c.scale), "quantised to one step")
+        }
+        let mip = try bundle.grid("height", level: 1)
+        XCTAssertEqual(mip.width, 150)
+        XCTAssertEqual(mip.cellSize, 20)
+        XCTAssertEqual(mip[10, 20], 0.25 * (g[20, 40] + g[21, 40] + g[20, 41] + g[21, 41]), accuracy: Float(c.scale))
+        XCTAssertThrowsError(try bundle.grid("rain"))
+    }
+
     func testSplitMixIsDeterministic() {
         var a = SplitMix64(seed: 42), b = SplitMix64(seed: 42)
         for _ in 0..<1000 { XCTAssertEqual(a.next(), b.next()) }
