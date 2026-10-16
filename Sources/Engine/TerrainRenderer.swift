@@ -572,7 +572,7 @@ public final class TerrainRenderer {
             surfaceDesc.usage = [.renderTarget, .shaderRead]
             surfaceDesc.storageMode = .private
             let sunDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r8Unorm, width: width, height: height, mipmapped: false)
-            sunDesc.usage = [.shaderRead, .shaderWrite]
+            sunDesc.usage = [.shaderRead, .shaderWrite]  // read_write in sunShadow's second pass
             sunDesc.storageMode = .private
             surface = device.makeTexture(descriptor: surfaceDesc)
             sun = device.makeTexture(descriptor: sunDesc)
@@ -765,6 +765,12 @@ public final class TerrainRenderer {
             rays.setBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 0)
             rays.setAccelerationStructure(terrainAccel, bufferIndex: 1)
             rays.setTextures([surface, targets.depth, horizons, cloudShadows, sun], range: 0..<5)
+            // One pixel per 2×2 block first, then the rest where those disagree.
+            var pass: UInt32 = 0
+            rays.setBytes(&pass, length: 4, index: 2)
+            rays.dispatchThreads(MTLSize(width: (width + 1) / 2, height: (height + 1) / 2, depth: 1), threadsPerThreadgroup: group)
+            pass = 1
+            rays.setBytes(&pass, length: 4, index: 2)
             rays.dispatchThreads(MTLSize(width: width, height: height, depth: 1), threadsPerThreadgroup: group)
             rays.endEncoding()
         }
