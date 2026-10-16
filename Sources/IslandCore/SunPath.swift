@@ -71,7 +71,9 @@ public enum SunPath {
     public static func light(direction d: (x: Double, y: Double, z: Double)) -> SunLight {
         // The disc sinks below the horizon over about half a degree.
         let disc = Look.smoothstep(-0.006, 0.006, d.z)
-        let sun = Atmosphere.sunIrradiance(sinElevation: Swift.max(d.z, 0.004)) * (scale * disc)
+        let sunScale: Double = scale * disc
+        let t: RGB = Atmosphere.sunIrradiance(sinElevation: Swift.max(d.z, 0.004))
+        let sun = RGB(t.r * sunScale, t.g * sunScale, t.b * sunScale)
         // The shader lights terrain with albedo · E rather than albedo · E / π (the π is in
         // `scale`), so radiance seen directly takes the π back.
         let radiance = Atmosphere.skyView(sun: d).map { $0 * (scale * Double.pi) }
