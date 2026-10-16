@@ -1,0 +1,1267 @@
+<title>Island Walker Architecture</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<meta name="description" content="How the island generator, the island bundle and the Metal walking app fit together, as of main on 2026-10-16.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: a survey-sheet reference. Sticky contents rail on wide screens, one reading column, figures break wider. */
+:root {
+  --paper: #f2f4f1;        /* chart paper, faint sea-green bias */
+  --sheet: #fbfcfa;        /* figure and table ground */
+  --ink: #17211f;          /* basalt ink */
+  --ink-soft: #4b5754;
+  --rule: #cfd6d2;
+  --sea: #0f6a72;          /* accent: lagoon teal */
+  --sea-soft: #d6e9e8;
+  --soil: #a9502c;         /* laterite: secondary marks */
+  --soil-soft: #f2dfd5;
+  --leaf: #3f6b34;
+  --leaf-soft: #dde8d6;
+  --sky: #3d6aa8;
+  --sky-soft: #dce5f2;
+  --cloud: #8a8f95;
+  --ok: #2f6f3a; --part: #9a6a12; --todo: #8a3a3a;
+  --font-display: "Bricolage Grotesque", "Avenir Next", "Segoe UI", sans-serif;
+  --font-body: "IBM Plex Sans", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+  --step--1: 0.84rem; --step-0: 1rem; --step-1: 1.2rem; --step-2: 1.5rem; --step-3: 2.1rem; --step-4: 2.9rem;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #121816; --sheet: #182120; --ink: #e3ebe7; --ink-soft: #a3b1ac; --rule: #2f3b38;
+    --sea: #5cc3c6; --sea-soft: #173a3b; --soil: #e48a63; --soil-soft: #3a241b;
+    --leaf: #8dc27c; --leaf-soft: #1f3020; --sky: #8fb0e6; --sky-soft: #1d2a3e; --cloud: #a7adb3;
+    --ok: #7fcc8a; --part: #e0b45a; --todo: #e48d8d;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #121816; --sheet: #182120; --ink: #e3ebe7; --ink-soft: #a3b1ac; --rule: #2f3b38;
+  --sea: #5cc3c6; --sea-soft: #173a3b; --soil: #e48a63; --soil-soft: #3a241b;
+  --leaf: #8dc27c; --leaf-soft: #1f3020; --sky: #8fb0e6; --sky-soft: #1d2a3e; --cloud: #a7adb3;
+  --ok: #7fcc8a; --part: #e0b45a; --todo: #e48d8d;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+body {
+  background: var(--paper); color: var(--ink);
+  font-family: var(--font-body); font-size: 16px; line-height: 1.6;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 0 4rem;
+}
+a { color: var(--sea); text-underline-offset: 2px; }
+a:focus-visible, button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px solid var(--sea); outline-offset: 2px; }
+code, kbd, .mono { font-family: var(--font-mono); font-size: 0.88em; }
+code { background: var(--sea-soft); padding: 0.05em 0.3em; border-radius: 3px; }
+pre { font-family: var(--font-mono); font-size: 0.84rem; line-height: 1.5; background: var(--sheet); border: 1px solid var(--rule); padding: 0.9rem 1rem; overflow-x: auto; border-radius: 4px; margin: 0; }
+pre code { background: none; padding: 0; }
+h1, h2, h3 { font-family: var(--font-display); text-wrap: balance; line-height: 1.15; margin: 0; }
+h1 { font-size: var(--step-4); font-weight: 700; letter-spacing: -0.02em; }
+h2 { font-size: var(--step-3); font-weight: 700; letter-spacing: -0.01em; }
+h3 { font-size: var(--step-1); font-weight: 700; }
+p { margin: 0; }
+.shell { max-width: 1180px; margin: 0 auto; display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 3rem; }
+@media (max-width: 900px) { .shell { grid-template-columns: minmax(0, 1fr); gap: 0; } nav.toc { display: none; } }
+nav.toc { position: sticky; top: env(safe-area-inset-top, 0px); align-self: start; padding-block: 2rem; max-height: 100vh; overflow-y: auto; font-size: var(--step--1); }
+nav.toc ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.15rem; }
+nav.toc li ol { padding-left: 0.9rem; margin-block: 0.15rem 0.4rem; }
+nav.toc a { color: var(--ink-soft); text-decoration: none; display: block; padding: 0.1rem 0; }
+nav.toc a:hover { color: var(--sea); }
+nav.toc .toc-head { font-family: var(--font-mono); text-transform: uppercase; letter-spacing: 0.08em; font-size: 0.72rem; color: var(--ink-soft); margin-bottom: 0.6rem; }
+main { min-width: 0; display: grid; gap: 4.5rem; padding-top: 2.5rem; }
+section { display: grid; gap: 1.1rem; min-width: 0; scroll-margin-top: 1rem; }
+section > p, section > ul, section > ol, .prose { max-width: 68ch; }
+.prose { display: grid; gap: 0.8rem; }
+.sub { display: grid; gap: 0.9rem; padding-top: 1.4rem; border-top: 1px solid var(--rule); min-width: 0; scroll-margin-top: 1rem; }
+.eyebrow { font-family: var(--font-mono); font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--sea); }
+.lede { font-size: var(--step-1); line-height: 1.5; max-width: 60ch; color: var(--ink); }
+.meta { font-family: var(--font-mono); font-size: 0.78rem; color: var(--ink-soft); display: flex; flex-wrap: wrap; gap: 0.4rem 1.4rem; }
+header.top { display: grid; gap: 1.2rem; padding-bottom: 1rem; border-bottom: 2px solid var(--ink); }
+ul, ol { margin: 0; padding-left: 1.3rem; display: grid; gap: 0.35rem; }
+
+/* Facts strip: survey key */
+.facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); border: 1px solid var(--rule); background: var(--sheet); }
+.facts div { padding: 0.75rem 0.9rem; border-right: 1px solid var(--rule); border-bottom: 1px solid var(--rule); display: grid; gap: 0.1rem; }
+.facts b { font-family: var(--font-display); font-size: var(--step-2); font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.1; }
+.facts span { font-size: var(--step--1); color: var(--ink-soft); }
+
+/* Ways-of-explaining tabs: plain words / mechanism / code */
+.ways { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1rem; }
+.way { display: grid; gap: 0.4rem; align-content: start; padding: 0.9rem 1rem; background: var(--sheet); border-top: 3px solid var(--rule); min-width: 0; }
+.way h4 { margin: 0; font-family: var(--font-mono); font-size: 0.72rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-soft); font-weight: 500; }
+.way.plain { border-top-color: var(--leaf); }
+.way.mech { border-top-color: var(--sea); }
+.way.code { border-top-color: var(--soil); }
+.way p, .way li { font-size: 0.94rem; }
+
+figure { margin: 0; display: grid; gap: 0.5rem; min-width: 0; }
+figure .canvas { background: var(--sheet); border: 1px solid var(--rule); padding: 0.75rem; overflow-x: auto; border-radius: 4px; }
+figure img { display: block; width: 100%; height: auto; border: 1px solid var(--rule); border-radius: 4px; }
+figcaption { font-size: var(--step--1); color: var(--ink-soft); max-width: 75ch; }
+figcaption b { color: var(--ink); font-weight: 600; }
+.fig-n { font-family: var(--font-mono); color: var(--sea); margin-right: 0.35rem; }
+svg { display: block; max-width: none; }
+svg text { font-family: var(--font-body); fill: var(--ink); }
+svg .mono { font-family: var(--font-mono); }
+svg .soft { fill: var(--ink-soft); }
+.two { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1.2rem; }
+
+.eq { font-family: var(--font-mono); font-size: 0.95rem; background: var(--sheet); border-left: 3px solid var(--sea); padding: 0.7rem 1rem; overflow-x: auto; white-space: nowrap; }
+.callout { padding: 0.8rem 1rem; background: var(--soil-soft); border-radius: 4px; max-width: 68ch; font-size: 0.95rem; }
+.callout b { color: var(--soil); }
+
+.tablewrap { overflow-x: auto; border: 1px solid var(--rule); border-radius: 4px; background: var(--sheet); }
+table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
+th, td { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--rule); vertical-align: top; }
+th { font-family: var(--font-mono); font-weight: 500; font-size: 0.74rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-soft); background: var(--paper); }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+tr:last-child td { border-bottom: 0; }
+.pill { display: inline-block; font-family: var(--font-mono); font-size: 0.72rem; padding: 0.05rem 0.45rem; border-radius: 99px; border: 1px solid currentColor; white-space: nowrap; }
+.pill.ok { color: var(--ok); } .pill.part { color: var(--part); } .pill.todo { color: var(--todo); }
+
+/* Ordered process rail (used only where order is real) */
+.rail { list-style: none; padding: 0; margin: 0; display: grid; gap: 0; counter-reset: s; max-width: 74ch; }
+.rail > li { counter-increment: s; display: grid; grid-template-columns: 2.4rem minmax(0, 1fr); gap: 0.8rem; padding: 0.75rem 0; border-bottom: 1px dashed var(--rule); }
+.rail > li::before { content: counter(s); font-family: var(--font-display); font-weight: 700; font-size: 1.3rem; color: var(--sea); line-height: 1.2; }
+.rail > li > div { display: block; min-width: 0; }
+.rail b { font-weight: 600; }
+.rail .why { display: block; margin-top: 0.25rem; font-size: 0.9rem; color: var(--ink-soft); }
+
+/* Widgets */
+.widget { display: grid; gap: 0.8rem; background: var(--sheet); border: 1px solid var(--rule); border-radius: 4px; padding: 1rem; min-width: 0; }
+.controls { display: flex; flex-wrap: wrap; gap: 0.6rem 1.4rem; align-items: center; font-size: 0.88rem; }
+.controls label { display: flex; align-items: center; gap: 0.5rem; }
+.controls output { font-family: var(--font-mono); font-variant-numeric: tabular-nums; min-width: 3.5em; color: var(--sea); }
+input[type=range] { accent-color: var(--sea); width: 150px; max-width: 40vw; }
+.readout { display: flex; flex-wrap: wrap; gap: 0.3rem 1.4rem; font-family: var(--font-mono); font-size: 0.82rem; color: var(--ink-soft); }
+.readout b { color: var(--ink); font-weight: 500; }
+
+details { background: var(--sheet); border: 1px solid var(--rule); border-radius: 4px; padding: 0.6rem 0.9rem; max-width: 80ch; }
+details summary { cursor: pointer; font-weight: 600; }
+details[open] summary { margin-bottom: 0.6rem; }
+dl.gloss { display: grid; grid-template-columns: minmax(8rem, 13rem) minmax(0, 1fr); gap: 0.5rem 1.2rem; margin: 0; max-width: 80ch; }
+dl.gloss dt { font-weight: 600; }
+dl.gloss dd { margin: 0; color: var(--ink-soft); }
+@media (max-width: 560px) { dl.gloss { grid-template-columns: minmax(0, 1fr); gap: 0.1rem; } dl.gloss dd { margin-bottom: 0.6rem; } }
+footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--rule); font-size: var(--step--1); color: var(--ink-soft); }
+</style>
+
+<div class="shell">
+<nav class="toc" aria-label="Contents">
+  <div class="toc-head">Contents</div>
+  <ol>
+    <li><a href="#overview">1 · The big picture</a></li>
+    <li><a href="#modules">2 · Code map</a></li>
+    <li><a href="#generate">3 · Baking an island</a>
+      <ol>
+        <li><a href="#shields">Shield volcanoes</a></li>
+        <li><a href="#collapse">Flank collapse</a></li>
+        <li><a href="#rain">Rainfall</a></li>
+        <li><a href="#erosion">Erosion loop</a></li>
+        <li><a href="#finish">Flexure and fill</a></li>
+        <li><a href="#cloudbake">Cloud map</a></li>
+        <li><a href="#refine">10 m refinement</a></li>
+        <li><a href="#outputs">Outputs</a></li>
+      </ol>
+    </li>
+    <li><a href="#bundle">4 · Island bundle</a></li>
+    <li><a href="#runtime">5 · The walking app</a>
+      <ol>
+        <li><a href="#frame">One frame</a></li>
+        <li><a href="#streaming">Streaming</a></li>
+        <li><a href="#lod">CDLOD terrain</a></li>
+        <li><a href="#light">Sun, sky, shading</a></li>
+        <li><a href="#shadows">Shadows</a></li>
+        <li><a href="#clouds">Clouds</a></li>
+        <li><a href="#walker">Walker</a></li>
+      </ol>
+    </li>
+    <li><a href="#realism">6 · Measuring realism</a></li>
+    <li><a href="#quality">7 · Determinism and CI</a></li>
+    <li><a href="#status">8 · Status vs the plan</a></li>
+    <li><a href="#history">9 · How we got here</a></li>
+    <li><a href="#glossary">10 · Glossary</a></li>
+  </ol>
+</nav>
+
+<main>
+<header class="top">
+  <div class="eyebrow">Island Walker · architecture explainer</div>
+  <h1>How the island walker works</h1>
+  <p class="lede">A seed goes into a geology simulator that runs offline for about twenty seconds. What comes out is a tiled map of one volcanic island. A Metal app streams that map in around you as you walk, and lights it with a moving sun, a physical sky and trade-wind clouds.</p>
+  <div class="meta"><span>Repo: JScottGraves/island-walker</span><span>Written against main @ 47ee68b (PR #20)</span><span>2026-10-16</span><span>Swift + Metal · macOS 14 · Apple Silicon</span></div>
+  <div class="facts" role="list">
+    <div role="listitem"><b>80 km</b><span>square domain, island in the middle</span></div>
+    <div role="listitem"><b>78 m</b><span>erosion grid (1024²)</span></div>
+    <div role="listitem"><b>~10 m</b><span>refined grid (8192²)</span></div>
+    <div role="listitem"><b>800 kyr</b><span>simulated erosion: 400 steps × 2,000 yr</span></div>
+    <div role="listitem"><b>17–19 s</b><span>erosion bake on Scott's M3</span></div>
+    <div role="listitem"><b>6,600</b><span>lines of Swift and Metal</span></div>
+  </div>
+</header>
+
+<!-- ============================================================ 1 -->
+<section id="overview">
+  <div class="eyebrow">1</div>
+  <h2>The big picture</h2>
+  <div class="ways">
+    <div class="way plain"><h4>In plain words</h4><p>There are two programs. <code>islandgen</code> plays out geology: it builds volcanoes, rains on them and lets rivers carve them for 800,000 years. <code>IslandApp</code> is the game: it puts you on the result and draws what a walker would see.</p></div>
+    <div class="way mech"><h4>Why split it</h4><p>Realism lives at the scale of whole drainage basins, which takes seconds to minutes to simulate. A frame takes 16 ms. So the slow, global work is baked once, and the app only reads it. They meet in one file format, the <a href="#bundle">island bundle</a>.</p></div>
+    <div class="way code"><h4>In the code</h4><p><code>Sources/IslandGen</code> + <code>Sources/IslandGenCLI</code> bake. <code>Sources/Engine</code> + <code>Sources/IslandApp</code> + <code>Sources/Walker</code> run. <code>Sources/IslandCore</code> is shared by both: grids, RNG, the bundle, lighting maths.</p></div>
+  </div>
+
+  <figure>
+    <div class="canvas">
+      <svg viewBox="0 0 900 330" width="900" height="330" role="img" aria-label="System overview: seed into islandgen, which writes PNG previews, info.json and an island bundle; the bundle feeds IslandApp, which streams tiles and renders frames.">
+        <defs>
+          <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill: var(--ink-soft)"/></marker>
+        </defs>
+        <!-- offline band -->
+        <rect x="10" y="10" width="420" height="310" rx="6" style="fill: var(--leaf-soft)"/>
+        <text x="24" y="34" class="mono" font-size="12" style="fill: var(--leaf)">OFFLINE · seconds · CPU, all cores</text>
+        <rect x="470" y="10" width="420" height="310" rx="6" style="fill: var(--sky-soft)"/>
+        <text x="484" y="34" class="mono" font-size="12" style="fill: var(--sky)">RUNTIME · every frame · Metal GPU</text>
+
+        <rect x="30" y="60" width="110" height="46" rx="4" style="fill: var(--sheet); stroke: var(--ink-soft)"/>
+        <text x="85" y="80" text-anchor="middle" font-size="14" font-weight="600">seed + flags</text>
+        <text x="85" y="97" text-anchor="middle" font-size="11" class="mono soft">--seed 42</text>
+
+        <rect x="180" y="50" width="230" height="140" rx="4" style="fill: var(--sheet); stroke: var(--leaf); stroke-width: 2"/>
+        <text x="295" y="74" text-anchor="middle" font-size="15" font-weight="700">islandgen</text>
+        <text x="196" y="98" font-size="12">1 volcanoes + hardness</text>
+        <text x="196" y="116" font-size="12">2 flank collapse (pali)</text>
+        <text x="196" y="134" font-size="12">3 rain ⇄ 4 erosion × 400</text>
+        <text x="196" y="152" font-size="12">5 flexure, cloud map, lighting</text>
+        <text x="196" y="170" font-size="12">6 refine to 10 m (optional)</text>
+        <line x1="140" y1="83" x2="178" y2="83" stroke="var(--ink-soft)" stroke-width="1.5" marker-end="url(#ar)"/>
+
+        <rect x="30" y="220" width="170" height="80" rx="4" style="fill: var(--sheet); stroke: var(--ink-soft); stroke-dasharray: 4 3"/>
+        <text x="115" y="242" text-anchor="middle" font-size="13" font-weight="600">previews for people</text>
+        <text x="115" y="260" text-anchor="middle" font-size="9.5" class="mono soft">hillshade · flow · rain</text>
+        <text x="115" y="276" text-anchor="middle" font-size="9.5" class="mono soft">view-*.png · info.json</text>
+        <text x="115" y="292" text-anchor="middle" font-size="9.5" class="mono soft">height.r32 · scarp.json</text>
+        <line x1="240" y1="190" x2="150" y2="218" stroke="var(--ink-soft)" stroke-width="1.5" marker-end="url(#ar)"/>
+
+        <rect x="250" y="220" width="160" height="80" rx="4" style="fill: var(--sheet); stroke: var(--soil); stroke-width: 2"/>
+        <text x="330" y="244" text-anchor="middle" font-size="14" font-weight="700">island bundle</text>
+        <text x="330" y="262" text-anchor="middle" font-size="9.5" class="mono soft">manifest.json</text>
+        <text x="330" y="278" text-anchor="middle" font-size="9.5" class="mono soft">height/ rain/ drainage/</text>
+        <text x="330" y="293" text-anchor="middle" font-size="9.5" class="mono soft">hardness/ clouds-trades/</text>
+        <line x1="320" y1="190" x2="330" y2="218" stroke="var(--ink-soft)" stroke-width="1.5" marker-end="url(#ar)"/>
+
+
+        <line x1="410" y1="260" x2="488" y2="260" stroke="var(--soil)" stroke-width="2" marker-end="url(#ar)"/>
+        <text x="449" y="252" text-anchor="middle" font-size="10" class="mono soft">disk</text>
+
+        <rect x="490" y="215" width="170" height="90" rx="4" style="fill: var(--sheet); stroke: var(--sky); stroke-width: 2"/>
+        <text x="575" y="238" text-anchor="middle" font-size="14" font-weight="700">TerrainStreamer</text>
+        <text x="575" y="256" text-anchor="middle" font-size="11" class="soft">loads 256² tiles near</text>
+        <text x="575" y="271" text-anchor="middle" font-size="11" class="soft">the camera on a</text>
+        <text x="575" y="286" text-anchor="middle" font-size="11" class="soft">background queue</text>
+
+        <rect x="490" y="55" width="380" height="135" rx="4" style="fill: var(--sheet); stroke: var(--sky); stroke-width: 2"/>
+        <text x="680" y="78" text-anchor="middle" font-size="15" font-weight="700">TerrainRenderer (per frame)</text>
+        <text x="506" y="102" font-size="12">CDLOD quadtree picks nodes → GPU reads heights from tiles</text>
+        <text x="506" y="121" font-size="12">depth prepass → clouds (compute) → sky + terrain shading</text>
+        <text x="506" y="140" font-size="12">sun from SunPath · sky from Atmosphere (Hillaire)</text>
+        <text x="506" y="159" font-size="12">shadows: horizon map, ray traced only where in doubt</text>
+        <text x="506" y="178" font-size="12">clouds: baked coverage + drifting noise, 2.5D march</text>
+        <line x1="575" y1="215" x2="575" y2="192" stroke="var(--ink-soft)" stroke-width="1.5" marker-end="url(#ar)"/>
+
+        <rect x="700" y="215" width="170" height="90" rx="4" style="fill: var(--sheet); stroke: var(--ink-soft)"/>
+        <text x="785" y="238" text-anchor="middle" font-size="14" font-weight="700">Walker + input</text>
+        <text x="785" y="256" text-anchor="middle" font-size="11" class="soft">WASD, drag to look, F fly</text>
+        <text x="785" y="271" text-anchor="middle" font-size="11" class="soft">[ ] time · T run time</text>
+        <text x="785" y="286" text-anchor="middle" font-size="11" class="soft">ground from level-0 tiles</text>
+        <line x1="785" y1="215" x2="785" y2="192" stroke="var(--ink-soft)" stroke-width="1.5" marker-end="url(#ar)"/>
+      </svg>
+    </div>
+    <figcaption><span class="fig-n">Fig 1</span><b>Two programs joined by one format.</b> Green is the offline bake, blue is the app. The app can also open a plain <code>height.r32</code> (it wraps it in the same tile interface) or bake a quick 512² island itself if given nothing.</figcaption>
+  </figure>
+
+  <figure>
+    <img src="img/hillshade-vs-oahu.jpg" alt="Three hillshades side by side: an older generated seed-42 island, the current seed-42 island with flatter lowlands, and the real Oahu DEM in grey." width="2304" height="768">
+    <figcaption><span class="fig-n">Fig 2</span><b>What the bake produces, next to the target.</b> Seed 42 before and after the lowland work (PRs #11–#13), and the real Oʻahu USGS DEM on the right. Oʻahu's two narrow ranges on wide flat ground are still the main gap; see <a href="#realism">§6</a>.</figcaption>
+  </figure>
+
+  <div class="prose">
+    <h3>Coordinate conventions used everywhere</h3>
+    <ul>
+      <li>World units are metres. <b>x is east, y is north, z is up.</b> The domain runs from (0, 0) at the south-west corner to (80,000, 80,000).</li>
+      <li>Grids are row-major with <b>row 0 at the south</b>, and sample <i>k</i> sits at the centre of cell <i>k</i>. Preview PNGs flip this so north is at the top.</li>
+      <li>Sea level is 0 m. The sea floor starts at about −1,800 m.</li>
+      <li>Wind direction is the way the wind blows <i>towards</i>, in radians: the default 5π/4 means a trade wind <b>from the north-east</b>.</li>
+      <li>The walker's heading is 0 = north, clockwise, unlike the maths angle above.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ============================================================ 2 -->
+<section id="modules">
+  <div class="eyebrow">2</div>
+  <h2>Code map</h2>
+  <p>One Swift package, six targets and two test targets. Arrows mean "imports". Nothing in the runtime imports the generator except the app, which uses it for quick in-app bakes, viewpoint picking and the cloud bake fallback.</p>
+  <figure>
+    <div class="canvas">
+      <svg viewBox="0 0 760 250" width="760" height="250" role="img" aria-label="Module dependency graph">
+        <defs><marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" style="fill: var(--ink-soft)"/></marker></defs>
+        <g font-size="13">
+          <rect x="300" y="195" width="160" height="40" rx="4" style="fill: var(--sea-soft); stroke: var(--sea)"/><text x="380" y="220" text-anchor="middle" font-weight="700">IslandCore</text>
+          <rect x="40" y="105" width="150" height="40" rx="4" style="fill: var(--leaf-soft); stroke: var(--leaf)"/><text x="115" y="130" text-anchor="middle" font-weight="700">IslandGen</text>
+          <rect x="40" y="15" width="150" height="40" rx="4" style="fill: var(--leaf-soft); stroke: var(--leaf)"/><text x="115" y="34" text-anchor="middle" font-weight="700">IslandGenCLI</text><text x="115" y="49" text-anchor="middle" font-size="11" class="mono soft">→ islandgen</text>
+          <rect x="420" y="105" width="130" height="40" rx="4" style="fill: var(--sky-soft); stroke: var(--sky)"/><text x="485" y="130" text-anchor="middle" font-weight="700">Engine</text>
+          <rect x="590" y="105" width="130" height="40" rx="4" style="fill: var(--sky-soft); stroke: var(--sky)"/><text x="655" y="130" text-anchor="middle" font-weight="700">Walker</text>
+          <rect x="420" y="15" width="150" height="40" rx="4" style="fill: var(--sky-soft); stroke: var(--sky)"/><text x="495" y="40" text-anchor="middle" font-weight="700">IslandApp</text>
+        </g>
+        <g stroke="var(--ink-soft)" stroke-width="1.4" fill="none" marker-end="url(#ar2)">
+          <line x1="115" y1="55" x2="115" y2="103"/>
+          <path d="M150 55 C 250 120, 300 160, 340 193"/>
+          <line x1="150" y1="145" x2="310" y2="195"/>
+          <line x1="485" y1="145" x2="420" y2="193"/>
+          <line x1="640" y1="145" x2="455" y2="198"/>
+          <line x1="485" y1="55" x2="485" y2="103"/>
+          <path d="M560 55 C 620 70, 650 85, 655 103"/>
+          <path d="M420 35 C 300 35, 230 80, 192 115"/>
+          <path d="M430 55 C 400 110, 390 150, 385 193"/>
+        </g>
+      </svg>
+    </div>
+    <figcaption><span class="fig-n">Fig 3</span><b>Module graph.</b> Teal is shared, green bakes, blue runs. IslandCore has no Metal in it, so the bake and tests also run on Linux; Engine and IslandApp compile only on macOS.</figcaption>
+  </figure>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>File</th><th class="num">Lines</th><th>What it holds</th><th>Owned by</th></tr></thead>
+      <tbody>
+        <tr><td colspan="4"><b>IslandCore</b> · shared</td></tr>
+        <tr><td><code>Grid.swift</code></td><td class="num">89</td><td>2D Float grid, bilinear and Catmull-Rom sampling, the D8 neighbour table</td><td>both</td></tr>
+        <tr><td><code>Random.swift</code></td><td class="num">77</td><td>SplitMix64, stateless hash, value noise and fBm. Every random choice derives from the seed.</td><td>both</td></tr>
+        <tr><td><code>Parallel.swift</code></td><td class="num">56</td><td>Chunked <code>concurrentPerform</code>, <code>SharedBuffer</code>, <code>PhaseTimer</code> for <code>--profile</code></td><td>both</td></tr>
+        <tr><td><code>IslandBundle.swift</code></td><td class="num">202</td><td>The bundle format: write, read tiles, mip pyramid, manifest</td><td>terrain</td></tr>
+        <tr><td><code>TerrainTiles.swift</code></td><td class="num">156</td><td><code>TerrainTiles</code> protocol, <code>BundleTerrain</code>, <code>GridTerrain</code>, CPU <code>TerrainHeights</code> for the walker</td><td>lighting</td></tr>
+        <tr><td><code>TerrainQuadtree.swift</code></td><td class="num">143</td><td>CDLOD node selection with distance rings and min/max bounds</td><td>lighting</td></tr>
+        <tr><td><code>TerrainLighting.swift</code></td><td class="num">110</td><td>Baked sky visibility, sun visibility and the 16-sector horizon map</td><td>lighting</td></tr>
+        <tr><td><code>Atmosphere.swift</code></td><td class="num">324</td><td>Hillaire 2020 sky on the CPU: transmittance and multi-scattering LUTs, sky-view LUT, SH irradiance</td><td>lighting</td></tr>
+        <tr><td><code>SunPath.swift</code></td><td class="num">92</td><td>Sun direction at 21.4° N by hour and day, exposure adaptation, <code>SunLight</code></td><td>lighting</td></tr>
+        <tr><td><code>Look.swift</code></td><td class="num">229</td><td>Albedos, haze, tone mapper, shared as Swift and as generated Metal source</td><td>lighting</td></tr>
+        <tr><td colspan="4"><b>IslandGen</b> · bake</td></tr>
+        <tr><td><code>Island.swift</code></td><td class="num">170</td><td>The pipeline: <code>Island.generate</code>, flexure, saddle ponding</td><td>terrain</td></tr>
+        <tr><td><code>VolcanicBase.swift</code></td><td class="num">221</td><td>Shield volcanoes, rift zones, rock hardness</td><td>terrain</td></tr>
+        <tr><td><code>FlankCollapse.swift</code></td><td class="num">214</td><td>Giant landslide that leaves the pali headscarp</td><td>terrain</td></tr>
+        <tr><td><code>Climate.swift</code></td><td class="num">98</td><td>Annual rain: upslope gain × rain shadow</td><td>terrain</td></tr>
+        <tr><td><code>PriorityFlood.swift</code></td><td class="num">105</td><td>Pit filling (Barnes 2014) with a packed UInt64 heap</td><td>terrain</td></tr>
+        <tr><td><code>StreamPower.swift</code></td><td class="num">454</td><td>One erosion step: routing, stack, area, incision, waterfalls, deposition, waves, diffusion</td><td>terrain</td></tr>
+        <tr><td><code>Refine.swift</code></td><td class="num">88</td><td>Upsample to ~10 m with a slope-scaled residual</td><td>terrain</td></tr>
+        <tr><td><code>Clouds.swift</code></td><td class="num">152</td><td>Standing orographic cloud coverage map</td><td>clouds</td></tr>
+        <tr><td><code>Realism.swift</code></td><td class="num">135</td><td>Hypsometry, slopes, drainage density, Hack's law, pits</td><td>terrain</td></tr>
+        <tr><td><code>GroundView.swift</code></td><td class="num">299</td><td>CPU first-person renders and automatic viewpoints</td><td>both</td></tr>
+        <tr><td><code>Preview.swift</code>, <code>PNG.swift</code></td><td class="num">187</td><td>Hillshade, flow and grey previews; a dependency-free PNG encoder</td><td>both</td></tr>
+        <tr><td colspan="4"><b>Engine</b>, <b>Walker</b>, <b>IslandApp</b> · runtime</td></tr>
+        <tr><td><code>TerrainRenderer.swift</code></td><td class="num">701</td><td>Pipelines, targets, per-frame encoding, snapshots, the shadow acceleration structure</td><td>lighting</td></tr>
+        <tr><td><code>TerrainShaders.swift</code></td><td class="num">357</td><td>Metal source: CDLOD vertex shader, terrain and sky fragments, shadows</td><td>lighting</td></tr>
+        <tr><td><code>CloudShaders.swift</code></td><td class="num">397</td><td>Metal source: cloud density, march, resolve, composite, shadow map</td><td>lighting</td></tr>
+        <tr><td><code>TerrainStreamer.swift</code></td><td class="num">173</td><td>GPU tile cache and page table</td><td>lighting</td></tr>
+        <tr><td><code>Walker.swift</code></td><td class="num">43</td><td>First-person walking with a slope limit</td><td>lighting</td></tr>
+        <tr><td><code>IslandApp.swift</code>, <code>IslandSource.swift</code>, <code>Snapshots.swift</code></td><td class="num">375</td><td>Window and input, choosing the island source, headless <code>--snapshot</code> renders</td><td>lighting</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>"Owned by" names the project thread that changes the file: <b>terrain</b> is "Terrain-first architecture plan", <b>lighting</b> is "Sun lighting implementation", <b>clouds</b> was the cloud bake thread. The Metal shaders live as Swift strings so <code>swift build</code> needs no Xcode Metal toolchain step.</p>
+</section>
+
+<!-- ============================================================ 3 -->
+<section id="generate">
+  <div class="eyebrow">3</div>
+  <h2>Baking an island</h2>
+  <div class="ways">
+    <div class="way plain"><h4>In plain words</h4><p>Build two or three volcanoes, knock a giant landslide off the wet side, then repeat 400 times: work out where it rains, let water run downhill, and let rivers, waterfalls, soil creep and waves wear the land down.</p></div>
+    <div class="way mech"><h4>Mechanism</h4><p>A landscape evolution model: the stream power law solved implicitly (Braun &amp; Willett 2013) on a 1024² grid, with rain recomputed every 50 steps so the climate follows the changing terrain.</p></div>
+    <div class="way code"><h4>In the code</h4><p><code>Island.generate(_:)</code> in <code>Island.swift</code> runs it all. <code>IslandGenCLI/main.swift</code> parses flags, calls it, then writes previews, the cloud map, lighting views, <code>info.json</code> and the optional bundle.</p></div>
+  </div>
+
+  <figure>
+    <div class="canvas">
+      <svg viewBox="0 0 900 190" width="900" height="190" role="img" aria-label="Bake timeline: volcano, collapse, rain, then 400 erosion steps with rain refreshed every 50, then flexure, fill, clouds, lighting, refine, bundle.">
+        <g font-size="12">
+          <rect x="10" y="40" width="70" height="44" rx="3" style="fill: var(--leaf-soft); stroke: var(--leaf)"/><text x="45" y="60" text-anchor="middle" font-weight="600">volcano</text><text x="45" y="76" text-anchor="middle" font-size="10" class="soft">shields</text>
+          <rect x="86" y="40" width="70" height="44" rx="3" style="fill: var(--leaf-soft); stroke: var(--leaf)"/><text x="121" y="60" text-anchor="middle" font-weight="600">collapse</text><text x="121" y="76" text-anchor="middle" font-size="10" class="soft">pali scarp</text>
+          <rect x="162" y="40" width="50" height="44" rx="3" style="fill: var(--sky-soft); stroke: var(--sky)"/><text x="187" y="66" text-anchor="middle" font-weight="600">rain</text>
+          <!-- erosion bar -->
+          <rect x="218" y="40" width="440" height="44" rx="3" style="fill: var(--sea-soft); stroke: var(--sea)"/>
+          <text x="438" y="58" text-anchor="middle" font-weight="700">erosion × 400 steps (2,000 yr each)</text>
+          <text x="438" y="76" text-anchor="middle" font-size="10" class="soft">rain refreshed at steps 50, 100, … 350 · drainage averaged over the last 20</text>
+          <g style="stroke: var(--sky)" stroke-width="2">
+            <line x1="273" y1="84" x2="273" y2="96"/><line x1="328" y1="84" x2="328" y2="96"/><line x1="383" y1="84" x2="383" y2="96"/><line x1="438" y1="84" x2="438" y2="96"/><line x1="493" y1="84" x2="493" y2="96"/><line x1="548" y1="84" x2="548" y2="96"/><line x1="603" y1="84" x2="603" y2="96"/>
+          </g>
+          <rect x="609" y="98" width="49" height="10" style="fill: var(--soil-soft); stroke: var(--soil)"/>
+          <text x="633" y="122" text-anchor="middle" font-size="10" class="soft">saddle pond</text><text x="633" y="134" text-anchor="middle" font-size="10" class="soft">at 0.9 (off)</text>
+          <rect x="664" y="40" width="58" height="44" rx="3" style="fill: var(--leaf-soft); stroke: var(--leaf)"/><text x="693" y="60" text-anchor="middle" font-weight="600">flexure</text><text x="693" y="76" text-anchor="middle" font-size="10" class="soft">+20 m, fill</text>
+          <rect x="728" y="40" width="74" height="44" rx="3" style="fill: var(--sheet); stroke: var(--ink-soft)"/><text x="765" y="58" text-anchor="middle" font-weight="600">outputs</text><text x="765" y="74" text-anchor="middle" font-size="10" class="soft">clouds, views</text>
+          <rect x="808" y="40" width="82" height="44" rx="3" style="fill: var(--soil-soft); stroke: var(--soil)"/><text x="849" y="58" text-anchor="middle" font-weight="600">refine</text><text x="849" y="74" text-anchor="middle" font-size="10" class="soft">+ bundle</text>
+          <text x="10" y="25" class="mono soft" font-size="11">geological time →</text>
+          <line x1="10" y1="160" x2="890" y2="160" style="stroke: var(--rule)"/>
+          <text x="10" y="178" class="mono soft" font-size="11">M3 wall time: volcano + collapse ~1 s · erosion 17–19 s (fill ≈ 65 %, stack ≈ 17 %) · refine 8192² 3.3 s · bundle ~24 s</text>
+        </g>
+      </svg>
+    </div>
+    <figcaption><span class="fig-n">Fig 4</span><b>Bake timeline</b> at the defaults (<code>--size 1024 --steps 400</code>). Blue ticks are rain recomputations. <code>islandgen --profile</code> prints the measured time per phase.</figcaption>
+  </figure>
+
+  <!-- 3.1 -->
+  <div class="sub" id="shields">
+    <h3>3.1 Shield volcanoes and rock hardness</h3>
+    <div class="prose">
+      <p><code>VolcanicBase.randomShields</code> places <b>2 shields (70 %) or 3</b> along a "hotspot track" through the middle of the domain, 22–30 % of the domain apart with some jitter. Each shield gets a summit 2,600–3,400 m above the −1,800 m sea floor and 2 or 3 rift zones 8–19 km long, spread roughly evenly around the compass. The terrain at a point is the <b>highest</b> of the shields there, measured from each shield's skeleton (summit plus rift segments), so the volcanoes are elongated along their rifts like Waiʻanae and Koʻolau.</p>
+      <p>Before measuring distance the point is domain-warped by up to 2.5 km of noise, which turns perfect cones into lobed flanks. Lava-flow roughness of ±35 m is added on top, faded out near sea level so the coast doesn't fray into islets.</p>
+    </div>
+    <div class="eq">land: h = crest · [ (1 − c)·(1 − r/shore)<sup>P</sup> + c·(1 − r/shore) ] &nbsp;&nbsp; crest = top · (1 − riftDescent · along)</div>
+    <p>P is <code>--land-exponent</code> (2), c is <code>--coast-slope</code> (0.3), and <code>along</code> runs 0 at the summit to 1 at a rift tip, so rift crests fall away by 40 % (<code>--rift-descent 0.4</code>). Below the shoreline the flank drops as a 2 km shelf that steepens to a 0.15 slope. The older "classic" profile <code>exp(−3·d<sup>1.4</sup>)</code> put only a steep cap above sea level; the concave profile was the PR #11 fix for too little flat land.</p>
+
+    <div class="widget" id="profileWidget">
+      <div class="controls">
+        <label for="pExp">Land exponent P <input id="pExp" type="range" min="0.5" max="4" step="0.1" value="2"><output id="pExpOut">2.0</output></label>
+        <label for="pCoast">Coast slope c <input id="pCoast" type="range" min="0" max="1" step="0.05" value="0.3"><output id="pCoastOut">0.30</output></label>
+        <label for="pAlong">Along the rift <input id="pAlong" type="range" min="0" max="1" step="0.05" value="0"><output id="pAlongOut">0.00</output></label>
+      </div>
+      <div style="overflow-x:auto"><svg id="profileSvg" viewBox="0 0 720 260" width="720" height="260" role="img" aria-label="Cross-section of a shield profile"></svg></div>
+      <div class="readout" id="profileRead"></div>
+    </div>
+    <figcaption><span class="fig-n">Fig 5</span><b>Try the shield profile.</b> A 3,000 m shield (top 1,200 m above sea) from summit to 6 km offshore, using the same formulas as <code>VolcanicBase.generate</code>. The dashed curve is the old classic profile. Moving "along the rift" shows how the crest drops toward a rift tip.</figcaption>
+
+    <div class="prose">
+      <p><b>Rock hardness</b> is a second grid made in the same loop. It starts at 0.9, adds up to 0.35 in a 600 m band along rift zones (dike swarms resist erosion), and varies ±0.25 with broad noise, never below 0.4. Erodibility is divided by hardness, so the rifts end up as the sharp ridges. The band is kept narrow on purpose: a wide hard crest stopped valley heads from cutting back and left flat-topped ridges.</p>
+    </div>
+  </div>
+
+  <!-- 3.2 -->
+  <div class="sub" id="collapse">
+    <h3>3.2 Flank collapse: where the pali comes from</h3>
+    <div class="two">
+      <div class="prose">
+        <p>Mature Hawaiian shields lose a sector of the flank facing the ocean. Oʻahu's Nuʻuanu slide is why the Koʻolau has a sheer windward wall. The generator does this <b>before</b> erosion, so rivers then attack a fresh cliff and carve amphitheater valleys back into it.</p>
+        <p><code>FlankCollapse.choose</code> scores each shield's flank across its longest rift by how much it faces the wind and open ocean, then anchors on the real summit. <code>apply</code> traces the actual crest line in strips, smooths it, and cuts the flank away seaward of a curve 500–1,100 m behind the crest. The scarp curves seaward at both ends, fades where the crest drops, and gets 4–8 <b>notches</b> set back into it. Notch axes and the scarp face get weaker rock, so streams find them first.</p>
+        <p>Below the cliff, the debris becomes a coastal plain 55–85 m high at the foot, falling at 1.2 % for 2.5–4.5 km (like Kāneʻohe), then 6 % out to sea.</p>
+      </div>
+      <figure>
+        <div class="canvas">
+          <svg viewBox="0 0 380 300" width="380" height="300" role="img" aria-label="Plan view of the flank collapse geometry">
+            <rect x="0" y="0" width="380" height="300" style="fill: var(--sheet)"/>
+            <path d="M40 30 C 120 70, 150 140, 150 160 C 150 180, 120 240, 40 280" style="fill: none; stroke: var(--soil); stroke-width: 3"/>
+            <text x="60" y="60" font-size="12" font-weight="600" style="fill: var(--soil)">crest</text>
+            <path d="M110 20 C 190 80, 205 130, 205 160 C 205 190, 190 240, 110 290" style="fill: none; stroke: var(--ink); stroke-width: 2.5"/>
+            <path d="M205 120 l-28 6 l28 6 M203 200 l-26 6 l26 6" style="fill: var(--sheet); stroke: var(--ink); stroke-width: 1.5"/>
+            <path d="M140 25 C 220 85, 235 130, 235 160 C 235 190, 220 240, 140 295" style="fill: none; stroke: var(--ink-soft); stroke-width: 1; stroke-dasharray: 3 3"/>
+            <rect x="240" y="20" width="130" height="270" style="fill: var(--leaf-soft)"/>
+            <text x="305" y="150" text-anchor="middle" font-size="12" font-weight="600" style="fill: var(--leaf)">debris plain</text>
+            <text x="305" y="166" text-anchor="middle" font-size="10" class="soft">55–85 m at foot</text>
+            <text x="305" y="180" text-anchor="middle" font-size="10" class="soft">−1.2 % for 2.5–4.5 km</text>
+            <text x="206" y="105" font-size="11">scarp top</text>
+            <text x="238" y="80" font-size="10" class="soft">face 900 m</text>
+            <text x="160" y="125" font-size="10" class="soft">notch</text>
+            <line x1="60" y1="160" x2="200" y2="160" style="stroke: var(--sea); stroke-width: 1.2" stroke-dasharray="2 2"/>
+            <text x="64" y="176" font-size="10" style="fill: var(--sea)">offset 500–1,100 m</text>
+            <text x="305" y="285" text-anchor="middle" font-size="10" class="mono soft">→ windward, seaward</text>
+          </svg>
+        </div>
+        <figcaption><span class="fig-n">Fig 6</span><b>Collapse geometry in plan.</b> The cut follows the crest, curves seaward by perp²/(2·R) with R 7–12 km, and is 14–22 km long.</figcaption>
+      </figure>
+    </div>
+    <figure>
+      <img src="img/scarp-hillshade.jpg" alt="Hillshade close-up of seed 42's windward scarp, with amphitheater valleys cut into a long cliff and a plain below it." width="1280" height="1280" style="max-width: 560px">
+      <figcaption><span class="fig-n">Fig 7</span><b>The result after erosion</b> on seed 42: the dark line is the pali, with valleys retreating into it from the notches.</figcaption>
+    </figure>
+  </div>
+
+  <!-- 3.3 -->
+  <div class="sub" id="rain">
+    <h3>3.3 Rainfall</h3>
+    <div class="ways">
+      <div class="way plain"><h4>In plain words</h4><p>Wind pushed uphill rains. Air that has already crossed mountains is drier. So the windward slopes get soaked and the lee stays dry, which is why the two sides of the island erode so differently.</p></div>
+      <div class="way mech"><h4>Formula</h4><p><code>rain = 0.6 m/yr × (1 + 40 · upslope) × exp(−6e-5 · crossed)</code>. Upslope is the terrain gradient along the wind after a 1.5 km smoothing; crossed is Σ height × km of land upwind, marched on a ~1 km grid.</p></div>
+      <div class="way code"><h4>Where</h4><p><code>Climate.precipitation</code>. A stand-in for the Smith &amp; Barstad FFT model in the plan. Sea cells are clamped to sea level first, or the steep submarine flank would pull the rain out over the ocean. Three box blurs approximate a Gaussian; one box blur streaked the map.</p></div>
+    </div>
+    <figure>
+      <div class="canvas">
+        <svg viewBox="0 0 720 200" width="720" height="200" role="img" aria-label="Cross-section of orographic rain from the north-east trade wind">
+          <path d="M20 170 L120 170 C 200 160, 260 60, 330 50 C 380 45, 400 100, 470 140 C 540 165, 600 170, 700 170" style="fill: var(--leaf-soft); stroke: var(--leaf); stroke-width: 2"/>
+          <line x1="20" y1="170" x2="700" y2="170" style="stroke: var(--sea); stroke-width: 2"/>
+          <g style="stroke: var(--sky)" stroke-width="1.5">
+            <line x1="180" y1="55" x2="172" y2="80"/><line x1="200" y1="45" x2="192" y2="70"/><line x1="220" y1="40" x2="212" y2="65"/><line x1="240" y1="35" x2="232" y2="60"/><line x1="260" y1="30" x2="252" y2="55"/><line x1="280" y1="25" x2="272" y2="50"/><line x1="300" y1="22" x2="292" y2="47"/>
+            <line x1="200" y1="90" x2="192" y2="115"/><line x1="240" y1="80" x2="232" y2="105"/><line x1="280" y1="65" x2="272" y2="90"/>
+            <line x1="430" y1="40" x2="424" y2="58"/><line x1="470" y1="50" x2="464" y2="68"/>
+          </g>
+          <path d="M30 120 L140 120" style="stroke: var(--ink-soft); stroke-width: 1.5" marker-end="url(#ar)"/>
+          <text x="30" y="110" font-size="12">NE trade wind</text>
+          <text x="210" y="195" font-size="12" text-anchor="middle" style="fill: var(--sky)" font-weight="600">windward: up to ~25× base</text>
+          <text x="560" y="195" font-size="12" text-anchor="middle" class="soft">lee: rain shadow</text>
+          <text x="560" y="120" font-size="11" class="soft">air already crossed</text>
+          <text x="560" y="134" font-size="11" class="soft">high ground → drier</text>
+        </svg>
+      </div>
+      <figcaption><span class="fig-n">Fig 8</span><b>Upslope rain and rain shadow.</b> Rain is recomputed from the eroding terrain every 50 steps, so as valleys deepen the rain pattern moves with them. Rain then weights drainage area in the erosion step: wet catchments carry more water and cut faster.</figcaption>
+    </figure>
+  </div>
+
+  <!-- 3.4 -->
+  <div class="sub" id="erosion">
+    <h3>3.4 The erosion loop</h3>
+    <p>This is where most of the realism comes from. Each call to <code>StreamPower.step</code> advances the land by one 2,000-year time step. The model is:</p>
+    <div class="eq">dh/dt = U − K·A<sup>m</sup>·S<sup>n</sup> + G·Q<sub>s</sub>/Q + K<sub>d</sub>·∇²h &nbsp;&nbsp;(+ waterfall retreat, wave cutting)</div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Term</th><th>Means</th><th>Default</th></tr></thead>
+        <tbody>
+          <tr><td><code>U</code></td><td>Uplift or subsidence, m/yr</td><td class="mono">0</td></tr>
+          <tr><td><code>K·A<sup>m</sup>·S<sup>n</sup></code></td><td>River incision. A is rain-weighted drainage area (really discharge, m³/yr), S the slope to the cell downstream, K = 5e-6 ÷ hardness</td><td class="mono">m 0.5, n 1</td></tr>
+          <tr><td><code>G·Qs/Q</code></td><td>Deposition (Yuan et al. 2019): small, loaded streams drop sediment; big rivers carry theirs to sea</td><td class="mono">G 0.3</td></tr>
+          <tr><td><code>Kd·∇²h</code></td><td>Soil creep, smooths hillslopes</td><td class="mono">0.02 m²/yr</td></tr>
+          <tr><td>waterfalls</td><td>Steep faces above a channel retreat sideways at 0.05 m/yr × √(Q/1e7)</td><td class="mono">min Q 3e5</td></tr>
+          <tr><td>waves</td><td>Sea cliffs retreat 4 mm/yr facing the wind, 20 % of that in the lee</td><td class="mono">0.004</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>One step does these passes in this order. The order matters: each pass reads what the one before wrote.</p>
+    <ol class="rail">
+      <li><div><b>Uplift</b> (if <code>U ≠ 0</code>) raises every non-edge cell.</div></li>
+      <li><div><b>Fill pits</b> with Priority-Flood + ε, so every land cell has a strictly downhill path to the sea or the edge.<span class="why">The slowest phase, about 65 % of bake time. Seeding the heap only with sea cells that touch land made it several times faster (PR #4).</span></div></li>
+      <li><div><b>Pick a receiver</b> for each cell: one downhill neighbour, chosen at random weighted by slope.<span class="why">Plain steepest descent carves rivers along 0°, 45° and 90° grid lines. Random routing, seeded by a hash of (seed, step, cell), spreads flow like multiple-flow routing over many steps while staying deterministic.</span></div></li>
+      <li><div><b>Build the stack</b>: donor lists by counting sort, then each outlet's basin as one contiguous run ordered from mouth to source.<span class="why">Basins never share cells, so groups of basins run on separate cores with results identical to a serial run.</span></div></li>
+      <li><div><b>Accumulate drainage area</b> from the sources down, each cell adding cell-area × rain to its receiver.</div></li>
+      <li><div><b>Incise</b> from the mouth upwards with the implicit update <code>h ← (h + f·h<sub>r</sub>) / (1 + f)</code>, f = K·dt·A<sup>m</sup>/dx.<span class="why">Because the receiver is already updated, this is unconditionally stable: any time step works. Rivers never cut below sea level. For n ≠ 1 the cell is solved by Newton's method.</span></div></li>
+      <li><div><b>Waterfall retreat</b>: any cell steeper than 0.6 above a channel neighbour carrying enough water is lowered so the face moves back while staying steep.<span class="why">This is the Lamb et al. 2007 mechanism for Hawaiian amphitheater heads: valley heads cut back and widen into bowls between knife-edge ridges (PR #7).</span></div></li>
+      <li><div><b>Deposition</b>, sources to mouth, carrying eroded volume along with the flow. A cell keeps a share G × (own discharge / total discharge) of what arrives, but never rises above its lowest donor.<span class="why">Builds fans and plains under cliffs without damming streams. G = 1 buried the foot of the pali; 0.3 keeps it.</span></div></li>
+      <li><div><b>Landslides</b> (off; <code>--critical-slope</code>): over-steep cells collapse to a threshold angle.</div></li>
+      <li><div><b>Wave cutting</b>: land next to the sea is cut toward 1 m below sea level, faster where the sea lies upwind.<span class="why">Without it every coast graded to a flat fringe; Oʻahu's coastal belt rises at about 5°.</span></div></li>
+      <li><div><b>Diffusion</b>: explicit soil creep. The pipeline caps the time step so Kd·dt/dx² stays under 0.2.</div></li>
+    </ol>
+    <figure>
+      <img src="img/s42-map.jpg" alt="Hillshade of the eroded seed 42 island: a long north-south ridge with a western branch, dense valley networks and a cliff on the east side." width="1024" height="1024" style="max-width: 560px">
+      <figcaption><span class="fig-n">Fig 9</span><b>Seed 42 after 400 steps.</b> Branching drainage everywhere, a sharp main divide on the rift, and the pali on the windward (east) side.</figcaption>
+    </figure>
+    <details>
+      <summary>Why the implicit solver matters, in one example</summary>
+      <div class="prose">
+        <p>An explicit update computes the new height from the old slope: <code>h −= dt·K·A<sup>m</sup>·(h − h<sub>r</sub>)/dx</code>. On a big river, K·A<sup>m</sup>·dt/dx can exceed 1, and the cell would overshoot below its receiver, then bounce back, and the whole profile oscillates. The implicit form uses the <i>new</i> slope instead, which gives the fraction above. With f = 10 a cell 100 m above its receiver drops to 9 m above it in one step, never past it. That is what lets one step cover 2,000 years.</p>
+      </div>
+    </details>
+    <details>
+      <summary>Tuning lessons recorded so far</summary>
+      <ul>
+        <li>Erodibility 1e-5 planed the windward side to sea level in 800 kyr; 5e-6 keeps the pali.</li>
+        <li>Rift dike hardness is narrow (600 m) and modest (+0.35); wider or harder left flat-topped ridges.</li>
+        <li>Faster waterfall retreat eats the summit plateau down to beaded crests; 0.05 m/yr with a 3e5 m³/yr threshold keeps it.</li>
+        <li>Headwall retreat (seepage on every steep face) laid faces back instead of carving bowls, so it is off.</li>
+        <li>Eight mechanisms for more flat land have been tried; the rejected ones are summarised on Scott's Mac in <code>~/JScottGraves/sweep-plain/</code> and <code>sweep-saddle/</code>.</li>
+      </ul>
+    </details>
+  </div>
+
+  <!-- 3.5 -->
+  <div class="sub" id="finish">
+    <h3>3.5 After erosion: flexure, ponding, a final fill</h3>
+    <div class="prose">
+      <p><b>Flexure</b> (<code>--flexure 20</code>): Oʻahu sits on the bulge raised by the Big Island's weight. The bake lifts land by 20 m × min(1, distance inland / 1.5 km), using a chamfer distance transform from the sea. Erosion had graded the coastal fringe flat to sea level; the tilt gives the 600 m coastal belt about 4.2° (Oʻahu 4.8°).</p>
+      <p><b>Saddle ponding</b> (off, <code>--saddle-fill</code>): late in the run, lava floods the saddle between shields as a gently sloping, harder plain, like Schofield between the Waiʻanae and Koʻolau. It traded steep land for flat land almost one for one against the DEM, so it stays off.</p>
+      <p>A last Priority-Flood fill keeps "no pits" true after the flexure.</p>
+    </div>
+  </div>
+
+  <!-- 3.6 -->
+  <div class="sub" id="cloudbake">
+    <h3>3.6 Standing cloud map</h3>
+    <div class="two">
+      <div class="prose">
+        <p>Trade-wind clouds over Oʻahu are mostly terrain-locked: they form where air is lifted over the windward slopes and crest, and dissolve a little way into the lee. <code>Clouds.coverage</code> follows the air from 40 km upwind to each 500 m cell over the smoothed terrain, keeping two numbers: vapour <code>q</code> and cloud water <code>c</code>.</p>
+        <ul>
+          <li>Rising air condenses vapour into cloud (900 m of ascent condenses all of it).</li>
+          <li>Sinking air evaporates cloud (60 m of descent at 7.5 m/s).</li>
+          <li>Cloud rains out over about 15 minutes, four times faster over the sea; air over the sea recovers its vapour over 20 km.</li>
+          <li>Coverage = 1 − exp(−c / 0.08).</li>
+        </ul>
+        <p>Two maps are written: normal trades (7.5 m/s) and strong trades (11 m/s). Over land, windward coverage is about 0.5 against 0.3 in the lee. It takes 0.04 s.</p>
+      </div>
+      <figure>
+        <img src="img/cloud-bake.jpg" alt="Three generated islands with white cloud coverage drawn over their hillshades, thickest over the crests and windward slopes." width="1536" height="512">
+        <figcaption><span class="fig-n">Fig 10</span><b>Baked coverage</b> for seeds 42, 7 and 123 (<code>clouds.png</code>). The app adds drifting cumulus and the daily cycle on top (<a href="#clouds">§5.6</a>).</figcaption>
+      </figure>
+    </div>
+  </div>
+
+  <!-- 3.7 -->
+  <div class="sub" id="refine">
+    <h3>3.7 Refinement to ~10 m</h3>
+    <div class="prose">
+      <p>Erosion at 10 m would cost minutes per step, so it runs at 78 m and <code>--refine 8</code> upsamples the result to 8192² (9.8 m) in about 3 s. The coarse surface is resampled bicubically, and a fractal residual is added whose amplitude is 4 m on steep ground, 30 % of that on flat ground, fading to nothing in channels (drainage 1e5 → 1e7 m²) and within 5 m of sea level. A final pit fill keeps every cell draining.</p>
+      <p>One detail: whether a fine cell is land or sea follows the <b>bilinear</b> coarse surface. Bicubic overshoot had lifted 12 km² of shallow shelf into a chain of islets.</p>
+    </div>
+    <div class="callout"><b>Known gap.</b> At 10 m, real Oʻahu has 10.2 % of land steeper than 40°; refined seed 42 has 2.7 %. The residual is far too gentle to make real cliffs, so walls that are sharp at 78 m stay soft at 10 m.</div>
+  </div>
+
+  <!-- 3.8 -->
+  <div class="sub" id="outputs">
+    <h3>3.8 What a bake writes</h3>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>File</th><th>Contents</th><th>Used by</th></tr></thead>
+        <tbody>
+          <tr><td><code>height.r32</code></td><td>Raw little-endian Float32 heights, 1024²</td><td>IslandApp, external tools</td></tr>
+          <tr><td><code>hillshade.png</code>, <code>flow.png</code>, <code>rain.png</code>, <code>hardness.png</code></td><td>Previews: shaded relief, log drainage, rain, hardness</td><td>people</td></tr>
+          <tr><td><code>clouds-trades.r32</code>, <code>clouds-strong.r32</code>, <code>clouds.json</code>, <code>clouds.png</code></td><td>Cloud coverage at 500 m and its metadata</td><td>IslandApp</td></tr>
+          <tr><td><code>view-summit.png</code>, <code>view-ridge.png</code>, <code>view-coast.png</code>, <code>view-pali.png</code></td><td>CPU first-person renders from automatic viewpoints</td><td>people, CI</td></tr>
+          <tr><td><code>scarp.json</code></td><td>Where the collapse scarp is, so app snapshots can aim at it</td><td>Snapshots</td></tr>
+          <tr><td><code>info.json</code></td><td>Every parameter, land area, max height, windward vs leeward slope, realism metrics, cloud stats</td><td>people, CI annotation</td></tr>
+          <tr><td><code>height-fine.r32</code></td><td>The 8192² refined heights (with <code>--refine</code>)</td><td>tools</td></tr>
+          <tr><td><code>&lt;dir&gt;/</code> bundle</td><td>height (refined if asked), rain, drainage, hardness, clouds-trades (with <code>--bundle DIR</code>)</td><td>IslandApp</td></tr>
+        </tbody>
+      </table>
+    </div>
+<pre><code>swift build -c release
+.build/release/islandgen --seed 42 --refine 8 --bundle out/s42.bundle --out out
+swift run -c release IslandApp out/s42.bundle            # walk it
+swift run -c release IslandApp out/s42.bundle --snapshot out/snaps --time 7,10.5,16
+.build/release/islandgen --import oahu-8192-10m.r32 --cell 9.766 --bundle oahu.bundle</code></pre>
+  </div>
+</section>
+
+<!-- ============================================================ 4 -->
+<section id="bundle">
+  <div class="eyebrow">4</div>
+  <h2>The island bundle</h2>
+  <div class="ways">
+    <div class="way plain"><h4>In plain words</h4><p>A folder of small, compressed map squares at several zoom levels, like a web map. The app loads only the squares near you, plus blurry ones for the distance.</p></div>
+    <div class="way mech"><h4>Format</h4><p>Each channel is square, split into 256² tiles of UInt16, LZ4-compressed. Level 0 is full resolution; each level up is a 2×2 mean, down to one tile. <code>value = offset + scale × sample</code>, scale = range ÷ 65,535 (6 cm steps for a 4 km height range).</p></div>
+    <div class="way code"><h4>Where</h4><p><code>IslandBundle.swift</code> in IslandCore, format version 1. The renderer uploads the raw UInt16 tiles to the GPU unchanged and de-quantises in the shader.</p></div>
+  </div>
+  <div class="two">
+    <pre><code>s42.bundle/
+├── manifest.json        format, tileSize 256, seaLevel,
+│                        per channel: size, cellMetres,
+│                        levels, offset, scale
+├── height/
+│   ├── 0/0_0.lz4 … 31_31.lz4   8192² → 32×32 tiles
+│   ├── 1/ …                    4096² → 16×16
+│   ├── …
+│   └── 5/0_0.lz4               256² → 1 tile
+├── rain/   drainage/   hardness/   (1024², 3 levels)
+└── clouds-trades/                 (160², 1 level)
+
+tile name: &lt;level&gt;/&lt;ty&gt;_&lt;tx&gt;.lz4, row 0 south</code></pre>
+    <figure>
+      <div class="canvas">
+        <svg viewBox="0 0 360 260" width="360" height="260" role="img" aria-label="Mip pyramid of tile levels">
+          <g style="stroke: var(--ink-soft)">
+            <rect x="20" y="200" width="320" height="40" style="fill: var(--sea-soft)"/>
+            <rect x="60" y="150" width="240" height="40" style="fill: var(--sea-soft)"/>
+            <rect x="100" y="100" width="160" height="40" style="fill: var(--sea-soft)"/>
+            <rect x="140" y="50" width="80" height="40" style="fill: var(--soil-soft)"/>
+          </g>
+          <g style="stroke: var(--sheet)" stroke-width="1">
+            <line x1="60" y1="200" x2="60" y2="240"/><line x1="100" y1="200" x2="100" y2="240"/><line x1="140" y1="200" x2="140" y2="240"/><line x1="180" y1="200" x2="180" y2="240"/><line x1="220" y1="200" x2="220" y2="240"/><line x1="260" y1="200" x2="260" y2="240"/><line x1="300" y1="200" x2="300" y2="240"/>
+            <line x1="120" y1="150" x2="120" y2="190"/><line x1="180" y1="150" x2="180" y2="190"/><line x1="240" y1="150" x2="240" y2="190"/>
+            <line x1="180" y1="100" x2="180" y2="140"/>
+          </g>
+          <text x="180" y="225" text-anchor="middle" font-size="12">level 0 · 9.8 m · 1,024 tiles</text>
+          <text x="180" y="175" text-anchor="middle" font-size="12">level 1 · 19.5 m · 256</text>
+          <text x="180" y="125" text-anchor="middle" font-size="12">level 2 · 39 m · 64</text>
+          <text x="180" y="75" text-anchor="middle" font-size="11">level 5 · 1 tile</text>
+          <text x="180" y="30" text-anchor="middle" font-size="11" class="soft">always resident on the GPU</text>
+          <text x="180" y="95" text-anchor="middle" font-size="11" class="soft">⋮</text>
+        </svg>
+      </div>
+      <figcaption><span class="fig-n">Fig 11</span><b>The height pyramid</b> of a refined bundle. Seed 42's bundle is 144 MB and takes 24 s to write; real Oʻahu is 94 MB.</figcaption>
+    </figure>
+  </div>
+  <p>A test bakes, refines and bundles the same seed twice and compares every file byte for byte (<code>testSameSeedBakesAnIdenticalBundle</code>). The Oʻahu DEM goes into the same format with <code>islandgen --import</code>, so the real island and generated ones are walked by the same code.</p>
+</section>
+
+<!-- ============================================================ 5 -->
+<section id="runtime">
+  <div class="eyebrow">5</div>
+  <h2>The walking app</h2>
+  <div class="ways">
+    <div class="way plain"><h4>In plain words</h4><p>Each frame: move the walker, decide which pieces of ground to draw at which detail, make sure their height tiles are loaded, work out the clouds, then colour every pixel with sun, sky, shadow and haze.</p></div>
+    <div class="way mech"><h4>Mechanism</h4><p>CDLOD terrain drawn from a streamed tile cache, a depth prepass, compute passes for cloud shadows and a reduced-resolution cloud march with temporal accumulation, then sky and terrain fragment shaders that composite it all in HDR before tone mapping.</p></div>
+    <div class="way code"><h4>Where</h4><p><code>Coordinator.draw(in:)</code> in <code>IslandApp.swift</code> handles input and time; <code>TerrainRenderer.encode</code> builds the frame. <code>--snapshot DIR</code> renders the same frames headless to PNG with per-pass GPU timings.</p></div>
+  </div>
+
+  <!-- 5.1 -->
+  <div class="sub" id="frame">
+    <h3>5.1 One frame</h3>
+    <figure>
+      <div class="canvas">
+        <svg viewBox="0 0 900 250" width="900" height="250" role="img" aria-label="Frame timeline across CPU and GPU">
+          <text x="10" y="50" class="mono soft" font-size="11">CPU</text>
+          <text x="10" y="140" class="mono soft" font-size="11">GPU</text>
+          <text x="10" y="215" class="mono soft" font-size="11">BG queue</text>
+          <g font-size="12">
+            <rect x="70" y="28" width="120" height="36" rx="3" style="fill: var(--sheet); stroke: var(--ink-soft)"/><text x="130" y="44" text-anchor="middle" font-weight="600">input + time</text><text x="130" y="58" text-anchor="middle" font-size="10" class="soft">walker, hour, sky LUT</text>
+            <rect x="196" y="28" width="140" height="36" rx="3" style="fill: var(--sheet); stroke: var(--ink-soft)"/><text x="266" y="44" text-anchor="middle" font-weight="600">select nodes</text><text x="266" y="58" text-anchor="middle" font-size="10" class="soft">quadtree + frustum</text>
+            <rect x="342" y="28" width="150" height="36" rx="3" style="fill: var(--sheet); stroke: var(--ink-soft)"/><text x="417" y="44" text-anchor="middle" font-weight="600">request tiles</text><text x="417" y="58" text-anchor="middle" font-size="10" class="soft">upload ≤ 64 · page table</text>
+            <rect x="498" y="28" width="110" height="36" rx="3" style="fill: var(--sheet); stroke: var(--ink-soft)"/><text x="553" y="50" text-anchor="middle" font-weight="600">encode</text>
+
+            <rect x="250" y="190" width="300" height="36" rx="3" style="fill: var(--soil-soft); stroke: var(--soil)"/><text x="400" y="212" text-anchor="middle">load + LZ4-decode missing tiles</text>
+            <path d="M417 64 L 417 188" style="stroke: var(--ink-soft)" stroke-dasharray="3 3" marker-end="url(#ar)"/>
+
+            <rect x="560" y="115" width="80" height="44" rx="3" style="fill: var(--sky-soft); stroke: var(--sky)"/><text x="600" y="135" text-anchor="middle" font-weight="600">depth</text><text x="600" y="150" text-anchor="middle" font-size="10" class="soft">prepass</text>
+            <rect x="646" y="115" width="130" height="44" rx="3" style="fill: var(--sky-soft); stroke: var(--sky)"/><text x="711" y="133" text-anchor="middle" font-weight="600">clouds (compute)</text><text x="711" y="149" text-anchor="middle" font-size="10" class="soft">shadow map · march · resolve</text>
+            <rect x="782" y="115" width="108" height="44" rx="3" style="fill: var(--sky-soft); stroke: var(--sky)"/><text x="836" y="133" text-anchor="middle" font-weight="600">shade</text><text x="836" y="149" text-anchor="middle" font-size="10" class="soft">sky, then terrain</text>
+            <path d="M553 64 L 590 113" style="stroke: var(--ink-soft)" marker-end="url(#ar)"/>
+          </g>
+          <line x1="60" y1="88" x2="890" y2="88" style="stroke: var(--rule)"/>
+          <line x1="60" y1="175" x2="890" y2="175" style="stroke: var(--rule)"/>
+        </svg>
+      </div>
+      <figcaption><span class="fig-n">Fig 12</span><b>A frame across CPU, GPU and the tile loader.</b> The sky-view LUT is rebuilt on the CPU only when the sun has moved about 0.1°. Three of everything that changes per frame (node buffers, page tables, sky textures) are kept so the CPU never writes a buffer the GPU is still reading.</figcaption>
+    </figure>
+    <ol class="rail">
+      <li><div><b>Depth prepass.</b> Terrain depth only, no colour. The cloud march needs it to stop at the ground, and it means the expensive terrain shader later runs once per pixel instead of once per overlapping triangle. Both passes use <code>invariant</code> positions so their depths match exactly.</div></li>
+      <li><div><b>Clouds, in compute.</b> A 512² cloud shadow map over the island (~160 m texels); the cloud march at reduced resolution (at most 360 rows: half per axis at 720p, a quarter at 1440p) up to the terrain depth; a resolve that blends 10 % of the new frame into a reprojected history.</div></li>
+      <li><div><b>Sky.</b> One full-screen triangle at the far plane, shaded only where no terrain covers it: sky-view LUT, sun disc, open sea beyond the heightfield, clouds composited.</div></li>
+      <li><div><b>Terrain.</b> The same nodes again with the full fragment shader: albedo, sun, sky, bounce, shadows, cloud shadows, water, haze, clouds, tone mapping.</div></li>
+    </ol>
+  </div>
+
+  <!-- 5.2 -->
+  <div class="sub" id="streaming">
+    <h3>5.2 Streaming tiles to the GPU</h3>
+    <div class="two">
+      <div class="prose">
+        <p><code>TerrainStreamer</code> owns a <b>texture array of 512 slots</b>, each a 256² <code>r16Uint</code> tile (64 MB). A <b>page table</b> (one Int32 per tile per level) says which slot holds each tile, or −1.</p>
+        <p>Each frame, every selected node asks for the tiles of its level and the next coarser level (for morphing). Missing tiles load on a concurrent background queue; up to 64 finished tiles are uploaded per frame. When the cache is full the least recently used tile not touched in the last three frames is evicted. The coarsest level is loaded at start-up and pinned, so there is always something to draw.</p>
+        <p>In the vertex shader, <code>rawHeight</code> looks a sample up in its level's page and, if the page is −1, halves the coordinate and tries the next level up. Ground that hasn't loaded yet is drawn blurrier, never missing.</p>
+      </div>
+      <figure>
+        <div class="canvas">
+          <svg viewBox="0 0 380 250" width="380" height="250" role="img" aria-label="Page table fallback from a missing level-0 tile to level 1">
+            <text x="10" y="22" font-size="12" font-weight="600">page table</text>
+            <g font-size="11" class="mono">
+              <text x="10" y="50">L0</text><text x="10" y="110">L1</text><text x="10" y="170">L2</text>
+            </g>
+            <g>
+              <rect x="40" y="35" width="40" height="24" style="fill: var(--sea-soft); stroke: var(--sea)"/><text x="60" y="51" text-anchor="middle" font-size="11" class="mono">17</text>
+              <rect x="80" y="35" width="40" height="24" style="fill: var(--soil-soft); stroke: var(--soil)"/><text x="100" y="51" text-anchor="middle" font-size="11" class="mono">−1</text>
+              <rect x="120" y="35" width="40" height="24" style="fill: var(--sea-soft); stroke: var(--sea)"/><text x="140" y="51" text-anchor="middle" font-size="11" class="mono">4</text>
+              <rect x="160" y="35" width="40" height="24" style="fill: var(--soil-soft); stroke: var(--soil)"/><text x="180" y="51" text-anchor="middle" font-size="11" class="mono">−1</text>
+              <rect x="40" y="95" width="80" height="24" style="fill: var(--sea-soft); stroke: var(--sea)"/><text x="80" y="111" text-anchor="middle" font-size="11" class="mono">9</text>
+              <rect x="120" y="95" width="80" height="24" style="fill: var(--soil-soft); stroke: var(--soil)"/><text x="160" y="111" text-anchor="middle" font-size="11" class="mono">−1</text>
+              <rect x="40" y="155" width="160" height="24" style="fill: var(--sea-soft); stroke: var(--sea)"/><text x="120" y="171" text-anchor="middle" font-size="11" class="mono">0 (pinned)</text>
+            </g>
+            <path d="M100 60 C 100 80, 90 85, 85 93" style="fill: none; stroke: var(--ink)" stroke-width="1.5" marker-end="url(#ar)"/>
+            <path d="M180 60 C 180 78, 165 85, 162 93" style="fill: none; stroke: var(--ink)" stroke-width="1.5" marker-end="url(#ar)"/>
+            <path d="M160 120 C 160 138, 140 145, 135 153" style="fill: none; stroke: var(--ink)" stroke-width="1.5" marker-end="url(#ar)"/>
+            <text x="215" y="51" font-size="11">−1 → try the</text>
+            <text x="215" y="65" font-size="11">coarser level</text>
+            <text x="10" y="210" font-size="11" class="soft">slots live in one 512-layer texture array;</text>
+            <text x="10" y="226" font-size="11" class="soft">the number is the layer index</text>
+          </svg>
+        </div>
+        <figcaption><span class="fig-n">Fig 13</span><b>Fallback through the page table.</b> A missing tile reads its parent's samples at half the coordinates.</figcaption>
+      </figure>
+    </div>
+    <p>The walker's ground height comes from <code>TerrainHeights</code> on the CPU, which decodes level-0 tiles into a small 64-tile LRU cache and interpolates bilinearly, matching what the renderer draws up close.</p>
+  </div>
+
+  <!-- 5.3 -->
+  <div class="sub" id="lod">
+    <h3>5.3 CDLOD terrain</h3>
+    <div class="two">
+      <figure>
+        <div class="canvas">
+          <svg viewBox="0 0 340 340" width="340" height="340" role="img" aria-label="Top-down view of CDLOD rings around the camera">
+            <rect x="10" y="10" width="320" height="320" style="fill: var(--sheet); stroke: var(--rule)"/>
+            <g style="fill: none; stroke: var(--rule)">
+              <rect x="10" y="10" width="160" height="160"/><rect x="170" y="10" width="160" height="160"/><rect x="10" y="170" width="160" height="160"/><rect x="170" y="170" width="160" height="160"/>
+              <rect x="90" y="90" width="80" height="80"/><rect x="170" y="90" width="80" height="80"/><rect x="90" y="170" width="80" height="80"/><rect x="170" y="170" width="80" height="80"/>
+              <rect x="130" y="130" width="40" height="40"/><rect x="170" y="130" width="40" height="40"/><rect x="130" y="170" width="40" height="40"/><rect x="170" y="170" width="40" height="40"/>
+            </g>
+            <g style="fill: none" stroke-width="1.5">
+              <circle cx="170" cy="170" r="40" style="stroke: var(--sea)"/>
+              <circle cx="170" cy="170" r="80" style="stroke: var(--sea)" stroke-dasharray="4 3"/>
+              <circle cx="170" cy="170" r="150" style="stroke: var(--sea)" stroke-dasharray="2 4"/>
+            </g>
+            <circle cx="170" cy="170" r="5" style="fill: var(--soil)"/>
+            <text x="178" y="166" font-size="11" font-weight="600">camera</text>
+            <text x="215" y="138" font-size="10" style="fill: var(--sea)">LOD 0 ring</text>
+            <text x="248" y="98" font-size="10" style="fill: var(--sea)">LOD 1</text>
+            <text x="285" y="40" font-size="10" style="fill: var(--sea)">LOD 2</text>
+          </svg>
+        </div>
+        <figcaption><span class="fig-n">Fig 14</span><b>Nested rings.</b> Every node is the same 64×64-quad grid; only its spacing doubles per level. Near the camera nodes are small and dense.</figcaption>
+      </figure>
+      <div class="prose">
+        <p><code>TerrainQuadtree.select</code> walks a quadtree whose root covers the whole domain. A level-<i>k</i> node is 64 quads of <code>cellMetres × 2<sup>k</sup></code>, and it is drawn if it lies inside its own ring but outside the finer level's ring; otherwise its four children are visited. Rings reach 3 node sizes from the camera. With a 10 m bundle that is 8 levels: the finest ring reaches about 1.9 km at 10 m spacing, and each ring out doubles in size and spacing.</p>
+        <p>Culling uses a min/max height pyramid of the overview padded by 40 m, tested against the six frustum planes. Selected nodes go to the GPU as instances: one draw for full nodes, one for quarter nodes drawn at their parent's level when only some children are inside their ring.</p>
+        <p><b>Morphing</b> hides the seams. From 70 % of the way across a ring, each vertex slides its odd rows and columns onto the next level's grid and blends its height to the next data level. A fully morphed vertex matches the coarser neighbour exactly, so nothing pops or cracks. Normals come from central differences on that same morphed surface.</p>
+        <p>Positions are subtracted from the camera before projection, so there is no vertex jitter 40 km from the origin.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- 5.4 -->
+  <div class="sub" id="light">
+    <h3>5.4 Sun, sky and the shading equation</h3>
+    <div class="prose">
+      <p>The sun moves. <code>SunPath.direction(hour:day:)</code> gives the direction at Oʻahu's latitude (21.4° N) from local solar time and day of year (default day 288, mid-October). <code>Atmosphere</code> then computes sunlight after the atmosphere and the whole sky on the CPU following Hillaire 2020: Rayleigh, Mie (6× Hillaire's default aerosol, AOD ~0.03, for clean trade-wind air with sea salt) and ozone, with multiple scattering from a small LUT. The result is a 128×64 <b>sky-view texture</b> and 9 <b>spherical-harmonic</b> coefficients for sky light on any surface normal. Exposure adapts to the square root of the light change, so dawn reads darker than noon without going black.</p>
+    </div>
+    <div class="widget" id="sunWidget">
+      <div class="controls">
+        <label for="sHour">Hour <input id="sHour" type="range" min="5" max="19" step="0.25" value="9.5"><output id="sHourOut">09:30</output></label>
+        <label for="sDay">Day of year <input id="sDay" type="range" min="1" max="365" step="1" value="288"><output id="sDayOut">288</output></label>
+      </div>
+      <div style="overflow-x:auto"><svg id="sunSvg" viewBox="0 0 720 230" width="720" height="230" role="img" aria-label="Sun path across the sky for the chosen day"></svg></div>
+      <div class="readout" id="sunRead"></div>
+    </div>
+    <figcaption><span class="fig-n">Fig 15</span><b>The sun path the app uses</b>, computed with the same formula as <code>SunPath.direction</code>. The cloud numbers use the renderer's daily cycles: base = 600 − 200·cos(2π(h−14)/24) m and orographic gain = 0.85 + 0.15·cos(2π(h−7)/24).</figcaption>
+
+    <p>Each terrain pixel is lit like this (<code>terrainFragment</code>):</p>
+    <div class="eq">colour = albedo · ( sun · max(n·l, 0) · shadow · cloudShadow &nbsp;+&nbsp; skySH(n) · skyVisibility &nbsp;+&nbsp; bounce )</div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Piece</th><th>Where it comes from</th></tr></thead>
+        <tbody>
+          <tr><td>albedo</td><td><code>Look.albedo</code>: grass by height, cliff green on slopes, red soil and dark basalt breaking through in patches on steep spurs, a sand strip within 1–3 m of the sea. Authored as sRGB swatches and converted to linear once; the pale early renders came from using sRGB numbers as linear.</td></tr>
+          <tr><td>shadow</td><td>Terrain shadow: horizon map, plus ray tracing where it's in doubt (<a href="#shadows">§5.5</a>)</td></tr>
+          <tr><td>cloudShadow</td><td>The 512² cloud shadow map, read where the sun ray meets the cloud base; never darker than 30 %</td></tr>
+          <tr><td>skySH · skyVisibility</td><td>Sky light for this normal, times the share of sky the terrain leaves open (baked cosine-weighted in 16 directions out to 6 km)</td></tr>
+          <tr><td>bounce</td><td>One cheap bounce: the blocked sky and the ground a tilted face looks at return light, assuming neighbours share this albedo and are half in sun</td></tr>
+          <tr><td>after that</td><td>Water reflects the sky by Fresnel with distance-dependent roughness; haze blends toward the sky colour behind (45 km scale, 85 % max); clouds composite; then the Khronos PBR Neutral tone mapper without its toe. The target is <code>_srgb</code>, which encodes on write.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p><code>Look.metalPrelude</code> generates the albedo, tone mapper and water functions as Metal source from the same Swift constants, so the CPU ground views and the GPU stay alike.</p>
+    <figure>
+      <img src="img/sky-pali-sheet.jpg" alt="Grid of ten renders of a cliff seen from a plain, at different times of day, before and after the physical sky." width="1290" height="1840" style="max-width: 640px">
+      <figcaption><span class="fig-n">Fig 16</span><b>The pali through the day</b> before (left) and after (right) the Hillaire sky (PR #10). Rows run from morning to dusk; the last rows show the warm, dim low sun and the aureole around it.</figcaption>
+    </figure>
+  </div>
+
+  <!-- 5.5 -->
+  <div class="sub" id="shadows">
+    <h3>5.5 Terrain shadows</h3>
+    <div class="two">
+      <div class="prose">
+        <p>Two methods share the work.</p>
+        <p><b>Horizon map.</b> At start-up <code>TerrainLighting.bake</code> marches 16 compass sectors out to 25 km from every overview cell (three marches per sector, keeping the highest) and stores each sector's horizon angle as a byte. Any sun position can then be tested by comparing its elevation with the horizon at its azimuth.</p>
+        <p><b>Ray tracing.</b> A Metal acceleration structure is built over a mesh of the same overview. Where the horizon map puts the sun more than ~3° clear of both neighbouring sectors, or ~3° below both, the pixel is decided without rays. Only the uncertain band traces: two rays across the sun's 0.53° disc, and two more only where they disagree, softened over about a degree. Beyond 4 km two rays are enough.</p>
+        <p>The shadow mesh is coarser than the drawn terrain, so a valley floor can sit under it. Rays ignore faces seen from below, which lets them out.</p>
+      </div>
+      <figure>
+        <div class="canvas">
+          <svg viewBox="0 0 360 260" width="360" height="260" role="img" aria-label="Decision tree for terrain shadows per pixel">
+            <g font-size="12">
+              <rect x="110" y="10" width="140" height="34" rx="4" style="fill: var(--sheet); stroke: var(--ink-soft)"/><text x="180" y="32" text-anchor="middle">n·l &gt; 0, sun up, not under thick cloud?</text>
+              <rect x="110" y="80" width="140" height="34" rx="4" style="fill: var(--sheet); stroke: var(--ink-soft)"/><text x="180" y="102" text-anchor="middle">horizon map margin</text>
+              <rect x="10" y="160" width="100" height="40" rx="4" style="fill: var(--leaf-soft); stroke: var(--leaf)"/><text x="60" y="178" text-anchor="middle" font-weight="600">lit</text><text x="60" y="193" text-anchor="middle" font-size="10" class="soft">&gt; +3° both sides</text>
+              <rect x="130" y="160" width="100" height="40" rx="4" style="fill: var(--sky-soft); stroke: var(--sky)"/><text x="180" y="178" text-anchor="middle" font-weight="600">trace 2–4 rays</text><text x="180" y="193" text-anchor="middle" font-size="10" class="soft">in between</text>
+              <rect x="250" y="160" width="100" height="40" rx="4" style="fill: var(--soil-soft); stroke: var(--soil)"/><text x="300" y="178" text-anchor="middle" font-weight="600">shadow</text><text x="300" y="193" text-anchor="middle" font-size="10" class="soft">&lt; −3° both sides</text>
+              <text x="180" y="240" text-anchor="middle" font-size="11" class="soft">no ray tracing GPU → smooth step on the horizon margin</text>
+            </g>
+            <g style="stroke: var(--ink-soft)" stroke-width="1.3" fill="none">
+              <line x1="180" y1="44" x2="180" y2="78" marker-end="url(#ar)"/>
+              <line x1="150" y1="114" x2="70" y2="158" marker-end="url(#ar)"/>
+              <line x1="180" y1="114" x2="180" y2="158" marker-end="url(#ar)"/>
+              <line x1="210" y1="114" x2="290" y2="158" marker-end="url(#ar)"/>
+            </g>
+          </svg>
+        </div>
+        <figcaption><span class="fig-n">Fig 17</span><b>Per-pixel shadow decision.</b> The horizon map skips rays for most pixels (PR #20).</figcaption>
+      </figure>
+    </div>
+  </div>
+
+  <!-- 5.6 -->
+  <div class="sub" id="clouds">
+    <h3>5.6 Trade-wind clouds</h3>
+    <div class="ways">
+      <div class="way plain"><h4>In plain words</h4><p>A layer of cumulus between a few hundred metres and 2 km. It sits where the bake said clouds stand, plus drifting puffs off the ocean. Walking on the crest of the range, you're inside it.</p></div>
+      <div class="way mech"><h4>Mechanism</h4><p>A 2.5D ray-marched layer in the Horizon Zero Dawn / Frostbite style: coverage from a map, a height profile, fBm noise advected by the wind, Beer–Lambert light with dual-lobe phase and multi-scattering octaves, temporal accumulation.</p></div>
+      <div class="way code"><h4>Where</h4><p><code>CloudShaders.swift</code>: <code>cloudDensity</code>, <code>marchClouds</code>, kernels <code>cloudMarch</code>, <code>cloudResolve</code>, <code>cloudShadowMap</code>, and <code>compositeClouds</code> used by both fragment shaders.</p></div>
+    </div>
+    <figure>
+      <div class="canvas">
+        <svg viewBox="0 0 760 240" width="760" height="240" role="img" aria-label="Cloud layer cross-section over the island">
+          <line x1="40" y1="200" x2="740" y2="200" style="stroke: var(--sea); stroke-width: 2"/>
+          <path d="M140 200 C 230 190, 300 110, 360 95 C 410 85, 430 140, 500 175 C 560 195, 600 200, 680 200 Z" style="fill: var(--leaf-soft); stroke: var(--leaf)"/>
+          <line x1="40" y1="40" x2="740" y2="40" style="stroke: var(--soil)" stroke-dasharray="6 4"/>
+          <text x="745" y="44" font-size="11" style="fill: var(--soil)" text-anchor="end">trade inversion ~2,000 m: flat tops</text>
+          <line x1="40" y1="150" x2="740" y2="150" style="stroke: var(--ink-soft)" stroke-dasharray="2 4"/>
+          <text x="45" y="145" font-size="11" class="soft">cloud base 400 m (night) – 800 m (2 pm)</text>
+          <path d="M210 150 C 220 100, 260 70, 300 60 C 340 50, 380 48, 410 60 C 440 70, 450 110, 455 150 Z" style="fill: var(--cloud); opacity: 0.45"/>
+          <text x="330" y="115" text-anchor="middle" font-size="12" font-weight="600">standing cap cloud</text>
+          <text x="330" y="130" text-anchor="middle" font-size="10" class="soft">baked coverage × daily gain</text>
+          <path d="M560 150 C 565 125, 585 115, 600 118 C 615 110, 640 120, 642 150 Z" style="fill: var(--cloud); opacity: 0.35"/>
+          <path d="M80 150 C 85 130, 100 122, 115 126 C 128 118, 145 128, 147 150 Z" style="fill: var(--cloud); opacity: 0.35"/>
+          <text x="600" y="102" text-anchor="middle" font-size="11" class="soft">drifting cumulus</text>
+          <text x="112" y="112" text-anchor="middle" font-size="11" class="soft">drifting cumulus</text>
+          <path d="M60 80 L 170 80" style="stroke: var(--ink-soft)" stroke-width="1.5" marker-end="url(#ar)"/><text x="60" y="72" font-size="11">wind 7.5 m/s: noise moves, cap stays</text>
+          <circle cx="360" cy="91" r="4" style="fill: var(--soil)"/><text x="370" y="88" font-size="10">walker on the crest: in fog</text>
+        </svg>
+      </div>
+      <figcaption><span class="fig-n">Fig 18</span><b>The cloud layer in section.</b> Coverage at a point is the larger of the baked orographic map (times a gain thickest at dawn) and a drifting 6 km noise field, capped at 0.88 so even the cap has breaks. Heavier cover reaches higher toward the inversion.</figcaption>
+    </figure>
+    <ol class="rail">
+      <li><div><b>Shadow map.</b> For each of 512² texels over the island, march 6 samples up through the layer toward the sun. Terrain reads it instead of marching per pixel.</div></li>
+      <li><div><b>March</b> at reduced resolution: 24 steps to the terrain (32 for sky), quadratically spaced so steps are short near the camera; per-pixel jitter that shifts every frame; a 3-sample light march toward the sun (~550 m); noise detail dropped on long steps where it would only alias.</div></li>
+      <li><div><b>Resolve.</b> Reproject the history through the cloud's own distance, keep it only where the same surface lay behind, clamp it to this frame's 3×3 neighbourhood, blend 10 % new.</div></li>
+      <li><div><b>Composite</b> at full resolution with a depth-aware upsample, so cloud doesn't bleed across a ridge silhouette.</div></li>
+    </ol>
+    <figure>
+      <img src="img/clouds-pali-sheet.jpg" alt="Fifteen renders of the pali view at 07:00, 10:00, 13:00, 16:00 and 17:30, without clouds and with two rounds of the cloud layer." width="1800" height="1700">
+      <figcaption><span class="fig-n">Fig 19</span><b>The pali at five times of day</b>, without clouds (left) and with the cloud layer (middle and right, two tuning rounds of PR #12). Measured on the M3 at 720p after PR #14: coast 5 ms, pali 6, summit 11, ridge 14. The target is 60 fps at 1440p.</figcaption>
+    </figure>
+  </div>
+
+  <!-- 5.7 -->
+  <div class="sub" id="walker">
+    <h3>5.7 Walker and controls</h3>
+    <div class="two">
+      <div class="prose">
+        <p><code>Walker</code> stores a position in Double metres, feet height, yaw and pitch. Walking is 1.4 m/s, running 4 m/s; a step is refused if it would climb steeper than 1:1. Eye height is 1.7 m. Fly mode (F) moves at 60 m/s, 400 with Shift, and never goes below 2 m over the ground. The app starts on the island's highest point.</p>
+        <p>The title bar is the debug overlay: time of day, GPU ms, nodes drawn, resident tiles and tiles still loading.</p>
+      </div>
+      <div class="tablewrap">
+        <table>
+          <thead><tr><th>Key</th><th>Does</th></tr></thead>
+          <tbody>
+            <tr><td><kbd>W A S D</kbd></td><td>walk</td></tr>
+            <tr><td><kbd>Shift</kbd></td><td>run / fly fast</td></tr>
+            <tr><td>drag</td><td>look</td></tr>
+            <tr><td><kbd>F</kbd></td><td>toggle fly; <kbd>Space</kbd>/<kbd>C</kbd> up/down</td></tr>
+            <tr><td><kbd>[</kbd> <kbd>]</kbd></td><td>scrub time, 1.5 h per second</td></tr>
+            <tr><td><kbd>T</kbd></td><td>let time run, 1 h per 20 s</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ 6 -->
+<section id="realism">
+  <div class="eyebrow">6</div>
+  <h2>Measuring realism</h2>
+  <p><code>Realism.measure</code> scores any heightfield the same way, generated or real: hypsometry (how land area is spread over height), slope histogram, the share of cliffs over 40°, drainage density, Hack's exponent and pits. <code>islandgen --score</code> runs it on a DEM; every bake puts it in <code>info.json</code>. The real Oʻahu USGS DEM is the yardstick.</p>
+  <figure>
+    <div class="canvas">
+      <svg id="realismSvg" viewBox="0 0 760 300" width="760" height="300" role="img" aria-label="Bar chart comparing Oahu with seeds 42, 7 and 123 on flat land, land over 25 degrees, and cliffs"></svg>
+    </div>
+    <figcaption><span class="fig-n">Fig 20</span><b>Generated islands against Oʻahu at 78 m</b>, from the final tuning sweep (<code>renders/inland/sweep-final.md</code>, coast slope 0.3, wave retreat 0.004, leeward 0.2; before flexure). The hypsometric integral already matches (0.176–0.179 vs 0.176), as do drainage density (0.67 vs 0.69) and Hack's exponent (0.48–0.49 vs 0.58, a little low). Flat land is the big miss.</figcaption>
+  </figure>
+  <div class="callout"><b>The open realism gap.</b> Oʻahu is two knife-edged ranges on wide, nearly flat ground: 40 % of its land is under 5°. Our islands reach 17–29 %. Late sea-level fall, wave base, deltas, flexure and saddle lava ponding have all been tried; flat land stays near 23 %. The next idea on record is inland alluvial fill, and a saddle pond capped at its spill point on the eroded surface.</div>
+</section>
+
+<!-- ============================================================ 7 -->
+<section id="quality">
+  <div class="eyebrow">7</div>
+  <h2>Determinism, tests and CI</h2>
+  <div class="two">
+    <div class="prose">
+      <p><b>Same seed, same island, byte for byte.</b> Every random choice comes from SplitMix64 seeded from the seed, or from a stateless hash of (seed, position). Parallel passes split work so chunks never write the same cell, and the erosion stack keeps basins whole, so a run on 12 cores equals a serial run. Even the priority queue breaks height ties on cell index.</p>
+      <p><b>CI</b> (GitHub Actions, macOS 15) builds release, runs the tests, bakes a 512² island and posts its <code>info.json</code> as an annotation, then tries headless app snapshots (allowed to fail: hosted runners' virtual GPUs don't support everything). Build errors are posted as annotations too, because the cloud sessions can't read CI logs.</p>
+      <p><b>Visual checks</b> happen on Scott's M3: <code>IslandApp … --snapshot DIR</code> writes the app's own Metal frames as PNGs plus <code>timings.csv</code> with depth, cloud and shading milliseconds.</p>
+    </div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Tests (selection)</th></tr></thead>
+        <tbody>
+          <tr><td><code>testIslandIsDeterministic</code>, <code>testSameSeedBakesAnIdenticalBundle</code></td></tr>
+          <tr><td><code>testPriorityFloodLeavesNoPits</code>, <code>testDrainageAreaIsConserved</code></td></tr>
+          <tr><td><code>testWavesCutTheWindwardCoastFaster</code>, <code>testFlexureTiltsTheCoastalFringe</code></td></tr>
+          <tr><td><code>testRefineAddsDetailWithoutPits</code>, <code>testPondBuriesOnlyTheDeepestShareOfTheSaddle</code></td></tr>
+          <tr><td><code>testCloudsSitOnWindwardSlopes</code>, <code>testRealismOfAConeIsland</code></td></tr>
+          <tr><td><code>testBundleRoundTripsTilesAndMips</code>, <code>testGridTerrainServesItsHeightsAsTiles</code></td></tr>
+          <tr><td><code>testQuadtreeTilesTheIslandWithFinerNodesNearTheCamera</code></td></tr>
+          <tr><td><code>testSunPathCrossesTheSouthAtNoonInOctober</code>, <code>testLowSunIsRedderAndDimmer</code></td></tr>
+          <tr><td><code>testSkyIrradianceSHMatchesDirectIntegration</code>, <code>testHorizonMapSeesAWall</code></td></tr>
+          <tr><td><code>testGreyCardUnderHighSunLooksMidGrey</code>, <code>testSteepPaliStaysGreen</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ 8 -->
+<section id="status">
+  <div class="eyebrow">8</div>
+  <h2>Status against the Milestone 1 plan</h2>
+  <p>The plan is <code>plan/terrain-architecture-and-milestone-1.md</code> in the project files. Since it was approved, Scott moved time of day and trade-wind clouds into scope and approved hardware ray tracing.</p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Plan item</th><th>State</th><th>What exists</th></tr></thead>
+      <tbody>
+        <tr><td>Package skeleton, CLI, CI</td><td><span class="pill ok">done</span></td><td>As in §2; CI on macOS 15</td></tr>
+        <tr><td>Bundle format v1</td><td><span class="pill ok">done</span></td><td>LZ4 UInt16 tiles, mips, manifest; no ASTC</td></tr>
+        <tr><td>3.1 Volcanic base</td><td><span class="pill part">mostly</span></td><td>Shields, rifts, hardness, flank collapse. No lava-flow particle layering, no caldera.</td></tr>
+        <tr><td>3.2 Climate</td><td><span class="pill part">stand-in</span></td><td>Upslope × rain-shadow model, not the Smith–Barstad FFT model</td></tr>
+        <tr><td>3.3 Uplift, subsidence, sea level</td><td><span class="pill part">partial</span></td><td>Uplift flag (0) and 20 m flexure; no sea-level history or reef terraces</td></tr>
+        <tr><td>3.4 Stream power erosion</td><td><span class="pill ok">done (CPU)</span></td><td>Implicit, random routing, deposition, waterfalls, parallel. Metal port not started.</td></tr>
+        <tr><td>3.5 Thermal erosion, landslides</td><td><span class="pill part">off</span></td><td>Threshold slope exists, disabled; flank collapse covers the big one</td></tr>
+        <tr><td>3.6 Coast, reef, sediment</td><td><span class="pill part">partial</span></td><td>Wave-cut cliffs and deposition; no reef, beaches only as albedo</td></tr>
+        <tr><td>3.7 Derived maps</td><td><span class="pill part">partial</span></td><td>Height, rain, drainage, hardness, clouds. No sediment depth, curvature or material IDs.</td></tr>
+        <tr><td>3.8 Refine to 10 m</td><td><span class="pill part">first cut</span></td><td>Residual noise, no erosion pass; cliffs too soft at 10 m</td></tr>
+        <tr><td>3.9 Determinism</td><td><span class="pill ok">done</span></td><td>Byte-identical bundles, tested</td></tr>
+        <tr><td>4.1 Runtime detail 10 m → 25 cm</td><td><span class="pill todo">not started</span></td><td>Only the CPU ground views have a detail noise</td></tr>
+        <tr><td>4.2 LOD and streaming</td><td><span class="pill ok">done</span></td><td>CDLOD with morphing, tile cache + page table (instead of sparse textures and mesh shaders)</td></tr>
+        <tr><td>4.3 Shading</td><td><span class="pill part">partial</span></td><td>Hillaire sky, aerial perspective, RT + horizon shadows, flat water. Procedural albedo only: no texture layers, triplanar or moisture-driven materials.</td></tr>
+        <tr><td>Time of day, clouds (added)</td><td><span class="pill ok">done</span></td><td>Moving sun, trade-wind clouds with shadows</td></tr>
+        <tr><td>4.4 Walker</td><td><span class="pill part">basic</span></td><td>Slope limit and fly mode; no capsule, step-up or sliding</td></tr>
+        <tr><td>Debug overlay</td><td><span class="pill part">basic</span></td><td>Title bar: time, GPU ms, nodes, tiles</td></tr>
+        <tr><td>Real DEM import</td><td><span class="pill ok">done</span></td><td>Oʻahu at 10 m as a bundle; scoring</td></tr>
+        <tr><td>60 fps at 1440p, bake &lt; 10 min</td><td><span class="pill part">in progress</span></td><td>Bake is well under; frame time depends on view, clouds and shadows are the cost</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="prose">
+    <h3>Open threads worth knowing</h3>
+    <ul>
+      <li>Flat land (§6) is the biggest terrain realism gap; refined cliffs at 10 m are the second.</li>
+      <li>The app reads bundles, but the 10 m surface is only what the bundle holds; no runtime detail below it yet.</li>
+      <li>Shaded pali bowls can render too dark; sky ambient and bounce helped. A faint shelf line in the cloud bank on the pali view persists, and motion ghosting of the cloud history is unchecked.</li>
+      <li>The rain model is a stand-in; the research notes recommend a linear feedback precipitation model.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ============================================================ 9 -->
+<section id="history">
+  <div class="eyebrow">9</div>
+  <h2>How we got here</h2>
+  <p>All twenty pull requests merged on 2026-10-16, in order. Each one is a single idea, so this list doubles as a map of why the code looks the way it does.</p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th class="num">PR</th><th>Change</th><th>Area</th></tr></thead>
+      <tbody>
+        <tr><td class="num">1</td><td>Milestone 1 skeleton: generator, bake CLI, Metal viewer</td><td>both</td></tr>
+        <tr><td class="num">2</td><td>Oʻahu-like terrain; CPU ground views and app snapshots</td><td>terrain</td></tr>
+        <tr><td class="num">3</td><td>Windward pali: flank collapse, coastal plain, deposition</td><td>terrain</td></tr>
+        <tr><td class="num">4</td><td>Bake about 4× faster (Priority-Flood seeding, packed heap, per-basin parallelism)</td><td>terrain</td></tr>
+        <tr><td class="num">5</td><td>Real-world colours, baked sky and sun occlusion, sky and water</td><td>lighting</td></tr>
+        <tr><td class="num">6</td><td>Moving sun and ray-traced sun shadows</td><td>lighting</td></tr>
+        <tr><td class="num">7</td><td>Amphitheater-headed valleys: waterfall retreat</td><td>terrain</td></tr>
+        <tr><td class="num">8</td><td>Bake standing trade-wind cloud coverage</td><td>clouds</td></tr>
+        <tr><td class="num">9</td><td>Realism metrics and real-DEM scoring</td><td>terrain</td></tr>
+        <tr><td class="num">10</td><td>Hillaire sky, SH ambient, haze from the sky, ground bounce</td><td>lighting</td></tr>
+        <tr><td class="num">11</td><td>Flatter lowlands: concave shield profile scored against Oʻahu</td><td>terrain</td></tr>
+        <tr><td class="num">12</td><td>Ray-marched trade-wind clouds and cloud shadows</td><td>lighting</td></tr>
+        <tr><td class="num">13</td><td>Steeper wave-cut coasts and descending rift crests</td><td>terrain</td></tr>
+        <tr><td class="num">14</td><td>Clouds at half resolution with temporal accumulation</td><td>lighting</td></tr>
+        <tr><td class="num">15</td><td>Tilt the coastal fringe with flexural uplift</td><td>terrain</td></tr>
+        <tr><td class="num">16</td><td>Optional lava plain between the volcanoes (off by default)</td><td>terrain</td></tr>
+        <tr><td class="num">17</td><td>10 m refinement and the island bundle format</td><td>terrain</td></tr>
+        <tr><td class="num">18</td><td>Import the Oʻahu DEM as a bundle; bundle determinism test</td><td>terrain</td></tr>
+        <tr><td class="num">19</td><td>Streaming CDLOD terrain from bundles, lighting and clouds at 1440p</td><td>lighting</td></tr>
+        <tr><td class="num">20</td><td>Trace sun rays only where the horizon map is in doubt</td><td>lighting</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>Background reading lives in the project files: <code>research/hawaiian-geology.md</code> (what shapes the islands), <code>research/terrain-papers.md</code> (erosion and routing literature), <code>research/global-illumination.md</code> (lighting plan) and <code>research/clouds.md</code> (cloud plan).</p>
+</section>
+
+<!-- ============================================================ 10 -->
+<section id="glossary">
+  <div class="eyebrow">10</div>
+  <h2>Glossary</h2>
+  <dl class="gloss">
+    <dt>Pali</dt><dd>Hawaiian for cliff. Here, the long windward wall left by the flank collapse, like the Koʻolau above Kāneʻohe.</dd>
+    <dt>Shield volcano</dt><dd>A broad, gently sloping volcano built by runny lava. Oʻahu is two: Waiʻanae and Koʻolau.</dd>
+    <dt>Rift zone</dt><dd>A line out from the summit where lava erupted; it becomes the island's main ridge.</dd>
+    <dt>Amphitheater valley</dt><dd>A valley that ends upstream in a steep-walled bowl rather than narrowing to a point; made by retreating waterfalls.</dd>
+    <dt>Stream power law</dt><dd>Erosion rate = K·A<sup>m</sup>·S<sup>n</sup>: rivers with more water and steeper beds cut faster.</dd>
+    <dt>Drainage area A</dt><dd>How much land drains through a cell; here weighted by rain, so it is really annual discharge.</dd>
+    <dt>Receiver / donor</dt><dd>The neighbour a cell drains to, and the cells that drain into it.</dd>
+    <dt>Priority-Flood</dt><dd>A pit-filling algorithm: grow inward from the sea in height order, raising any cell that would trap water.</dd>
+    <dt>Hypsometric integral</dt><dd>Mean land height as a share of total relief. Oʻahu is 0.176: most land is low.</dd>
+    <dt>Hack's law</dt><dd>Main stream length grows as basin area<sup>h</sup>, with h about 0.5–0.6 in real landscapes.</dd>
+    <dt>Drainage density</dt><dd>Kilometres of channel per km² of land.</dd>
+    <dt>Flexure</dt><dd>The crust bending under a load; here the bulge that lifts Oʻahu's coast.</dd>
+    <dt>Mip level</dt><dd>A copy of a map at half the resolution of the one below it.</dd>
+    <dt>Page table</dt><dd>A lookup from tile coordinates to the GPU slot that holds the tile, or "not loaded".</dd>
+    <dt>CDLOD</dt><dd>Continuous Distance-Dependent Level of Detail (Strugar 2009): quadtree terrain with vertex morphing between levels.</dd>
+    <dt>Horizon map</dt><dd>For each cell, how high the terrain horizon rises in each compass direction.</dd>
+    <dt>Spherical harmonics (SH)</dt><dd>Nine numbers per colour that describe the sky's light on a surface of any orientation.</dd>
+    <dt>Sky-view LUT</dt><dd>A small texture of sky colour in every direction, rebuilt when the sun moves.</dd>
+    <dt>Temporal accumulation</dt><dd>Blending each frame's noisy result into a history so it smooths out over a few frames.</dd>
+    <dt>Trade-wind inversion</dt><dd>A warm layer near 2 km that caps cumulus tops flat.</dd>
+  </dl>
+</section>
+
+<footer>
+  Written from the code on main at 47ee68b and the project's plan, research notes and renders, 2026-10-16. Numbers quoted from PR descriptions and project notes are measurements on Scott's M3 at the time. When the code changes, update the section it touches; the source lives at <code>docs/architecture/index.html</code> in the repo.
+</footer>
+</main>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var NS = "http://www.w3.org/2000/svg";
+  function el(name, attrs, text) {
+    var e = document.createElementNS(NS, name);
+    for (var k in attrs) e.setAttribute(k, attrs[k]);
+    if (text != null) e.textContent = text;
+    return e;
+  }
+
+  /* ---------- Shield profile (VolcanicBase.generate) ---------- */
+  var pExp = document.getElementById("pExp"), pCoast = document.getElementById("pCoast"), pAlong = document.getElementById("pAlong");
+  var psvg = document.getElementById("profileSvg"), pread = document.getElementById("profileRead");
+  var summit = 3000, seaFloor = -1800, radius = 28800, rift = 0.4;
+  var top = summit + seaFloor;
+  var shore = radius * Math.pow(Math.log(summit / -seaFloor) / 3, 1 / 1.4);
+  function submarine(off) { var s = 0.15, shelf = 2000; return off < shelf ? -s * off * off / (2 * shelf) : -s * (off - shelf / 2); }
+  function drawProfile() {
+    var P = +pExp.value, c = +pCoast.value, along = +pAlong.value;
+    document.getElementById("pExpOut").textContent = P.toFixed(1);
+    document.getElementById("pCoastOut").textContent = c.toFixed(2);
+    document.getElementById("pAlongOut").textContent = along.toFixed(2);
+    var crest = top * (1 - rift * along);
+    var W = 720, H = 260, L = 62, R = 28, T = 15, B = 35;
+    var maxR = shore + 6000, minZ = -600, maxZ = 1300;
+    function X(r) { return L + (r / maxR) * (W - L - R); }
+    function Y(z) { return T + (1 - (z - minZ) / (maxZ - minZ)) * (H - T - B); }
+    while (psvg.firstChild) psvg.removeChild(psvg.firstChild);
+    // axes and grid
+    [0, 400, 800, 1200].forEach(function (z) {
+      psvg.appendChild(el("line", { x1: L, x2: W - R, y1: Y(z), y2: Y(z), style: "stroke: var(--rule)" }));
+      psvg.appendChild(el("text", { x: L - 6, y: Y(z) + 4, "text-anchor": "end", "font-size": 10, "class": "soft mono" }, z + " m"));
+    });
+    for (var km = 0; km <= maxR / 1000; km += 2) {
+      psvg.appendChild(el("text", { x: X(km * 1000), y: H - 14, "text-anchor": "middle", "font-size": 10, "class": "soft mono" }, km + " km"));
+    }
+    psvg.appendChild(el("rect", { x: L, y: Y(0), width: W - L - R, height: Y(minZ) - Y(0), style: "fill: var(--sea-soft)" }));
+    psvg.appendChild(el("line", { x1: L, x2: W - R, y1: Y(0), y2: Y(0), style: "stroke: var(--sea); stroke-width: 1.5" }));
+    // classic profile
+    var dClassic = "", d = "", area = "";
+    var flat = 0, land = 0, prev = null;
+    for (var i = 0; i <= 300; i++) {
+      var r = maxR * i / 300;
+      var hc = seaFloor + summit * Math.exp(-3 * Math.pow(r / radius, 1.4));
+      dClassic += (i ? "L" : "M") + X(r).toFixed(1) + " " + Y(hc).toFixed(1);
+      var u = r / shore, h;
+      h = u < 1 ? crest * ((1 - c) * Math.pow(1 - u, P) + c * (1 - u)) : Math.max(seaFloor, submarine(r - shore));
+      d += (i ? "L" : "M") + X(r).toFixed(1) + " " + Y(h).toFixed(1);
+      if (prev !== null && h > 0) {
+        var slope = Math.abs(h - prev) / (maxR / 300);
+        land++; if (Math.atan(slope) * 180 / Math.PI < 5) flat++;
+      }
+      prev = h;
+    }
+    psvg.appendChild(el("path", { d: d + "L" + X(maxR) + " " + Y(minZ) + "L" + X(0) + " " + Y(minZ) + "Z", style: "fill: var(--leaf-soft); opacity: 0.9" }));
+    psvg.appendChild(el("path", { d: dClassic, style: "fill: none; stroke: var(--ink-soft); stroke-width: 1.5; stroke-dasharray: 5 4" }));
+    psvg.appendChild(el("path", { d: d, style: "fill: none; stroke: var(--leaf); stroke-width: 2.5" }));
+    psvg.appendChild(el("line", { x1: X(shore), x2: X(shore), y1: Y(0) - 6, y2: Y(0) + 6, style: "stroke: var(--soil); stroke-width: 2" }));
+    psvg.appendChild(el("text", { x: X(shore) + 5, y: Y(0) - 8, "font-size": 11, style: "fill: var(--soil)" }, "shore " + (shore / 1000).toFixed(1) + " km"));
+    psvg.appendChild(el("text", { x: X(0) + 6, y: Y(crest) - 6, "font-size": 11 }, "crest " + Math.round(crest) + " m"));
+    var summitDeg = Math.atan(crest * ((1 - c) * P + c) / shore) * 180 / Math.PI;
+    pread.innerHTML = "<span>flat (&lt;5°) share of the profile on land: <b>" + Math.round(100 * flat / Math.max(land, 1)) + " %</b></span>" +
+      "<span>slope where land meets the sea: <b>" + (Math.atan(crest * c / shore) * 180 / Math.PI).toFixed(1) + "°</b></span>" +
+      "<span>slope at the summit: <b>" + summitDeg.toFixed(1) + "°</b></span>";
+  }
+  [pExp, pCoast, pAlong].forEach(function (i) { i.addEventListener("input", drawProfile); });
+  drawProfile();
+
+  /* ---------- Sun path (SunPath.direction) ---------- */
+  var sHour = document.getElementById("sHour"), sDay = document.getElementById("sDay");
+  var ssvg = document.getElementById("sunSvg"), sread = document.getElementById("sunRead");
+  function sunDir(hour, day) {
+    var phi = 21.4 * Math.PI / 180;
+    var dec = 23.44 * Math.PI / 180 * Math.sin(2 * Math.PI * (284 + day) / 365);
+    var h = (hour - 12) * 15 * Math.PI / 180;
+    return [-Math.cos(dec) * Math.sin(h),
+            Math.cos(phi) * Math.sin(dec) - Math.sin(phi) * Math.cos(dec) * Math.cos(h),
+            Math.sin(phi) * Math.sin(dec) + Math.cos(phi) * Math.cos(dec) * Math.cos(h)];
+  }
+  function azEl(v) {
+    var el_ = Math.asin(Math.max(-1, Math.min(1, v[2]))) * 180 / Math.PI;
+    var az = Math.atan2(v[0], v[1]) * 180 / Math.PI; if (az < 0) az += 360; // compass, 0 = north, clockwise
+    return [az, el_];
+  }
+  function compass(a) { return ["N", "NE", "E", "SE", "S", "SW", "W", "NW"][Math.round(a / 45) % 8]; }
+  function hhmm(h) { var m = Math.round(h * 60); return String(Math.floor(m / 60)).padStart(2, "0") + ":" + String(m % 60).padStart(2, "0"); }
+  function drawSun() {
+    var hour = +sHour.value, day = +sDay.value;
+    document.getElementById("sHourOut").textContent = hhmm(hour);
+    document.getElementById("sDayOut").textContent = day;
+    var W = 720, H = 230, L = 40, R = 20, T = 15, B = 35;
+    function X(az) { return L + ((az - 45) / 270) * (W - L - R); } // NE..NW across the south
+    function Y(e) { return T + (1 - (e + 10) / 100) * (H - T - B); }
+    while (ssvg.firstChild) ssvg.removeChild(ssvg.firstChild);
+    [0, 30, 60, 90].forEach(function (e) {
+      ssvg.appendChild(el("line", { x1: L, x2: W - R, y1: Y(e), y2: Y(e), style: e === 0 ? "stroke: var(--ink-soft)" : "stroke: var(--rule)" }));
+      ssvg.appendChild(el("text", { x: L - 6, y: Y(e) + 4, "text-anchor": "end", "font-size": 10, "class": "soft mono" }, e + "°"));
+    });
+    [45, 90, 135, 180, 225, 270, 315].forEach(function (a) {
+      ssvg.appendChild(el("text", { x: X(a), y: H - 14, "text-anchor": "middle", "font-size": 10, "class": "soft mono" }, compass(a)));
+    });
+    ssvg.appendChild(el("rect", { x: L, y: Y(0), width: W - L - R, height: Y(-10) - Y(0), style: "fill: var(--leaf-soft)" }));
+    var d = "", started = false;
+    for (var t = 4; t <= 20; t += 0.1) {
+      var ae = azEl(sunDir(t, day));
+      if (ae[1] < -10 || ae[0] < 45 || ae[0] > 315) { started = false; continue; }
+      d += (started ? "L" : "M") + X(ae[0]).toFixed(1) + " " + Y(ae[1]).toFixed(1); started = true;
+    }
+    ssvg.appendChild(el("path", { d: d, style: "fill: none; stroke: var(--soil); stroke-width: 2; stroke-dasharray: 5 3" }));
+    for (var hh = 6; hh <= 18; hh += 2) {
+      var p = azEl(sunDir(hh, day));
+      if (p[1] > -10 && p[0] >= 45 && p[0] <= 315) {
+        ssvg.appendChild(el("circle", { cx: X(p[0]), cy: Y(p[1]), r: 2.5, style: "fill: var(--soil)" }));
+        ssvg.appendChild(el("text", { x: X(p[0]), y: Y(p[1]) - 7, "text-anchor": "middle", "font-size": 9, "class": "soft mono" }, hh + "h"));
+      }
+    }
+    var cur = azEl(sunDir(hour, day));
+    if (cur[0] >= 45 && cur[0] <= 315) {
+      ssvg.appendChild(el("circle", { cx: X(cur[0]), cy: Y(Math.max(cur[1], -10)), r: 9, style: "fill: var(--soil); opacity: 0.85" }));
+    }
+    var base = 600 - 200 * Math.cos(2 * Math.PI * (hour - 14) / 24);
+    var gain = 0.85 + 0.15 * Math.cos(2 * Math.PI * (hour - 7) / 24);
+    var noon = azEl(sunDir(12, day))[1];
+    sread.innerHTML = "<span>sun elevation <b>" + cur[1].toFixed(1) + "°</b></span>" +
+      "<span>azimuth <b>" + Math.round(cur[0]) + "° " + compass(cur[0]) + "</b></span>" +
+      "<span>noon elevation <b>" + noon.toFixed(1) + "°</b></span>" +
+      "<span>cloud base <b>" + Math.round(base) + " m</b></span>" +
+      "<span>orographic gain <b>" + gain.toFixed(2) + "</b></span>";
+  }
+  [sHour, sDay].forEach(function (i) { i.addEventListener("input", drawSun); });
+  drawSun();
+
+  /* ---------- Realism bars ---------- */
+  var rsvg = document.getElementById("realismSvg");
+  var metrics = [
+    { name: "flat land, 0–5°", max: 45, values: [39.8, 24.4, 23.3, 16.7] },
+    { name: "land over 25°", max: 45, values: [15.6, 14.6, 14.2, 21.4] },
+    { name: "cliffs over 40°", max: 45, values: [2.6, 2.4, 2.5, 4.5] }
+  ];
+  var series = [
+    { name: "Oʻahu", style: "fill: var(--soil)" },
+    { name: "seed 42", style: "fill: var(--sea)" },
+    { name: "seed 7", style: "fill: var(--sea); opacity: 0.7" },
+    { name: "seed 123", style: "fill: var(--sea); opacity: 0.45" }
+  ];
+  (function () {
+    var W = 760, H = 300, L = 46, R = 10, T = 30, B = 40;
+    function Y(v) { return T + (1 - v / 45) * (H - T - B); }
+    [0, 10, 20, 30, 40].forEach(function (v) {
+      rsvg.appendChild(el("line", { x1: L, x2: W - R, y1: Y(v), y2: Y(v), style: "stroke: var(--rule)" }));
+      rsvg.appendChild(el("text", { x: L - 6, y: Y(v) + 4, "text-anchor": "end", "font-size": 10, "class": "soft mono" }, v + " %"));
+    });
+    var groupW = (W - L - R) / metrics.length, barW = 34;
+    metrics.forEach(function (m, gi) {
+      var gx = L + gi * groupW + (groupW - barW * series.length - 6 * (series.length - 1)) / 2;
+      m.values.forEach(function (v, si) {
+        var x = gx + si * (barW + 6);
+        rsvg.appendChild(el("rect", { x: x, y: Y(v), width: barW, height: Y(0) - Y(v), style: series[si].style }));
+        rsvg.appendChild(el("text", { x: x + barW / 2, y: Y(v) - 4, "text-anchor": "middle", "font-size": 10, "class": "mono" }, v.toFixed(1)));
+      });
+      rsvg.appendChild(el("text", { x: L + gi * groupW + groupW / 2, y: H - 16, "text-anchor": "middle", "font-size": 12, "font-weight": 600 }, m.name));
+    });
+    series.forEach(function (s, si) {
+      var x = L + si * 110;
+      rsvg.appendChild(el("rect", { x: x, y: 8, width: 12, height: 12, style: s.style }));
+      rsvg.appendChild(el("text", { x: x + 17, y: 18, "font-size": 11 }, s.name));
+    });
+  })();
+})();
+</script>

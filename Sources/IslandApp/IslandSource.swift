@@ -1,4 +1,5 @@
 import Foundation
+import Engine
 import IslandCore
 import IslandGen
 
@@ -41,6 +42,19 @@ enum IslandSource {
         }
         let grid = load()
         return (GridTerrain(height: grid, seaLevel: 0), clouds(for: grid))
+    }
+
+    /// The bake's rain, drainage and hardness maps, to shape the renderer's fine detail:
+    /// from the bundle (whichever channels it has), or none for a bare heightfield.
+    static func detailMaps() -> DetailMaps? {
+        guard let bundle = bundle() else { return nil }
+        func map(_ name: String) -> Grid? {
+            guard let c = try? bundle.channel(name) else { return nil }
+            var level = 0
+            while level < c.levels - 1 && IslandBundle.levelSize(c.size, level: level) > 1024 { level += 1 }
+            return try? bundle.grid(name, level: level)
+        }
+        return DetailMaps(rain: map("rain"), drainage: map("drainage"), hardness: map("hardness"))
     }
 
     /// Standing trade-wind cloud coverage: islandgen's clouds-trades.r32 next to the

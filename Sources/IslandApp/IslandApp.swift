@@ -95,7 +95,9 @@ final class Coordinator: NSObject, MTKViewDelegate {
         do {
             renderer = try TerrainRenderer(device: device, colorFormat: view.colorPixelFormat,
                                            depthFormat: .depth32Float, terrain: tiles,
-                                           shadows: requested, clouds: clouds)
+                                           shadows: requested, clouds: clouds,
+                                           detailMaps: IslandSource.detailMaps(),
+                                           fineDetail: Snapshots.option("--detail") != "off")
         } catch {
             print("renderer failed: \(error)")
             return
@@ -108,6 +110,7 @@ final class Coordinator: NSObject, MTKViewDelegate {
         for i in 0..<overview.count where overview.values[i] > overview.values[best] { best = i }
         let sx = (Double(best % overview.width) + 0.5) * overview.cellSize
         let sy = (Double(best / overview.width) + 0.5) * overview.cellSize
+        renderer?.prepareGround(x: sx, y: sy)
         walker = Walker(x: sx, y: sy, ground: ground)
     }
 
