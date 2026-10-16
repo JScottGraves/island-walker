@@ -55,7 +55,7 @@ final class IslandCoreTests: XCTestCase {
     func testReferenceSunMatchesLookSun() {
         let l = SunLight.reference
         XCTAssertEqual(SunPath.luminance(l.sun), SunPath.luminance(Look.sun), accuracy: 1e-6)
-        XCTAssertEqual(l.exposure, 1, accuracy: 1e-6)
+        XCTAssertEqual(l.exposure, SunPath.exposureKey, accuracy: 1e-6)
         // Clear-sky diffuse light on open ground is roughly 10–40% of the direct sun's.
         let ratio = SunPath.luminance(l.sky) / (SunPath.luminance(l.sun) * Look.sunDirection.z)
         XCTAssert((0.1...0.4).contains(ratio), "sky/sun ratio \(ratio)")

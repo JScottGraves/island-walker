@@ -46,6 +46,15 @@ public enum SunPath {
         return luminance(Look.sun) / luminance(ref)
     }()
 
+    /// Exposure at the reference sun: an 18% grey card on open ground comes out near
+    /// sRGB 125, a little brighter than a light meter's mid-grey, like a photo of a bright day.
+    static let exposureKey = 1.25
+    /// Brightens the sky as seen directly (and as haze) but not the light it casts. The
+    /// single- plus multiple-scattering model gives a zenith about half as bright, relative
+    /// to sunlit ground, as the CIE clear-sky luminance model (~4 kcd/m² at a 45° sun),
+    /// and noon renders read as dusk without it.
+    static let skyViewGain = 1.4
+
     static func luminance(_ c: RGB) -> Double { 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b }
 
     /// Horizontal illuminance the eye adapts to; the reference sun's is the fixed point.
@@ -65,12 +74,13 @@ public enum SunPath {
         let sun = Atmosphere.sunIrradiance(sinElevation: Swift.max(d.z, 0.004)) * (scale * disc)
         // The shader lights terrain with albedo · E rather than albedo · E / π (the π is in
         // `scale`), so radiance seen directly takes the π back.
-        let skyView = Atmosphere.skyView(sun: d).map { $0 * (scale * Double.pi) }
-        let skySH = Atmosphere.irradianceSH(skyView: skyView).map { $0 * (1 / Double.pi) }
+        let radiance = Atmosphere.skyView(sun: d).map { $0 * (scale * Double.pi) }
+        let skySH = Atmosphere.irradianceSH(skyView: radiance).map { $0 * (1 / Double.pi) }
+        let skyView = radiance.map { $0 * skyViewGain }
         let sky = Atmosphere.evaluateSH(skySH, (0, 0, 1))
         // Adapt to the square root of the change, capped so night isn't amplified to grey.
         let level = adaptationLevel(sun: sun, sky: sky, sinElevation: d.z)
-        let exposure = Swift.min(8, Swift.max(0.8, pow(referenceLevel / Swift.max(level, 1e-5), 0.5)))
+        let exposure = exposureKey * Swift.min(8, Swift.max(0.8, pow(referenceLevel / Swift.max(level, 1e-5), 0.5)))
         return SunLight(direction: d, sun: sun, sky: sky, skySH: skySH, skyView: skyView, exposure: exposure)
     }
 

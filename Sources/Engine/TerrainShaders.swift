@@ -209,6 +209,17 @@ fragment float4 skyFragment(SkyOut in [[stage_in]], constant Uniforms &u [[buffe
     float4 far = u.inverseViewProjection * float4(in.ndc, 1.0, 1.0);
     float3 dir = normalize(far.xyz / far.w);
     float3 color = skyRadiance(skyView, dir);
+    if (dir.z < 0.0) {
+        // Open sea beyond the heightfield, shaded like the terrain shader's distant water
+        // so the two meet without a seam.
+        float height = max(u.cameraPosition.z - u.seaLevel, 1.0);
+        float dist = height / max(-dir.z, 1e-5);
+        float3 l = normalize(u.sunDirection);
+        float3 water = kDeepWater * (u.sunRadiance * max(l.z, 0.0) + skyIrradiance(u, float3(0.0, 0.0, 1.0)));
+        float cosView = -dir.z;
+        water = mix(water, skyAbove(skyView, float3(dir.xy, -dir.z)), waterReflectance(cosView, dist));
+        color = mix(water, skyAbove(skyView, dir), kHazeMax * (1.0 - exp(-dist / kHazeDistance)));
+    }
     // The sun's disc (0.53°), far brighter than anything else; the tone mapper clips it.
     float cosSun = dot(dir, normalize(u.sunDirection));
     color += u.sunRadiance * (2000.0 * smoothstep(cos(0.0050), cos(0.0042), cosSun));

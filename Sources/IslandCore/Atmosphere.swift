@@ -16,9 +16,11 @@ public enum Atmosphere {
 
     static let rayleighScattering = RGB(5.802e-6, 13.558e-6, 33.1e-6)
     static let rayleighHeight = 8000.0
-    /// Mie aerosol: twice Hillaire's default load, for humid air with sea salt.
-    static let mieScattering = 2 * 3.996e-6
-    static let mieExtinction = 2 * 4.440e-6
+    /// Mie aerosol: 15× Hillaire's (very clean) default, an aerosol optical depth of
+    /// ~0.08 like humid trade-wind air with sea salt. With his default the sky light on
+    /// open ground was under 10% of the sun's, about half what clear days measure.
+    static let mieScattering = 15 * 3.996e-6
+    static let mieExtinction = 15 * 4.440e-6
     static let mieHeight = 1200.0
     static let mieG = 0.8
     static let ozoneAbsorption = RGB(0.650e-6, 1.881e-6, 0.085e-6)
