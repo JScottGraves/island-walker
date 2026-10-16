@@ -67,4 +67,23 @@ final class IslandGenTests: XCTestCase {
         XCTAssertEqual(img.rgb.count, 64 * 36 * 3)
         XCTAssertNotEqual(img.rgb[0..<3], img.rgb[(img.rgb.count - 3)...], "top row (sky) and bottom row (ground) should differ")
     }
+
+    func testRealismOfAConeIsland() {
+        // A cone 1000 m high and 10 km across at 50 m cells: no pits, all land reaches the
+        // coast, slopes near atan(1000/5000) ≈ 11°, and hypsometry falls from 1 to ~0.
+        var g = Grid(width: 256, height: 256, cellSize: 50, fill: -1)
+        for y in 0..<256 {
+            for x in 0..<256 {
+                let r = (pow(Double(x - 128), 2) + pow(Double(y - 128), 2)).squareRoot() * 50
+                if r < 5000 { g[x, y] = Float(1000 * (1 - r / 5000)) }
+            }
+        }
+        let m = Realism.measure(g)
+        XCTAssertEqual(m.pits, 0)
+        XCTAssertEqual(m.hypsometry[0], 1, accuracy: 1e-9)
+        XCTAssertLessThan(m.hypsometry[10], 0.01)
+        XCTAssertGreaterThan(m.slopeHistogram[2], 0.8, "most of a 11° cone falls in the 10–15° band")
+        XCTAssertEqual(m.cliffFraction, 0)
+        XCTAssertGreaterThan(m.drainageDensity, 0)
+    }
 }
