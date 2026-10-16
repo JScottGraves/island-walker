@@ -22,7 +22,7 @@ struct TerrainParams {
     int levels;             // data mip levels
     int tileSize;
     int lodCount;
-    int unused;
+    int detailLods;         // CDLOD levels finer than data level 0 (TerrainDetail)
     int4 levelSize[2];      // samples per side, per data level
     int4 levelTiles[2];     // tiles per side, per data level
     int4 pageOffset[2];     // first page-table entry, per data level
@@ -77,7 +77,7 @@ float terrainHeight(constant TerrainParams &t, const device int *pages,
     if (morph > 0.0 && m + 1 < t.levels) h = mix(h, levelHeight(t, pages, tiles, m + 1, xy), morph);
     return h;
 }
-
+""" + detailShaderSource + """
 struct Uniforms {
     float4x4 viewProjection;
     float4x4 inverseViewProjection; // clip space → camera-relative world directions
@@ -142,22 +142,24 @@ vertex VOut terrainVertex(uint vid [[vertex_id]], uint iid [[instance_id]],
                           const device int *pages [[buffer(5)]],
                           texture2d_array<ushort, access::read> tiles [[texture(0)]],
                           texture2d<float> skyVisibility [[texture(1)]],
-                          texture2d_array<float, access::read> horizons [[texture(2)]]) {
+                          texture2d_array<float, access::read> horizons [[texture(2)]],
+                          constant DetailParams &d [[buffer(6)]],
+                          texture2d_array<float, access::read> detail [[texture(3)]]) {
     TerrainNode node = nodes[iid];
     uint row = uint(node.quads + 1);
     float2 g = float2(float(vid % row), float(vid / row));
-    float spacing = t.cellMetres * float(1 << node.lod);
+    float spacing = ldexp(t.cellMetres, node.lod - t.detailLods);
     float2 xy = node.origin + g * spacing;
-    float h0 = terrainHeight(t, pages, tiles, node.lod, 0.0, xy);
+    float h0 = surfaceHeight(t, d, detail, pages, tiles, node.lod, 0.0, xy);
     float ms = at(t.morphStart, node.lod), me = at(t.morphEnd, node.lod);
     float morph = saturate((distance(float3(xy, h0), u.cameraPosition) - ms) / max(me - ms, 1.0));
     xy -= fmod(g, 2.0) * spacing * morph;
-    float h = terrainHeight(t, pages, tiles, node.lod, morph, xy);
+    float h = surfaceHeight(t, d, detail, pages, tiles, node.lod, morph, xy);
     // Normal from central differences on the same surface, one grid step apart.
-    float hx = terrainHeight(t, pages, tiles, node.lod, morph, xy + float2(spacing, 0.0))
-             - terrainHeight(t, pages, tiles, node.lod, morph, xy - float2(spacing, 0.0));
-    float hy = terrainHeight(t, pages, tiles, node.lod, morph, xy + float2(0.0, spacing))
-             - terrainHeight(t, pages, tiles, node.lod, morph, xy - float2(0.0, spacing));
+    float hx = surfaceHeight(t, d, detail, pages, tiles, node.lod, morph, xy + float2(spacing, 0.0))
+             - surfaceHeight(t, d, detail, pages, tiles, node.lod, morph, xy - float2(spacing, 0.0));
+    float hy = surfaceHeight(t, d, detail, pages, tiles, node.lod, morph, xy + float2(0.0, spacing))
+             - surfaceHeight(t, d, detail, pages, tiles, node.lod, morph, xy - float2(0.0, spacing));
 
     VOut o;
     float3 world = float3(xy, h);

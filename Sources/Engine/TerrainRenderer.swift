@@ -17,7 +17,7 @@ public final class TerrainRenderer {
 
     struct TerrainParams {
         var cellMetres: Float, heightOffset: Float, heightScale: Float, domainSize: Float
-        var levels: Int32, tileSize: Int32, lodCount: Int32, unused: Int32 = 0
+        var levels: Int32, tileSize: Int32, lodCount: Int32, detailLods: Int32
         var levelSize: (SIMD4<Int32>, SIMD4<Int32>)
         var levelTiles: (SIMD4<Int32>, SIMD4<Int32>)
         var pageOffset: (SIMD4<Int32>, SIMD4<Int32>)
@@ -95,6 +95,8 @@ public final class TerrainRenderer {
     let skyVisibility: MTLTexture
     let horizons: MTLTexture
     let terrainAccel: MTLAccelerationStructure?
+    /// Generated ground below the data's 10 m grid, near the camera.
+    let detail: TerrainDetail
     let seaLevel: Float
     let maxHeight: Float
     /// What the last frame drew and how much is still loading, for the debug overlay.
@@ -139,8 +141,11 @@ public final class TerrainRenderer {
     /// - Parameters:
     ///   - terrain: the heightfield, streamed tile by tile from its mip pyramid.
     ///   - clouds: islandgen's standing cloud coverage over the same domain.
+    ///   - detailMaps: the bake's rain, drainage and hardness, to shape the fine detail.
+    ///   - fineDetail: false draws only the data's own grid (for comparisons).
     public init(device: MTLDevice, colorFormat: MTLPixelFormat, depthFormat: MTLPixelFormat,
-                terrain: TerrainTiles, shadows requested: Shadows = .rayTraced, clouds: Grid? = nil) throws {
+                terrain: TerrainTiles, shadows requested: Shadows = .rayTraced, clouds: Grid? = nil,
+                detailMaps: DetailMaps? = nil, fineDetail: Bool = true) throws {
         self.device = device
         guard let queue = device.makeCommandQueue() else { throw RendererError.setup("command queue") }
         self.queue = queue
@@ -209,7 +214,11 @@ public final class TerrainRenderer {
         self.overview = overview
         maxHeight = overview.range.max
         domainSize = Float(terrain.domainMetres)
-        let tree = TerrainQuadtree(quads: TerrainRenderer.nodeQuads, cellMetres: terrain.cellMetres,
+        // The finest CDLOD levels draw generated detail, each half the spacing of the next.
+        let detailLods = fineDetail ? TerrainDetail.levelCount(cellMetres: terrain.cellMetres) : 0
+        detail = try TerrainDetail(device: device, library: library, levels: detailLods, cellMetres: terrain.cellMetres,
+                                   seaLevel: terrain.seaLevel, seed: TerrainDetail.seed(of: overview), maps: detailMaps)
+        let tree = TerrainQuadtree(quads: TerrainRenderer.nodeQuads, cellMetres: terrain.cellMetres / Double(1 << detailLods),
                                    domain: terrain.domainMetres, overview: overview)
         quadtree = tree
         guard terrain.levels <= 8, tree.lodCount <= 16 else { throw RendererError.setup("terrain too large for the LOD tables") }
@@ -226,7 +235,7 @@ public final class TerrainRenderer {
         terrainParams = TerrainParams(
             cellMetres: Float(terrain.cellMetres), heightOffset: terrain.offset, heightScale: terrain.scale,
             domainSize: Float(terrain.domainMetres), levels: Int32(terrain.levels), tileSize: Int32(terrain.tileSize),
-            lodCount: Int32(tree.lodCount),
+            lodCount: Int32(tree.lodCount), detailLods: Int32(detailLods),
             levelSize: ints { terrain.levelSize($0) }, levelTiles: ints { terrain.tilesPerSide($0) },
             pageOffset: ints { pageOffsets[$0] },
             morphStart: floats(tree.morphStart), morphEnd: floats(tree.morphEnd))
@@ -325,7 +334,20 @@ public final class TerrainRenderer {
     }
 
     /// Ground height (metres) under a world position, as drawn up close: for the walker.
-    public func groundHeight(x: Double, y: Double) -> Double { heights.height(x: x, y: y) }
+    public func groundHeight(x: Double, y: Double) -> Double {
+        detail.height(x: x, y: y) ?? heights.height(x: x, y: y)
+    }
+
+    /// Generates the fine ground around (x, y) now, so `groundHeight` there returns the
+    /// detailed surface before the first frame is drawn (snapshots, spawning).
+    public func prepareGround(x: Double, y: Double) {
+        let eye = SIMD3(x, y, heights.height(x: x, y: y))
+        streamer.request(detail.neededTiles(eye: eye, streamer: streamer), synchronously: true)
+        guard let cmd = queue.makeCommandBuffer() else { return }
+        detail.update(cmd, eye: eye, streamer: streamer, terrainParams: terrainParams, pages: streamer.update())
+        cmd.commit()
+        cmd.waitUntilCompleted()
+    }
 
     static func buildShadowMesh(device: MTLDevice, queue: MTLCommandQueue, overview g: Grid) throws -> MTLAccelerationStructure {
         let n = g.width
@@ -529,13 +551,15 @@ public final class TerrainRenderer {
         }
         let selected = quadtree.select(eye: (eye.x, eye.y, eye.z), visible: visible)
         var keys: [TerrainStreamer.Key] = []
+        let detailLods = detail.levels
         for node in selected {
-            let level = Swift.min(node.lod, terrain.levels - 1)
+            let level = Swift.min(Swift.max(node.lod - detailLods, 0), terrain.levels - 1)
             keys += streamer.keys(level: level, x: node.x, y: node.y, size: node.size)
-            if level + 1 < terrain.levels {
+            if node.lod >= detailLods && level + 1 < terrain.levels {
                 keys += streamer.keys(level: level + 1, x: node.x, y: node.y, size: node.size)
             }
         }
+        keys += detail.neededTiles(eye: eye, streamer: streamer)
         streamer.request(keys, synchronously: synchronously)
         let pages = streamer.update()
 
@@ -563,6 +587,9 @@ public final class TerrainRenderer {
         enc.setVertexTexture(streamer.tiles, index: 0)
         enc.setVertexTexture(skyVisibility, index: 1)
         enc.setVertexTexture(horizons, index: 2)
+        var detailParams = detail.params
+        enc.setVertexBytes(&detailParams, length: MemoryLayout<TerrainDetail.Params>.stride, index: 6)
+        enc.setVertexTexture(detail.texture, index: 3)
     }
 
     func drawTerrain(_ enc: MTLRenderCommandEncoder, frame: FrameTerrain) {
@@ -618,6 +645,8 @@ public final class TerrainRenderer {
             frame: SIMD4(Float(width), Float(height), Float(frameNumber % 4096), historyValid ? 1 : 0))
         let skyView = skyViews[skyViewIndex]
         let frameTerrain = prepareTerrain(eye: eye, viewProjection: viewProjection, synchronously: synchronousStreaming)
+        // 0. Fine detail for the ground the camera has moved over.
+        detail.update(cmd, eye: eye, streamer: streamer, terrainParams: terrainParams, pages: frameTerrain.pages)
 
         // 1. Terrain depth.
         let depthPass = MTLRenderPassDescriptor()

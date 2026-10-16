@@ -13,6 +13,8 @@ import IslandGen
 /// on `--day N` (default mid-October); without it, at the fixed reference sun older
 /// renders used (app-NAME.png). `--shadows horizon` uses the baked horizon map instead
 /// of ray-traced shadows. `--size 2560x1440` sets the resolution (default 1280x720).
+/// `--detail off` draws only the bundle's own grid, without the generated fine detail;
+/// `--pitch DEG` looks that far below the horizon from every viewpoint (ground close-ups).
 /// Each view's GPU frame time is printed and written to timings.csv.
 enum Snapshots {
     static func option(_ name: String) -> String? {
@@ -30,7 +32,9 @@ enum Snapshots {
             let requested: TerrainRenderer.Shadows = option("--shadows") == "horizon" ? .horizonMap : .rayTraced
             let renderer = try TerrainRenderer(device: device, colorFormat: .bgra8Unorm_srgb,
                                                depthFormat: .depth32Float, terrain: tiles,
-                                               shadows: requested, clouds: clouds)
+                                               shadows: requested, clouds: clouds,
+                                               detailMaps: IslandSource.detailMaps(),
+                                               fineDetail: option("--detail") != "off")
             print("shadows: \(renderer.shadows.rawValue)")
             // Viewpoints are picked on the overview; the camera then stands on the full-detail ground.
             let height = try tiles.grid(level: tiles.overviewLevel())
@@ -61,7 +65,9 @@ enum Snapshots {
 
             for view in Viewpoints.automatic(height: height, drainageArea: area, scarp: scarp) {
                 var c = view.camera
+                renderer.prepareGround(x: c.x, y: c.y)
                 c.z = renderer.groundHeight(x: c.x, y: c.y) + 1.7
+                if let degrees = option("--pitch").flatMap(Double.init) { c.pitch = -degrees * .pi / 180 }
                 let forward = SIMD3<Float>(Float(sin(c.yaw) * cos(c.pitch)), Float(cos(c.yaw) * cos(c.pitch)), Float(sin(c.pitch)))
                 // nil: the reference sun.
                 for hour in hours.isEmpty ? [nil] : hours.map(Optional.some) {
