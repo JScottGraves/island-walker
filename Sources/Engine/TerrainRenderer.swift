@@ -66,6 +66,10 @@ public final class TerrainRenderer {
     let cloudShadowPipeline: MTLComputePipelineState
     /// Sunlight through the cloud layer over the island, from the cloud base up (r16Float).
     let cloudShadows: MTLTexture
+    /// Tiling cloud noise baked at start: Perlin–Worley shapes (128³) and Worley edge
+    /// detail (64³), both mipmapped.
+    let cloudShapeNoise: MTLTexture
+    let cloudDetailNoise: MTLTexture
     /// Per-size render targets: terrain depth (read by the cloud march), this frame's
     /// reduced-resolution clouds, and the two cloud histories the resolve ping-pongs between.
     struct Targets {
@@ -189,6 +193,12 @@ public final class TerrainRenderer {
         shadowDesc.storageMode = .private
         guard let shadowTexture = device.makeTexture(descriptor: shadowDesc) else { throw RendererError.setup("cloud shadow map") }
         cloudShadows = shadowTexture
+        guard let shapeBake = library.makeFunction(name: "cloudShapeNoise"),
+              let detailBake = library.makeFunction(name: "cloudDetailNoise") else { throw RendererError.setup("cloud noise kernels") }
+        cloudShapeNoise = try TerrainRenderer.bakeNoise(device: device, queue: queue, side: 128,
+                                                        kernel: try device.makeComputePipelineState(function: shapeBake))
+        cloudDetailNoise = try TerrainRenderer.bakeNoise(device: device, queue: queue, side: 64,
+                                                         kernel: try device.makeComputePipelineState(function: detailBake))
 
         let prepassDesc = MTLDepthStencilDescriptor()
         prepassDesc.depthCompareFunction = .less
@@ -324,6 +334,33 @@ public final class TerrainRenderer {
             ? try TerrainRenderer.buildShadowMesh(device: device, queue: queue, overview: overview)
             : nil
         uploadSkyView()
+    }
+
+    /// A cube of tiling noise written by `kernel`, with its mip chain.
+    static func bakeNoise(device: MTLDevice, queue: MTLCommandQueue, side: Int,
+                          kernel: MTLComputePipelineState) throws -> MTLTexture {
+        let desc = MTLTextureDescriptor()
+        desc.textureType = .type3D
+        desc.pixelFormat = .rgba8Unorm
+        desc.width = side
+        desc.height = side
+        desc.depth = side
+        desc.mipmapLevelCount = Int(log2(Double(side))) + 1
+        desc.usage = [.shaderRead, .shaderWrite]
+        desc.storageMode = .private
+        guard let texture = device.makeTexture(descriptor: desc), let cmd = queue.makeCommandBuffer(),
+              let compute = cmd.makeComputeCommandEncoder() else { throw RendererError.setup("cloud noise") }
+        compute.setComputePipelineState(kernel)
+        compute.setTexture(texture, index: 0)
+        compute.dispatchThreads(MTLSize(width: side, height: side, depth: side),
+                                threadsPerThreadgroup: MTLSize(width: 4, height: 4, depth: 4))
+        compute.endEncoding()
+        guard let blit = cmd.makeBlitCommandEncoder() else { throw RendererError.setup("cloud noise mips") }
+        blit.generateMipmaps(for: texture)
+        blit.endEncoding()
+        cmd.commit()
+        cmd.waitUntilCompleted()
+        return texture
     }
 
     /// Convenience for an in-memory heightfield (a height.r32 or a quick bake).
@@ -672,13 +709,14 @@ public final class TerrainRenderer {
         let group = MTLSize(width: 8, height: 8, depth: 1)
         compute.setComputePipelineState(cloudShadowPipeline)
         compute.setBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 0)
-        compute.setTextures([cloudMap, cloudShadows], range: 0..<2)
+        compute.setTextures([cloudMap, cloudShadows, cloudShapeNoise, cloudDetailNoise], range: 0..<4)
         compute.dispatchThreads(MTLSize(width: cloudShadows.width, height: cloudShadows.height, depth: 1),
                                 threadsPerThreadgroup: group)
         let grid = MTLSize(width: targets.clouds.width, height: targets.clouds.height, depth: 1)
         compute.setComputePipelineState(cloudMarch)
         compute.setBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 0)
-        compute.setTextures([targets.depth, skyView, cloudMap, targets.clouds, targets.cloudDistance], range: 0..<5)
+        compute.setTextures([targets.depth, skyView, cloudMap, targets.clouds, targets.cloudDistance,
+                             cloudShapeNoise, cloudDetailNoise], range: 0..<7)
         compute.dispatchThreads(grid, threadsPerThreadgroup: group)
         compute.setComputePipelineState(cloudResolve)
         compute.setTextures([targets.clouds, targets.cloudDistance, targets.history[previous], targets.historyDistance[previous],

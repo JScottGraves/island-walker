@@ -6,8 +6,9 @@
 ///
 /// Where clouds are comes from islandgen's baked orographic coverage (standing over the
 /// windward slopes and crest) plus drifting ocean cumulus; a height profile between the
-/// cloud base and the trade-wind inversion shapes them; value-noise fBm, advected with the
-/// trade wind, erodes the detail. Lighting: sun through a short light march with dual-lobe
+/// cloud base and the trade-wind inversion shapes them; noise textures advected with the
+/// trade wind give the shapes and erode the edges (research/clouds.md §13: Perlin–Worley shapes, Worley
+/// erosion of the rim chosen by pixel footprint, wisps low and billows high). Lighting: sun through a short light march with dual-lobe
 /// Henyey–Greenstein and Wrenninge multiple-scattering octaves, sky and ground ambient,
 /// Hillaire's energy-conserving step integration. Inserted after `Uniforms` and the sky
 /// helpers in the terrain shader.
@@ -16,10 +17,18 @@ let cloudShaderSource = """
 constant float kEarthRadius = 6360000.0;
 // Cumulus extinction per metre at full density (~40 m visibility inside a dense cloud core).
 constant float kCloudExtinction = 0.025;
-// March steps longer than these skip the detail noise and then the finest shape octave:
-// features smaller than the step only alias into stipple.
-constant float kCloudDetailStep = 250.0;
-constant float kCloudShapeStep = 700.0;
+// Noise tiles (metres): the Perlin–Worley shape texture repeats every kCloudShapeTile,
+// the Worley edge erosion every kCloudDetailTile, and the same Worley texture swings the
+// coverage of big clouds every kCloudBankTile.
+constant float kCloudShapeTile = 4000.0;
+constant float kCloudDetailTile = 700.0;
+constant float kCloudBankTile = 6300.0;
+// The light march and shadow map sample the shape at kCloudLightScale, without edge
+// erosion, but fine enough that the shape keeps its gaps (a blurred, uniform shape lets
+// less light into the cloud, since transmittance is convex in density).
+constant float kCloudLightScale = 100.0;
+// Angle one cloud texel subtends (≤360 rows over a 60° view), for footprints.
+constant float kCloudPixelAngle = 0.003;
 
 float cloudHash(float3 p) {
     p = fract(p * 0.3183099 + 0.1);
@@ -52,6 +61,78 @@ float remapRange(float v, float lo, float hi, float newLo, float newHi) {
     return newLo + (v - lo) / max(hi - lo, 1e-4) * (newHi - newLo);
 }
 
+// Tileable noise for the cloud textures, baked once at start (Schneider 2015).
+float3 tileHash(float3 cell, float period) {
+    uint3 q = uint3(int3(cell - period * floor(cell / period)));
+    q = q * uint3(1597334673u, 3812015801u, 2798796415u);
+    q = (q.x ^ q.y ^ q.z) * uint3(1597334673u, 3812015801u, 2798796415u);
+    return float3(q) * (1.0 / 4294967295.0);
+}
+
+// Gradient noise repeating every `period` cells, roughly in [-1, 1].
+float tileGradient(float3 x, float period) {
+    float3 i = floor(x), f = fract(x);
+    float3 w = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    float c[8];
+    for (int k = 0; k < 8; k++) {
+        float3 o = float3(float(k & 1), float((k >> 1) & 1), float(k >> 2));
+        float3 g = normalize(tileHash(i + o, period) * 2.0 - 1.0 + 1e-4);
+        c[k] = dot(g, f - o);
+    }
+    return mix(mix(mix(c[0], c[1], w.x), mix(c[2], c[3], w.x), w.y),
+               mix(mix(c[4], c[5], w.x), mix(c[6], c[7], w.x), w.y), w.z) * 1.6;
+}
+
+// Inverted Worley noise (1 at the feature points, falling away between them).
+float tileWorley(float3 x, float period) {
+    float3 i = floor(x), f = fract(x);
+    float nearest = 1e4;
+    for (int z = -1; z <= 1; z++)
+        for (int y = -1; y <= 1; y++)
+            for (int k = -1; k <= 1; k++) {
+                float3 o = float3(float(k), float(y), float(z));
+                float3 d = o + tileHash(i + o, period) - f;
+                nearest = min(nearest, dot(d, d));
+            }
+    return 1.0 - saturate(sqrt(nearest));
+}
+
+float worleyFbm(float3 p, float frequency) {
+    return tileWorley(p * frequency, frequency) * 0.625
+         + tileWorley(p * frequency * 2.0, frequency * 2.0) * 0.25
+         + tileWorley(p * frequency * 4.0, frequency * 4.0) * 0.125;
+}
+
+// Shape texture: R Perlin–Worley (billowy, connected), GBA Worley fBm at 4, 8, 16 cells.
+kernel void cloudShapeNoise(texture3d<float, access::write> out [[texture(0)]],
+                            uint3 g [[thread_position_in_grid]]) {
+    uint n = out.get_width();
+    if (any(g >= n)) return;
+    float3 p = (float3(g) + 0.5) / float(n);
+    float perlin = 0.0, amplitude = 1.0, frequency = 4.0;
+    for (int k = 0; k < 6; k++) {
+        perlin += amplitude * tileGradient(p * frequency, frequency);
+        frequency *= 2.0;
+        amplitude *= 0.55;
+    }
+    // Billowy Perlin, dilated by inverted Worley (Schneider 2017: remap(perlin, 1 - worley, 1, 0, 1)).
+    perlin = abs(saturate(0.5 + 0.25 * perlin) * 2.0 - 1.0);
+    float w0 = worleyFbm(p, 4.0), w1 = worleyFbm(p, 8.0), w2 = worleyFbm(p, 16.0);
+    float perlinWorley = saturate(remapRange(perlin, w0 - 1.0, 1.0, 0.0, 1.0));
+    out.write(float4(perlinWorley, w0, w1, w2), g);
+}
+
+// Edge-detail texture: Worley fBm at 2, 4 and 8 cells; A a second, offset layer that
+// warps the others' coordinates (a cheap stand-in for curl noise).
+kernel void cloudDetailNoise(texture3d<float, access::write> out [[texture(0)]],
+                             uint3 g [[thread_position_in_grid]]) {
+    uint n = out.get_width();
+    if (any(g >= n)) return;
+    float3 p = (float3(g) + 0.5) / float(n);
+    out.write(float4(worleyFbm(p, 2.0), worleyFbm(p, 4.0), worleyFbm(p, 8.0),
+                     0.5 + 0.5 * tileGradient(p * 4.0 + 11.0, 4.0)), g);
+}
+
 // Cloud cover at a ground position: baked orographic cloud, which stays put over the
 // terrain, or drifting ocean cumulus, whichever is more.
 float cloudCoverage(constant Uniforms &u, texture2d<float> cloudMap, float2 xy) {
@@ -72,10 +153,12 @@ float altitude(constant Uniforms &u, float3 p) {
     return r - kEarthRadius;
 }
 
-// Cloud density at a world position (0 outside the layer), with noise detail matched to
-// `stepLength`, the length of the march step that samples it. The detail erosion fades
-// out over a range of step lengths rather than at one, which would draw a seam.
-float cloudDensity(constant Uniforms &u, texture2d<float> cloudMap, float3 p, float stepLength) {
+// Cloud density at a world position (0 outside the layer). `scale` is the smallest feature
+// worth drawing there, in metres (a texel's footprint, or a light-march step): it picks the
+// noise mips and fades each erosion octave in and out over a range rather than at a seam.
+// `erode` is false for the light march and shadows, which need only the bulk shape.
+float cloudDensity(constant Uniforms &u, texture2d<float> cloudMap, texture3d<float> shapeNoise,
+                   texture3d<float> detailNoise, float3 p, float scale, bool erode) {
     float base = u.cloudLayer.x, top = u.cloudLayer.y;
     float h = altitude(u, p);
     if (h < base || h > top) return 0.0;
@@ -86,16 +169,51 @@ float cloudDensity(constant Uniforms &u, texture2d<float> cloudMap, float3 p, fl
     float hn = (h - base) / max(localTop - base, 1.0);
     if (hn > 1.0) return 0.0;
     float profile = saturate(hn / 0.12) * saturate((1.0 - hn) / 0.3);
+    constexpr sampler s(filter::linear, mip_filter::linear, address::repeat);
     // The air streams through the standing cloud: only the texture moves with the wind.
-    float3 q = float3(p.xy - u.cloudWind.xy * u.cloudLayer.z, h) / 1400.0;
-    float shape = fbm3(q, stepLength < kCloudShapeStep ? 3 : 2) * profile;
+    float3 q = float3(p.xy - u.cloudWind.xy * u.cloudLayer.z, h);
+    float shapeLod = clamp(log2(scale * float(shapeNoise.get_width()) / kCloudShapeTile), 0.0, 6.0);
+    float4 n = shapeNoise.sample(s, q / kCloudShapeTile, level(shapeLod));
+    float worley = n.g * 0.625 + n.b * 0.25 + n.a * 0.125;
+    float shape = saturate(remapRange(n.r, worley - 1.0, 1.0, 0.0, 1.0));
+    // Matched to the spread of the value noise the coverage was tuned for (its quantiles
+    // from 10% to 99% agree within 0.02), so a coverage of c still fills about c of the sky.
+    shape = saturate(shape * 1.762 - 0.613) * profile;
+    // Big clouds are ragged at the kilometre scale as well (Lovejoy 1982): cut the
+    // coverage by up to all of it over cells of 0.8–3 km, so banks get bays, gaps and towers.
+    // It barely raises coverage elsewhere, since that merged separate cumulus into one
+    // mass; multiplicative, so clear sky stays clear. It shapes the bulk cloud, so the
+    // light march and shadows see it too.
+    if (shape <= 1.0 - 1.2 * coverage) return 0.0;  // clear even at the largest swing
+    float bankLod = clamp(log2(scale * float(detailNoise.get_width()) / kCloudBankTile), 0.0, 5.0);
+    float3 bank = detailNoise.sample(s, q / kCloudBankTile + float3(0.31, 0.17, 0.53), level(bankLod)).rgb;
+    // Median 0.48 and spread 0.10 of this Worley mix, measured on the baked noise.
+    float swing = clamp((bank.r * 0.6 + bank.g * 0.4 - 0.48) / 0.10, -2.5, 2.5);
+    coverage = saturate(coverage * (1.0 + (swing < 0.0 ? 0.4 : 0.08) * swing));
     float d = saturate(remapRange(shape, 1.0 - coverage, 1.0, 0.0, 1.0));
-    float detail = 1.0 - smoothstep(0.5 * kCloudDetailStep, kCloudDetailStep, stepLength);
-    if (detail > 0.0 && d > 0.0) {
-        float erode = fbm3(q * 7.0 + float3(3.1, 7.7, 1.3), 2);
-        d = saturate(remapRange(d, 0.35 * detail * erode * (1.2 - hn), 1.0, 0.0, 1.0));
+    float fade = 1.0 - smoothstep(kCloudDetailTile / 16.0, kCloudDetailTile / 8.0, scale);
+    if (erode && fade > 0.0 && d > 0.0 && d < 0.9) {
+        // Erode the rim, not the core (Schneider 2015/2017; edges mix with dry air, the core
+        // doesn't: Heus & Jonker 2008). Warp the detail so edges swirl and tear. Fades out
+        // once a texel spans its finest Worley cells (tile / 8).
+        float lod = clamp(log2(scale * float(detailNoise.get_width()) / kCloudDetailTile), 0.0, 5.0);
+        float3 dq = q / kCloudDetailTile;
+        float warp = detailNoise.sample(s, dq * 0.37, level(lod)).a;
+        dq += (warp - 0.5) * float3(0.6, 0.6, 0.3);
+        float3 w = detailNoise.sample(s, dq, level(lod)).rgb;
+        float fine = w.r * 0.625 + w.g * 0.25 + w.b * 0.125;
+        // Inverted Worley low in the cloud tears it into wisps; plain Worley higher up
+        // leaves rounded billows (Schneider 2015).
+        float erosion = mix(1.0 - fine, fine, saturate(hn * 4.0));
+        d = saturate(remapRange(d, 0.45 * fade * erosion, 1.0, 0.0, 1.0));
     }
-    return d;
+    // Real cumulus edges are abrupt: liquid water appears within metres of the boundary.
+    // Seen from outside, raise thin density so an edge goes from clear to solid quickly
+    // instead of through a few hundred metres of haze (Nubis³ sharpens low densities the
+    // same way). Not within ~300 m of the camera, where a walker in the cloud should still
+    // see through its thin parts, nor in the light march.
+    float sharpen = erode ? smoothstep(1.0, 3.0, scale) : 0.0;
+    return d > 0.0 ? pow(d, mix(1.0, 0.4, sharpen)) : 0.0;
 }
 
 float henyeyGreenstein(float c, float g) {
@@ -139,7 +257,8 @@ struct CloudResult {
 
 // Marches the cloud layer from the camera along `dir` up to `maxDistance` (the terrain,
 // or far away for the sky). Radiance is in the renderer's display units (π · k · L).
-CloudResult marchClouds(constant Uniforms &u, texture2d<float> cloudMap, float3 dir, float maxDistance, float2 pixel) {
+CloudResult marchClouds(constant Uniforms &u, texture2d<float> cloudMap, texture3d<float> shapeNoise,
+                        texture3d<float> detailNoise, float3 dir, float maxDistance, float2 pixel) {
     CloudResult result;
     result.light = 0.0;
     result.transmittance = 1.0;
@@ -162,31 +281,48 @@ CloudResult marchClouds(constant Uniforms &u, texture2d<float> cloudMap, float3 
 
     end = min(end, start + 60000.0);
     if (end <= start) return result;
-    // Few steps: the jitter moves every frame and the history averages it out.
-    const int steps = maxDistance > 1e8 ? 32 : 24;
-    float span = end - start;
-    // Short steps near the camera (fog around a walker inside the cloud), longer far out.
+    // Steps of ~1.25% of the distance (15–300 m), so a cloud lobe gets several samples at any
+    // range: a few long fixed steps sliced distant banks into regular ridges. Empty air is
+    // crossed two steps at a time; the first hit backs up and re-enters at the short step,
+    // which holds until several samples in a row come up empty (Schneider 2017). Longer
+    // skips jumped thin slices of banks seen edge-on and tore them into horizontal bars.
+    // The start moves every frame and the history averages the jitter out.
     float jitter = fract(52.9829189 * fract(dot(pixel, float2(0.06711056, 0.00583715))));
     float weightedDistance = 0.0, weight = 0.0;
-    float tPrevious = start;
-    for (int k = 0; k < steps; k++) {
-        float f = (float(k) + jitter) / float(steps);
-        float t = start + span * f * f;
-        float dt = max(t - tPrevious, 1.0);
-        tPrevious = t;
+    float t = start + jitter * clamp(start * 0.0125, 15.0, 300.0);
+    bool fine = false;
+    int empty = 0;
+    for (int k = 0; k < 160 && t < end; k++) {
+        float dt = clamp(t * 0.0125, 15.0, 300.0);
         float3 p = u.cameraPosition + dir * t;
-        float density = cloudDensity(u, cloudMap, p, dt);
-        if (density <= 0.0) continue;
+        float density = cloudDensity(u, cloudMap, shapeNoise, detailNoise, p, max(t * kCloudPixelAngle, 1.0), true);
+        if (density <= 0.0) {
+            if (++empty > 8) fine = false;
+            t += fine ? dt : 2.0 * dt;
+            continue;
+        }
+        if (!fine) {
+            fine = true;
+            empty = 0;
+            t = max(t - 2.0 * dt, start);
+            continue;
+        }
+        empty = 0;
+        float tSample = t;
+        float stepLength = min(dt, end - tSample);  // not past the terrain behind
+        t += dt;
         // Thin the cloud right around the camera so a walker inside it still sees the
         // ground at their feet: fog, not a grey wall.
-        float sigma = density * kCloudExtinction * mix(0.3, 1.0, saturate(t / 400.0));
+        float sigma = density * kCloudExtinction * mix(0.3, 1.0, saturate(tSample / 400.0));
 
-        // Optical depth towards the sun over a few coarse samples (~550 m in total).
+        // Optical depth towards the sun over a few coarse samples (~550 m in total), their
+        // spacing jittered with the view march so it doesn't print as bands of shading.
         float tau = 0.0, tl = 0.0;
-        float lightStep = 50.0;
+        float lightStep = 50.0 * (0.75 + 0.5 * jitter);
         for (int j = 0; j < 3; j++) {
             tl += lightStep;
-            tau += cloudDensity(u, cloudMap, p + l * (tl - 0.5 * lightStep), max(lightStep, kCloudDetailStep)) * kCloudExtinction * lightStep;
+            tau += cloudDensity(u, cloudMap, shapeNoise, detailNoise, p + l * (tl - 0.5 * lightStep),
+                                max(lightStep, kCloudLightScale), false) * kCloudExtinction * lightStep;
             lightStep *= 3.0;
         }
         // Sun: dual-lobe phase (silver linings towards the sun, a little back-scatter),
@@ -202,11 +338,11 @@ CloudResult marchClouds(constant Uniforms &u, texture2d<float> cloudMap, float3 
         float hn = saturate((altitude(u, p) - u.cloudLayer.x) / (u.cloudLayer.y - u.cloudLayer.x));
         inScatter += 0.5 * skyNeutral * mix(0.5, 1.0, hn) + 0.5 * ground * (1.0 - 0.6 * hn);
 
-        float stepT = exp(-sigma * dt);
+        float stepT = exp(-sigma * stepLength);
         // Energy-conserving integration over the step (cloud albedo ~1: scattering = extinction).
         result.light += result.transmittance * inScatter * (1.0 - stepT);
         float absorbed = result.transmittance * (1.0 - stepT);
-        weightedDistance += absorbed * t;
+        weightedDistance += absorbed * tSample;
         weight += absorbed;
         result.transmittance *= stepT;
         if (result.transmittance < 0.01) break;
@@ -253,6 +389,8 @@ kernel void cloudMarch(constant Uniforms &u [[buffer(0)]],
                        depth2d<float, access::read> depth [[texture(0)]],
                        texture2d<float> skyView [[texture(1)]],
                        texture2d<float> cloudMap [[texture(2)]],
+                       texture3d<float> shapeNoise [[texture(5)]],
+                       texture3d<float> detailNoise [[texture(6)]],
                        texture2d<float, access::write> cloudOut [[texture(3)]],
                        texture2d<float, access::write> distanceOut [[texture(4)]],
                        uint2 g [[thread_position_in_grid]]) {
@@ -263,7 +401,7 @@ kernel void cloudMarch(constant Uniforms &u [[buffer(0)]],
     // Interleaved gradient noise shifted every frame (Jimenez 2014): over the history's
     // ~10 frames each texel sees evenly spread step offsets.
     float2 jitter = float2(g) + 5.588238 * fmod(u.frame.z, 64.0);
-    CloudResult c = marchClouds(u, cloudMap, dir, behind, jitter);
+    CloudResult c = marchClouds(u, cloudMap, shapeNoise, detailNoise, dir, behind, jitter);
     float3 light = 0.0;
     if (c.transmittance < 0.999) {
         // Aerial perspective over the cloud, at the cloud's own distance.
@@ -354,7 +492,8 @@ float3 compositeClouds(constant Uniforms &u, texture2d<float> clouds, texture2d<
 
 // Sunlight reaching a terrain point through the cloud layer (cloud shadows), from a
 // coarse march along the sun direction.
-float cloudShadow(constant Uniforms &u, texture2d<float> cloudMap, float3 p) {
+float cloudShadow(constant Uniforms &u, texture2d<float> cloudMap, texture3d<float> shapeNoise,
+                  texture3d<float> detailNoise, float3 p) {
     float3 l = normalize(u.sunDirection);
     if (l.z <= 0.02) return 1.0;
     float base = u.cloudLayer.x, top = u.cloudLayer.y;
@@ -366,7 +505,7 @@ float cloudShadow(constant Uniforms &u, texture2d<float> cloudMap, float3 p) {
     float dt = (t1 - t0) / float(samples);
     for (int k = 0; k < samples; k++) {
         float3 q = p + l * (t0 + (float(k) + 0.5) * dt);
-        tau += cloudDensity(u, cloudMap, q, dt) * kCloudExtinction * dt;
+        tau += cloudDensity(u, cloudMap, shapeNoise, detailNoise, q, max(dt, kCloudLightScale), false) * kCloudExtinction * dt;
     }
     // Light scattered forward through the cloud keeps its shadow from going fully black.
     return mix(0.3, 1.0, exp(-tau));
@@ -377,11 +516,13 @@ float cloudShadow(constant Uniforms &u, texture2d<float> cloudMap, float3 p) {
 kernel void cloudShadowMap(constant Uniforms &u [[buffer(0)]],
                            texture2d<float> cloudMap [[texture(0)]],
                            texture2d<float, access::write> shadows [[texture(1)]],
+                           texture3d<float> shapeNoise [[texture(2)]],
+                           texture3d<float> detailNoise [[texture(3)]],
                            uint2 g [[thread_position_in_grid]]) {
     uint side = shadows.get_width();
     if (g.x >= side || g.y >= side) return;
     float2 xy = (float2(g) + 0.5) / float(side) * u.cloudLayer.w;
-    shadows.write(float4(cloudShadow(u, cloudMap, float3(xy, u.cloudLayer.x))), g);
+    shadows.write(float4(cloudShadow(u, cloudMap, shapeNoise, detailNoise, float3(xy, u.cloudLayer.x))), g);
 }
 
 // Sunlight reaching a ground point through the clouds, from the shadow map: follow the
