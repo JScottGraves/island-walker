@@ -12,7 +12,7 @@ import IslandCore
 public enum StreamPower {
     public struct Params: Sendable {
         /// Fluvial erodibility. Units with m = 0.5: m^(1-2m) / yr = 1 / yr.
-        public var erodibility: Double = 4e-6
+        public var erodibility: Double = 1e-5
         public var areaExponent: Double = 0.5
         /// Hillslope diffusivity in m² / yr (soil creep).
         public var diffusivity: Double = 0.02
@@ -21,6 +21,10 @@ public enum StreamPower {
         /// Time step in years.
         public var timeStep: Double = 2000
         public var seaLevel: Float = 0
+        /// Slope-weighted random choice among downslope neighbours (see step 1 below).
+        public var randomRouting = true
+        /// Seeds the random routing.
+        public var seed: UInt64 = 0
         public init() {}
     }
 
@@ -38,7 +42,8 @@ public enum StreamPower {
     ///   - rain: optional rainfall map (m/yr) weighting drainage area; nil means uniform 1.
     ///   - hardness: optional rock hardness; erodibility is divided by it.
     @discardableResult
-    public static func step(_ h: inout Grid, rain: Grid? = nil, hardness: Grid? = nil, params: Params = Params()) -> Flow {
+    public static func step(_ h: inout Grid, rain: Grid? = nil, hardness: Grid? = nil, params: Params = Params(),
+                            stepIndex: Int = 0) -> Flow {
         let n = h.count, w = h.width
         let sea = params.seaLevel
         let dt = params.timeStep
@@ -50,24 +55,39 @@ public enum StreamPower {
 
         PriorityFlood.fill(&h, seaLevel: sea)
 
-        // 1. Receivers: steepest D8 descent. Outlets (sea, edge) drain to themselves.
+        // 1. Receivers. Plain steepest-descent D8 carves channels along the grid's 0°, 45°
+        //    and 90° lines. With `randomRouting`, each step picks a downslope neighbour at
+        //    random, weighted by slope; over many steps flow spreads like multiple-flow
+        //    routing and channels follow the terrain instead of the grid.
+        //    The choice is a pure hash of (seed, step, cell), so results stay deterministic.
         var receivers = [Int32](repeating: 0, count: n)
         var receiverDistance = [Double](repeating: 1, count: n)
+        let stepSeed = Hash.mix(params.seed ^ Hash.mix(UInt64(stepIndex)))
+        var slopes = [Double](repeating: 0, count: 8)
         for i in 0..<n {
             receivers[i] = Int32(i)
             if h.isBoundary(i) || h.values[i] <= sea { continue }
             let x = i % w, y = i / w
-            var best = 0.0
+            var best = 0.0, bestK = -1, total = 0.0
             for k in 0..<8 {
                 let j = (y + D8.dy[k]) * w + (x + D8.dx[k])
-                let d = D8.distance[k] * h.cellSize
-                let s = Double(h.values[i] - h.values[j]) / d
-                if s > best {
-                    best = s
-                    receivers[i] = Int32(j)
-                    receiverDistance[i] = d
+                let s = Double(h.values[i] - h.values[j]) / (D8.distance[k] * h.cellSize)
+                slopes[k] = Swift.max(0, s)
+                total += slopes[k]
+                if s > best { best = s; bestK = k }
+            }
+            guard bestK >= 0 else { continue }
+            var pick = bestK
+            if params.randomRouting && total > 0 {
+                var u = Double(Hash.mix(stepSeed ^ UInt64(i)) >> 11) * 0x1.0p-53 * total
+                for k in 0..<8 where slopes[k] > 0 {
+                    pick = k
+                    u -= slopes[k]
+                    if u < 0 { break }
                 }
             }
+            receivers[i] = Int32((y + D8.dy[pick]) * w + (x + D8.dx[pick]))
+            receiverDistance[i] = D8.distance[pick] * h.cellSize
         }
 
         // 2. Donor lists (counting sort) and the upstream-ordered stack.

@@ -63,10 +63,10 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
 
     // Simple aerial perspective until the physically based sky lands.
     float dist = length(in.world - u.cameraPosition);
-    float fog = 1.0 - exp(-dist / 30000.0);
+    float fog = 0.85 * (1.0 - exp(-dist / 60000.0));
     color = mix(color, float3(0.62, 0.72, 0.85), fog);
 
-    color = color / (1.0 + color);             // Reinhard tone map
+    color = color * (1.0 + color / 6.25) / (1.0 + color);   // extended Reinhard, white = 2.5
     return float4(pow(color, float3(1.0 / 2.2)), 1.0);
 }
 """

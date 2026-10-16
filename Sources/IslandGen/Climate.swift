@@ -24,40 +24,46 @@ public enum Climate {
 
     public static func precipitation(height: Grid, seaLevel: Float, params: Params = Params()) -> Grid {
         let w = height.width, n = height.height
+        // Air flows over the sea surface, not the sea floor: clamp before smoothing, or the
+        // steep submarine flanks pull the rain maximum out over the ocean.
+        var surface = height
+        for i in 0..<surface.count { surface.values[i] = Swift.max(surface.values[i], seaLevel) }
         let radius = Swift.max(1, Int(params.smoothing / height.cellSize))
-        let smooth = boxBlur(height, radius: radius)
+        let smooth = boxBlur(surface, radius: radius)
         let wx = cos(params.windDirection), wy = sin(params.windDirection)
-        var rain = Grid(width: w, height: n, cellSize: height.cellSize)
 
-        // Moisture budget: "crossed" accumulates (height above sea × distance) along the
-        // wind. Cells are visited in upwind-to-downwind order so each one can read the
-        // already-computed value one cell upwind (semi-Lagrangian, O(n log n)).
-        var crossed = Grid(width: w, height: n, cellSize: height.cellSize)
-        let order = (0..<(w * n)).sorted { a, b in
-            let pa = Double(a % w) * wx + Double(a / w) * wy
-            let pb = Double(b % w) * wx + Double(b / w) * wy
-            return pa < pb || (pa == pb && a < b)
-        }
-        let km = height.cellSize / 1000
-        for i in order {
-            let x = i % w, y = i / w
-            let ux = Double(x) - wx, uy = Double(y) - wy
-            var upwind: Float = 0
-            if ux >= 0, uy >= 0, ux <= Double(w - 1), uy <= Double(n - 1) {
-                upwind = crossed.sample(x: ux, y: uy)
+        // Rain shadow: on a coarse grid (~1 km cells), march each cell's ray back upwind to
+        // the domain edge, summing (land height × distance) already crossed. Marching whole
+        // rays on a coarse grid is cheap and free of the banding a cell-to-cell sweep shows.
+        let coarseSide = Swift.max(16, Int((Double(w) * height.cellSize / 1000).rounded()))
+        let coarseCell = Double(w) * height.cellSize / Double(coarseSide)
+        let toFine = coarseCell / height.cellSize
+        var crossed = Grid(width: coarseSide, height: coarseSide, cellSize: coarseCell)
+        let stepKm = 0.5
+        let stepFine = stepKm * 1000 / height.cellSize
+        for cy in 0..<coarseSide {
+            for cx in 0..<coarseSide {
+                var fx = (Double(cx) + 0.5) * toFine - 0.5, fy = (Double(cy) + 0.5) * toFine - 0.5
+                var sum = 0.0
+                while true {
+                    fx -= wx * stepFine
+                    fy -= wy * stepFine
+                    if fx < 0 || fy < 0 || fx > Double(w - 1) || fy > Double(n - 1) { break }
+                    sum += Double(Swift.max(0, smooth.sample(x: fx, y: fy) - seaLevel)) * stepKm
+                }
+                crossed[cx, cy] = Float(sum)
             }
-            let land = Swift.max(0, smooth.values[i] - seaLevel)
-            crossed.values[i] = upwind + Float(Double(land) * km)
         }
 
+        var rain = Grid(width: w, height: n, cellSize: height.cellSize)
         for y in 0..<n {
             for x in 0..<w {
-                let i = height.index(x, y)
                 let gx = Double(smooth.sample(x: Double(x + 1), y: Double(y)) - smooth.sample(x: Double(x - 1), y: Double(y))) / (2 * height.cellSize)
                 let gy = Double(smooth.sample(x: Double(x), y: Double(y + 1)) - smooth.sample(x: Double(x), y: Double(y - 1))) / (2 * height.cellSize)
                 let upslope = Swift.max(0, gx * wx + gy * wy)
-                let shadow = exp(-params.shadowStrength * Double(crossed.values[i]))
-                rain.values[i] = Float(params.baseRain * (1 + params.upslopeGain * upslope) * shadow)
+                let c = Double(crossed.sample(x: (Double(x) + 0.5) / toFine - 0.5, y: (Double(y) + 0.5) / toFine - 0.5))
+                let shadow = exp(-params.shadowStrength * c)
+                rain[x, y] = Float(params.baseRain * (1 + params.upslopeGain * upslope) * shadow)
             }
         }
         return rain

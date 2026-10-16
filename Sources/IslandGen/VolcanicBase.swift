@@ -73,12 +73,12 @@ public enum VolcanicBase {
             var lengths: [Double] = []
             for r in 0..<riftCount {
                 angles.append(base + Double(r) * 2 * Double.pi / Double(riftCount) + rng.uniform(-0.5, 0.5))
-                lengths.append(domainSize * rng.uniform(0.08, 0.20))
+                lengths.append(domainSize * rng.uniform(0.10, 0.24))
             }
             shields.append(ShieldVolcano(
                 x: x, y: y,
                 summitHeight: rng.uniform(2600, 3400),
-                radius: domainSize * rng.uniform(0.24, 0.32),
+                radius: domainSize * rng.uniform(0.32, 0.40),
                 riftAngles: angles, riftLengths: lengths))
         }
         return shields
@@ -124,9 +124,11 @@ public enum VolcanicBase {
 
                 height[x, y] = Float(h)
                 // Dike swarms along rift zones resist erosion; ash and weathered flows are soft.
-                let dike = exp(-pow(riftNear / 1500, 2))
+                // Kept modest and narrow: a hard, wide crest stops valley heads from cutting
+                // back into the ridge, which leaves flat-topped ridges instead of sharp ones.
+                let dike = exp(-pow(riftNear / 600, 2))
                 let variation = 0.25 * Noise.fbm(px / 4000, py / 4000, seed: hardSeed, octaves: 4)
-                hardness[x, y] = Float(Swift.max(0.3, 0.8 + 0.9 * dike + variation))
+                hardness[x, y] = Float(Swift.max(0.4, 0.9 + 0.35 * dike + variation))
             }
         }
         return Output(height: height, hardness: hardness)
