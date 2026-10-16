@@ -12,7 +12,7 @@ The architecture and Milestone 1 plan live in the project's plan document
 |---|---|
 | `IslandCore` | Grids, deterministic RNG and noise shared by everything |
 | `IslandGen` | Generation: shield volcanoes, rainfall, priority-flood, stream power erosion, previews |
-| `islandgen` | Command-line bake tool |
+| `IslandGenCLI` | The `islandgen` command-line bake tool |
 | `Engine` | Metal renderer (currently one whole-island mesh; streaming LOD comes next) |
 | `Walker` | First-person controller on the heightfield |
 | `IslandApp` | macOS app window |
