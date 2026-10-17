@@ -196,7 +196,7 @@ footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--rule);
   <div class="eyebrow">Island Walker · architecture explainer</div>
   <h1>How the island walker works</h1>
   <p class="lede">A seed goes into a geology simulator that runs offline for about twenty seconds. What comes out is a tiled map of one volcanic island. A Metal app streams that map in around you as you walk, and lights it with a moving sun, a physical sky and trade-wind clouds.</p>
-  <div class="meta"><span>Repo: JScottGraves/island-walker</span><span>Written against main @ aca0579 (PR #23), plus PR #25</span><span>2026-10-16</span><span>Swift + Metal · macOS 14 · Apple Silicon</span></div>
+  <div class="meta"><span>Repo: JScottGraves/island-walker</span><span>Written against main @ 28403ff (PR #26)</span><span>2026-10-16</span><span>Swift + Metal · macOS 14 · Apple Silicon</span></div>
   <div class="facts" role="list">
     <div role="listitem"><b>80 km</b><span>square domain, island in the middle</span></div>
     <div role="listitem"><b>78 m</b><span>erosion grid (1024²)</span></div>
@@ -1247,7 +1247,7 @@ tile name: &lt;level&gt;/&lt;ty&gt;_&lt;tx&gt;.lz4, row 0 south</code></pre>
 <section id="history">
   <div class="eyebrow">9</div>
   <h2>How we got here</h2>
-  <p>Twenty-four pull requests merged on 2026-10-16, in order. Each one is a single idea, so this list doubles as a map of why the code looks the way it does.</p>
+  <p>All twenty-six pull requests merged on 2026-10-16, in order. Each one is a single idea, so this list doubles as a map of why the code looks the way it does.</p>
   <div class="tablewrap">
     <table>
       <thead><tr><th class="num">PR</th><th>Change</th><th>Area</th></tr></thead>
@@ -1276,7 +1276,8 @@ tile name: &lt;level&gt;/&lt;ty&gt;_&lt;tx&gt;.lz4, row 0 south</code></pre>
         <tr><td class="num">22</td><td>Fine ground detail near the walker: GPU clipmap to 31 cm</td><td>detail</td></tr>
         <tr><td class="num">23</td><td>Ragged cloud edges at every scale, adaptive march without step ridges</td><td>lighting</td></tr>
         <tr><td class="num">24</td><td>Explainer: fine ground detail</td><td>docs</td></tr>
-        <tr><td class="num">25</td><td>Faster ground shading: sun rays in a compute pass, narrower LOD rings <i>(open when this was written)</i></td><td>lighting</td></tr>
+        <tr><td class="num">25</td><td>Faster ground shading: sun rays in a compute pass, narrower LOD rings</td><td>lighting</td></tr>
+        <tr><td class="num">26</td><td>Explainer: ragged clouds and the sun-ray pass</td><td>docs</td></tr>
       </tbody>
     </table>
   </div>
@@ -1313,7 +1314,7 @@ tile name: &lt;level&gt;/&lt;ty&gt;_&lt;tx&gt;.lz4, row 0 south</code></pre>
 </section>
 
 <footer>
-  Written from the code on main at aca0579 and PR #25 and the project's plan, research notes and renders, 2026-10-16. Numbers quoted from PR descriptions and project notes are measurements on Scott's M3 at the time. When the code changes, update the section it touches; the source lives at <code>docs/architecture/index.html</code> in the repo.
+  Written from the code on main at 28403ff and the project's plan, research notes and renders, 2026-10-16. Numbers quoted from PR descriptions and project notes are measurements on Scott's M3 at the time. When the code changes, update the section it touches; the source lives at <code>docs/architecture/index.html</code> in the repo.
 </footer>
 </main>
 </div>
