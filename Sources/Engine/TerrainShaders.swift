@@ -376,9 +376,22 @@ SunSurface sunSurface(texture2d<uint, access::read> surface, depth2d<float, acce
     return s;
 }
 
+// Height under xy of the overview mesh the rays are traced against: vertices at cell
+// centres, each quad split along its (i, j)–(i+1, j+1) diagonal (Grid.meshHeight).
+float shadowMeshHeight(texture2d<float, access::read> heights, float2 xy, float domain) {
+    int2 size = int2(heights.get_width(), heights.get_height());
+    float2 uv = clamp(xy / domain * float2(size) - 0.5, float2(0.0), float2(size - 1));
+    int2 c = min(int2(uv), max(size - 2, int2(0)));
+    int2 c1 = min(c + 1, size - 1);
+    float2 f = uv - float2(c);
+    float a = heights.read(uint2(c)).r, b = heights.read(uint2(c1.x, c.y)).r;
+    float e = heights.read(uint2(c.x, c1.y)).r, d = heights.read(uint2(c1)).r;
+    return f.x >= f.y ? a + f.x * (b - a) + f.y * (d - b) : a + f.y * (e - a) + f.x * (d - e);
+}
+
 // −1 where only rays can tell; otherwise the answer (sky, facing away, under thick cloud,
-// or decided by the horizon map).
-float sunWithoutRays(constant Uniforms &u, SunSurface s, float3 l,
+// or decided by the horizon map). `crown`: a tree pixel standing clear above the shadow mesh.
+float sunWithoutRays(constant Uniforms &u, SunSurface s, bool crown, float3 l,
                      texture2d_array<float, access::read> horizons, texture2d<float> cloudShadows) {
     if (s.sky) return 1.0;
     // Leaves are two-sided and pass light through: a tree pixel facing away still counts.
@@ -392,8 +405,10 @@ float sunWithoutRays(constant Uniforms &u, SunSurface s, float3 l,
     horizonMargin(horizons.read(cell, 0) * M_PI_2_F, horizons.read(cell, 1) * M_PI_2_F,
                   horizons.read(cell, 2) * M_PI_2_F, horizons.read(cell, 3) * M_PI_2_F, l, bounds);
     if (bounds.x > 0.05) return 1.0;
-    // A crown 15–25 m up can still see a sun the ground's horizon already hides.
-    if (bounds.y < -0.05 && !s.tree) return 0.0;
+    // A crown 15–25 m up can still see a sun the ground's horizon already hides. Below the
+    // shadow mesh (a valley floor the coarse mesh bridges over) a ray would start under the
+    // ridges and pass out through their backs, so trunks and low leaves there count as ground.
+    if (bounds.y < -0.05 && !crown) return 0.0;
     return -1.0;
 }
 
@@ -408,6 +423,7 @@ kernel void sunShadow(constant Uniforms &u [[buffer(0)]],
                       texture2d_array<float, access::read> horizons [[texture(2)]],
                       texture2d<float> cloudShadows [[texture(3)]],
                       texture2d<float, access::read_write> out [[texture(4)]],
+                      texture2d<float, access::read> meshHeights [[texture(5)]],
                       uint2 gid [[thread_position_in_grid]]) {
     uint2 g = pass == 0 ? gid * 2 : gid;
     uint2 size = uint2(out.get_width(), out.get_height());
@@ -416,7 +432,8 @@ kernel void sunShadow(constant Uniforms &u [[buffer(0)]],
     if (pass == 1 && anchor) return;
     float3 l = normalize(u.sunDirection);
     SunSurface s = sunSurface(surface, depth, g);
-    float visibility = sunWithoutRays(u, s, l, horizons, cloudShadows);
+    bool crown = s.tree && !s.sky && s.p.z > shadowMeshHeight(meshHeights, s.p.xy, u.cloudLayer.w) + 1.0;
+    float visibility = sunWithoutRays(u, s, crown, l, horizons, cloudShadows);
     if (visibility < 0.0 && pass == 1) {
         // The traced pixels of the 2×2 blocks touching this one.
         int2 base = int2(g) & ~1;
@@ -435,8 +452,8 @@ kernel void sunShadow(constant Uniforms &u [[buffer(0)]],
         }
         if (same && (hi <= 0.0 || lo >= 1.0)) visibility = lo;
     }
-    // Tree pixels leave towards the sun: a card's normal may face away from it.
-    if (visibility < 0.0) visibility = rayTracedSun(s.p, s.tree ? l : s.n, l, float2(g) + 0.5, length(u.cameraPosition - s.p),
+    // Crown pixels leave towards the sun: a card's normal may face away from it.
+    if (visibility < 0.0) visibility = rayTracedSun(s.p, crown ? l : s.n, l, float2(g) + 0.5, length(u.cameraPosition - s.p),
                                                     u.maxHeight, terrain);
     out.write(float4(visibility), g);
 }

@@ -46,6 +46,18 @@ final class IslandCoreTests: XCTestCase {
         XCTAssertEqual(g.sample(x: -5, y: 99), g[0, 3])
     }
 
+    func testMeshHeightFollowsTheShadowMeshTriangles() {
+        // Vertices at cell centres; each quad splits along its (i, j)–(i+1, j+1) diagonal.
+        var g = Grid(width: 2, height: 2, cellSize: 10)
+        g[1, 1] = 10
+        XCTAssertEqual(g.meshHeight(x: 15, y: 15), 10, accuracy: 1e-5, "a vertex")
+        XCTAssertEqual(g.meshHeight(x: 10, y: 10), 5, accuracy: 1e-5, "on the diagonal, where bilinear gives 2.5")
+        XCTAssertEqual(g.meshHeight(x: 12.5, y: 7.5), 2.5, accuracy: 1e-5, "below the diagonal")
+        XCTAssertEqual(g.meshHeight(x: 7.5, y: 12.5), 2.5, accuracy: 1e-5, "above the diagonal")
+        XCTAssertEqual(g.meshHeight(x: 0, y: 0), 0, accuracy: 1e-5, "clamped at the edge")
+        XCTAssertEqual(g.meshHeight(x: 20, y: 20), 10, accuracy: 1e-5, "clamped at the far edge")
+    }
+
     func testGreyCardUnderHighSunLooksMidGrey() {
         // An 18% grey card facing a high sun on open ground should come out near sRGB 118.
         let s = Look.sunDirection

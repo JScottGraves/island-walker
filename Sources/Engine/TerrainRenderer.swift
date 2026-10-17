@@ -103,6 +103,9 @@ public final class TerrainRenderer {
     static let maxNodes = 4096
     let skyVisibility: MTLTexture
     let horizons: MTLTexture
+    /// The overview heights the shadow mesh is built from, for `sunShadow` to tell crowns
+    /// standing above that mesh from trunks and low leaves below it.
+    let shadowMeshHeights: MTLTexture
     let terrainAccel: MTLAccelerationStructure?
     /// Generated ground below the data's 10 m grid, near the camera.
     let detail: TerrainDetail
@@ -317,6 +320,12 @@ public final class TerrainRenderer {
                            withBytes: raw.baseAddress!, bytesPerRow: overview.width * 4)
         }
         skyVisibility = skyVis
+        guard let meshHeights = device.makeTexture(descriptor: skyVisDesc) else { throw RendererError.setup("shadow mesh heights") }
+        overview.values.withUnsafeBytes { raw in
+            meshHeights.replace(region: MTLRegionMake2D(0, 0, overview.width, overview.height), mipmapLevel: 0,
+                                withBytes: raw.baseAddress!, bytesPerRow: overview.width * 4)
+        }
+        shadowMeshHeights = meshHeights
         // 16 sectors as 4 RGBA slices.
         let horizonSide = lighting.horizon.isEmpty ? 1 : overview.width
         let horizonDesc = MTLTextureDescriptor()
@@ -430,6 +439,8 @@ public final class TerrainRenderer {
         cmd.waitUntilCompleted()
     }
 
+    /// Vertices at the overview's cell centres, quads split along (i, j)–(i+1, j+1): the
+    /// surface `Grid.meshHeight` and the shader's `shadowMeshHeight` reproduce.
     static func buildShadowMesh(device: MTLDevice, queue: MTLCommandQueue, overview g: Grid) throws -> MTLAccelerationStructure {
         let n = g.width
         var positions = [Float]()
@@ -800,7 +811,7 @@ public final class TerrainRenderer {
             rays.setComputePipelineState(sunShadowPipeline)
             rays.setBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 0)
             rays.setAccelerationStructure(terrainAccel, bufferIndex: 1)
-            rays.setTextures([surface, targets.depth, horizons, cloudShadows, sun], range: 0..<5)
+            rays.setTextures([surface, targets.depth, horizons, cloudShadows, sun, shadowMeshHeights], range: 0..<6)
             // One pixel per 2×2 block first, then the rest where those disagree.
             var pass: UInt32 = 0
             rays.setBytes(&pass, length: 4, index: 2)
