@@ -132,6 +132,8 @@ public final class TerrainRenderer {
         /// `snapshot` only: tree instances drawn (cross-fading ones twice) and their triangles.
         public var floraInstances = 0
         public var floraTriangles = 0
+        /// `snapshot` only: trees casting traced shadows.
+        public var shadowTrees = 0
     }
     /// Which shadow path this renderer uses (ray tracing unless unsupported or declined).
     public let shadows: Shadows
@@ -187,6 +189,9 @@ public final class TerrainRenderer {
         let constants = MTLFunctionConstantValues()
         var rayTraced = shadows == .rayTraced
         constants.setConstantValue(&rayTraced, type: .bool, index: 0)
+        // Trees cast traced shadows when they are scattered (not floragen's hand-placed sheets).
+        var treeShadows = rayTraced && floraMaps != nil
+        constants.setConstantValue(&treeShadows, type: .bool, index: 1)
         let desc = MTLRenderPipelineDescriptor()
         desc.vertexFunction = library.makeFunction(name: "terrainVertex")
         desc.fragmentFunction = try library.makeFunction(name: "terrainFragment", constantValues: constants)
@@ -199,7 +204,7 @@ public final class TerrainRenderer {
         if shadows == .rayTraced {
             desc.fragmentFunction = library.makeFunction(name: "terrainSurface")
             desc.colorAttachments[0].pixelFormat = .rgba32Uint
-            guard let sun = library.makeFunction(name: "sunShadow") else { throw RendererError.setup("sun shadow kernel") }
+            let sun = try library.makeFunction(name: "sunShadow", constantValues: constants)
             sunShadowPipeline = try device.makeComputePipelineState(function: sun)
         } else {
             desc.fragmentFunction = nil
@@ -262,7 +267,8 @@ public final class TerrainRenderer {
         canopyCover = try TerrainRenderer.canopyCoverTexture(device: device, maps: floraMaps)
         flora = floraMaps != nil || floraSpecimens
             ? try FloraRenderer(device: device, library: library, constants: constants, colorFormat: colorFormat,
-                                depthFormat: depthFormat, rayTraced: shadows == .rayTraced, maps: floraMaps,
+                                depthFormat: depthFormat, rayTraced: shadows == .rayTraced, treeShadows: treeShadows,
+                                maps: floraMaps,
                                 seed: TerrainDetail.seed(of: overview), seaLevel: terrain.seaLevel,
                                 domainSize: Float(terrain.domainMetres))
             : nil
@@ -576,6 +582,7 @@ public final class TerrainRenderer {
         if let counts = flora?.lastCounts() {
             stats.floraInstances = counts.instances
             stats.floraTriangles = counts.triangles
+            stats.shadowTrees = flora?.shadowInstances ?? 0
         }
         let passes = (0..<3).compactMap { _ in queue.makeCommandBuffer() }
         if passes.count == 3 {
@@ -619,7 +626,8 @@ public final class TerrainRenderer {
             let surfaceDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba32Uint, width: width, height: height, mipmapped: false)
             surfaceDesc.usage = [.renderTarget, .shaderRead]
             surfaceDesc.storageMode = .private
-            let sunDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r8Unorm, width: width, height: height, mipmapped: false)
+            // Terrain visibility (r), the trees' cover (gb) and what they let through (a).
+            let sunDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: width, height: height, mipmapped: false)
             sunDesc.usage = [.shaderRead, .shaderWrite]  // read_write in sunShadow's second pass
             sunDesc.storageMode = .private
             surface = device.makeTexture(descriptor: surfaceDesc)
@@ -761,6 +769,8 @@ public final class TerrainRenderer {
         detail.update(cmd, eye: eye, streamer: streamer, terrainParams: terrainParams, pages: frameTerrain.pages)
         flora?.scatter(cmd, uniforms: &u, eye: eye, viewProjection: viewProjection, terrainParams: terrainParams,
                        detail: detail, pages: frameTerrain.pages, tiles: streamer.tiles)
+        flora?.updateShadows(cmd, uniforms: &u, eye: eye, terrainParams: terrainParams, detail: detail,
+                             pages: frameTerrain.pages, tiles: streamer.tiles, settled: streamer.backlog == 0)
 
         // 1. Terrain depth.
         let depthPass = MTLRenderPassDescriptor()
@@ -816,8 +826,25 @@ public final class TerrainRenderer {
             rays.setBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 0)
             rays.setAccelerationStructure(terrainAccel, bufferIndex: 1)
             rays.setTextures([surface, targets.depth, horizons, cloudShadows, sun, shadowMeshHeights], range: 0..<6)
-            // One pixel per 2×2 block first, then the rest where those disagree.
+            var treeRange: Float = 0
+            if let trees = flora?.shadows {
+                rays.setAccelerationStructure(trees.accel, bufferIndex: 3)
+                rays.useResources(trees.proxies, usage: .read)
+                treeRange = flora?.shadowRange ?? 0
+            }
+            rays.setBytes(&treeRange, length: 4, index: 4)
+            // The trees at one pixel per 8×8 block, then per 4×4 where those disagree; the
+            // terrain at one per 2×2 block, then the rest where those disagree.
             var pass: UInt32 = 0
+            if flora?.shadows != nil {
+                for (p, step) in [(UInt32(3), 8), (2, 4)] {
+                    pass = p
+                    rays.setBytes(&pass, length: 4, index: 2)
+                    rays.dispatchThreads(MTLSize(width: (width + step - 1) / step, height: (height + step - 1) / step, depth: 1),
+                                         threadsPerThreadgroup: group)
+                }
+            }
+            pass = 0
             rays.setBytes(&pass, length: 4, index: 2)
             rays.dispatchThreads(MTLSize(width: (width + 1) / 2, height: (height + 1) / 2, depth: 1), threadsPerThreadgroup: group)
             pass = 1
@@ -852,8 +879,8 @@ public final class TerrainRenderer {
         if let sun = targets.sun { shade.setFragmentTexture(sun, index: 5) }
         shade.setFragmentTexture(canopy, index: 6)
         shade.setFragmentTexture(canopyCover, index: 7)
-        var floraRange: Float = flora?.canopyRange ?? 0
-        shade.setFragmentBytes(&floraRange, length: 4, index: 2)
+        var floraRange = SIMD2<Float>(flora?.canopyRange ?? 0, flora?.shadows != nil ? flora?.shadowRange ?? 0 : 0)
+        shade.setFragmentBytes(&floraRange, length: 8, index: 2)
         drawTerrain(shade, frame: frameTerrain)
         flora?.drawShading(shade, skyVisibility: skyVisibility, horizons: horizons)
         shade.endEncoding()
