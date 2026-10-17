@@ -6,7 +6,7 @@ import IslandCore
 /// Hawaiian vegetation sorts by moisture first, then height, exposure and landform.
 /// Moisture follows Price et al. (USGS 2012): annual rain minus potential evaporation,
 /// with the dry/mesic line at 0 and the mesic/wet line at 1,661 mm. Evaporation falls
-/// with height and under standing cloud, so the same rain is wetter higher up.
+/// with height, so the same rain is wetter higher up.
 ///
 /// Each land cell gets a weight per community, summing to 1, with soft edges and a
 /// wandering low-frequency offset so boundaries read as ecotones, not contour lines.
@@ -57,13 +57,22 @@ public enum Vegetation {
     public struct Params: Sendable {
         /// Direction the wind blows towards, in radians (same convention as `Climate`).
         public var windDirection: Double = 5 * Double.pi / 4
-        /// Potential evaporation at sea level under clear sky, mm/yr.
-        public var seaLevelPET: Double = 1700
-        /// Drop in potential evaporation per metre of height, mm/yr. Gives ~800 mm at
-        /// 1,000 m, where Price et al. put the dry/mesic line.
-        public var petLapse: Double = 0.9
-        /// Share of potential evaporation removed under full standing cloud.
-        public var cloudPETCut: Double = 0.4
+        // The moisture terms below were fitted on the real Oahu DEM, with rain from our
+        // own climate model, to the USGS moisture-zone map (Price et al. 2012): mean error
+        // 0.57 zones, 53% of land in the right one of seven, against 1.7 and 23% for the
+        // plain rain − PET. Our upslope rain is too narrow and peaked for vegetation, so it
+        // is first carried downwind, as real orographic rain spills a few km into the lee,
+        // smoothed, and stretched.
+        /// Downwind spill-over length of rain, metres (exponential kernel).
+        public var rainDrift: Double = 7000
+        /// Smoothing radius after the drift, metres.
+        public var rainSmoothing: Double = 1000
+        /// Rain for moisture = `rainScale` × (drifted rain in m/yr)^`rainExponent`.
+        public var rainScale: Double = 2
+        public var rainExponent: Double = 1.6
+        /// Potential evaporation at sea level, mm/yr, and its drop per metre of height.
+        public var seaLevelPET: Double = 1500
+        public var petLapse: Double = 1.2
         /// Moisture availability (rain − PET, mm/yr) at the dry/mesic and mesic/wet lines.
         public var mesicMAI: Double = 0
         public var wetMAI: Double = 1661
@@ -130,7 +139,7 @@ public enum Vegetation {
         var mai = Grid(width: w, height: rows, cellSize: cell)
         var exposure = Grid(width: w, height: rows, cellSize: cell)
         let wanderSeed = Hash.mix(p.seed ^ 0x5645_4745)
-        let toRain = (x: Double(rain.width) / Double(w), y: Double(rain.height) / Double(rows))
+        let moistureRain = spill(rain, onto: height, params: p)
         let toCloud = (x: Double(clouds.width) / Double(w), y: Double(clouds.height) / Double(rows))
         let windX = cos(p.windDirection), windY = sin(p.windDirection)
         var zonal = [Double](repeating: 0, count: Community.allCases.count)
@@ -147,7 +156,7 @@ public enum Vegetation {
                 let gy = Double(height[x, yu] - height[x, yd]) / (Double(yu - yd) * cell)
                 let slope = atan((gx * gx + gy * gy).squareRoot()) * 180 / .pi
 
-                let rainMM = 1000 * Double(rain.sample(x: (Double(x) + 0.5) * toRain.x - 0.5, y: (Double(y) + 0.5) * toRain.y - 0.5))
+                let rainMM = 1000 * p.rainScale * pow(Double(Swift.max(moistureRain.values[i], 0)), p.rainExponent)
                 let cloud = Double(clouds.sample(x: (Double(x) + 0.5) * toCloud.x - 0.5, y: (Double(y) + 0.5) * toCloud.y - 0.5))
 
                 // Boundary wander: two independent noise fields so moisture and height
@@ -157,7 +166,7 @@ public enum Vegetation {
                 let wanderZ = p.wanderHeight * Noise.fbm(nx, ny, seed: wanderSeed &+ 1, octaves: 3)
                 let zw = z + wanderZ
 
-                let pet = Swift.max(300, p.seaLevelPET - p.petLapse * z) * (1 - p.cloudPETCut * cloud)
+                let pet = Swift.max(300, p.seaLevelPET - p.petLapse * z)
                 let m = rainMM - pet
                 mai.values[i] = Float(m)
                 let mw = m + wanderM
@@ -211,6 +220,40 @@ public enum Vegetation {
             }
         }
         return Result(weights: weights, mai: mai, exposure: exposure)
+    }
+
+    /// `rain` resampled onto `height`'s grid, carried downwind with an exponential kernel
+    /// of length `rainDrift` and smoothed by `rainSmoothing`.
+    static func spill(_ rain: Grid, onto height: Grid, params p: Params) -> Grid {
+        let w = height.width, rows = height.height, cell = height.cellSize
+        let sx = Double(rain.width) / Double(w), sy = Double(rain.height) / Double(rows)
+        let windX = cos(p.windDirection), windY = sin(p.windDirection)
+        let step = 250.0, steps = Swift.max(0, Int(4 * p.rainDrift / step))
+        var weights = [Double](), weightSum = 0.0
+        for k in 0...steps {
+            let wk = p.rainDrift > 0 ? exp(-Double(k) * step / p.rainDrift) : (k == 0 ? 1 : 0)
+            weights.append(wk); weightSum += wk
+        }
+        var out = Grid(width: w, height: rows, cellSize: cell)
+        out.values.withUnsafeMutableBufferPointer { buf in
+            let result = SharedBuffer(buf)
+            Parallel.forRanges(rows) { range in
+                for y in range {
+                    for x in 0..<w {
+                        // Rain that fell upwind of here drifts in.
+                        var sum = 0.0
+                        for k in 0...steps where weights[k] > 0 {
+                            let d = Double(k) * step / cell
+                            let fx = Double(x) - windX * d, fy = Double(y) - windY * d
+                            sum += weights[k] * Double(rain.sample(x: (fx + 0.5) * sx - 0.5, y: (fy + 0.5) * sy - 0.5))
+                        }
+                        result[y * w + x] = Float(sum / weightSum)
+                    }
+                }
+            }
+        }
+        let r = Swift.max(1, Int(p.rainSmoothing / cell))
+        return Climate.boxBlur(Climate.boxBlur(Climate.boxBlur(out, radius: r), radius: r), radius: r)
     }
 
     @inline(__always)
