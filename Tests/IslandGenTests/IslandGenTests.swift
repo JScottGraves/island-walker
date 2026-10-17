@@ -207,4 +207,34 @@ final class IslandGenTests: XCTestCase {
         let flat = Clouds.coverage(height: Grid(width: 64, height: 64, cellSize: 200, fill: -50), seaLevel: 0)
         XCTAssertEqual(flat.range.max, 0)
     }
+
+    func testVegetationIsWetterUpwindAndSumsToOne() {
+        // A 1,000 m cone: the trade wind blows towards the southwest, so the northeast
+        // half is windward.
+        var h = Grid(width: 128, height: 128, cellSize: 200)
+        for y in 0..<128 {
+            for x in 0..<128 {
+                let r = (Double((x - 64) * (x - 64) + (y - 64) * (y - 64))).squareRoot() * 200
+                h[x, y] = Float(1000 * (1 - r / 10_000)) - 50
+            }
+        }
+        let rain = Climate.precipitation(height: h, seaLevel: 0)
+        let clouds = Clouds.coverage(height: h, seaLevel: 0)
+        let v = Vegetation.bake(height: h, rain: rain, clouds: clouds, seaLevel: 0)
+        var wet = (up: 0.0, down: 0.0), dry = (up: 0.0, down: 0.0), count = (up: 0.0, down: 0.0)
+        for i in 0..<h.count {
+            let total = v.weights.reduce(Float(0)) { $0 + $1.values[i] }
+            if h.values[i] <= 0 {
+                XCTAssertEqual(total, 0)
+                continue
+            }
+            XCTAssertEqual(total, 1, accuracy: 1e-3)
+            let upwind = (i % 128) + (i / 128) > 128
+            let w = Double(v.weight(.wetForest).values[i] + v.weight(.cloudShrubland).values[i] + v.weight(.montane).values[i])
+            let d = Double(v.weight(.dryForest).values[i])
+            if upwind { wet.up += w; dry.up += d; count.up += 1 } else { wet.down += w; dry.down += d; count.down += 1 }
+        }
+        XCTAssertGreaterThan(wet.up / count.up, wet.down / count.down)
+        XCTAssertGreaterThan(dry.down / count.down, dry.up / count.up)
+    }
 }

@@ -114,6 +114,14 @@ public enum Island {
     /// Raises land by `lift` × min(1, distance to the sea / `distance`), using a chamfer
     /// distance transform from the sea cells.
     static func flex(_ h: inout Grid, seaLevel: Float, lift: Double, distance: Double) {
+        let d = seaDistance(h, seaLevel: seaLevel)
+        for i in 0..<h.count where h.values[i] > seaLevel && d[i].isFinite {
+            h.values[i] += Float(lift * Swift.min(1, d[i] * h.cellSize / distance))
+        }
+    }
+
+    /// Chamfer distance in cells from every cell to the nearest cell at or below sea level.
+    public static func seaDistance(_ h: Grid, seaLevel: Float) -> [Double] {
         let w = h.width, rows = h.height
         var d = [Double](repeating: .infinity, count: h.count)
         for i in 0..<h.count where h.values[i] <= seaLevel { d[i] = 0 }
@@ -142,9 +150,7 @@ public enum Island {
                 }
             }
         }
-        for i in 0..<h.count where h.values[i] > seaLevel && d[i].isFinite {
-            h.values[i] += Float(lift * Swift.min(1, d[i] * h.cellSize / distance))
-        }
+        return d
     }
 
     /// Floods the saddle with lava: `surface` (the uneroded saddle) lowered by the
