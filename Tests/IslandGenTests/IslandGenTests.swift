@@ -99,6 +99,72 @@ final class IslandGenTests: XCTestCase {
                        "refinement is deterministic")
     }
 
+    /// Parallel ridges and valleys, 600 m apart and 120 m deep (walls up to 32°), rising
+    /// inland from a coast at x = 0: a 78 m grid holds their shape but not knife-edge crests.
+    private func ridgedFlank(size: Int = 64, cell: Double = 78.125) -> Grid {
+        var h = Grid(width: size, height: size, cellSize: cell)
+        for y in 0..<size {
+            for x in 0..<size {
+                let px = Double(x) * cell, py = Double(y) * cell
+                let ridge = 60 * (1 - cos(2 * Double.pi * py / 600))
+                h[x, y] = x < 2 ? -20 : Float(20 + 0.08 * px + ridge * Swift.min(1, px / 1000))
+            }
+        }
+        return h
+    }
+
+    private func steepFraction(_ g: Grid, degrees: Double) -> Double {
+        let limit = tan(degrees * Double.pi / 180)
+        var steep = 0, land = 0
+        for y in 1..<(g.height - 1) {
+            for x in 1..<(g.width - 1) where g[x, y] > 0 {
+                let gx = Double(g[x + 1, y] - g[x - 1, y]) / (2 * g.cellSize)
+                let gy = Double(g[x, y + 1] - g[x, y - 1]) / (2 * g.cellSize)
+                land += 1
+                if (gx * gx + gy * gy).squareRoot() > limit { steep += 1 }
+            }
+        }
+        return Double(steep) / Double(land)
+    }
+
+    func testRefineFlutesSteepWallsAndLeavesPlainsSmooth() {
+        let coarse = ridgedFlank()
+        let area = Realism.drainageArea(coarse, seaLevel: 0)
+        var smooth = Refine.Params()
+        smooth.factor = 8
+        smooth.detail = 0
+        var fluted = smooth
+        fluted.detail = Refine.Params().detail
+        let before = Refine.refine(coarse, drainageArea: area, seaLevel: 0, params: smooth)
+        let after = Refine.refine(coarse, drainageArea: area, seaLevel: 0, params: fluted)
+        XCTAssertLessThan(steepFraction(before, degrees: 40), 0.01, "the coarse walls are under 40°")
+        XCTAssertGreaterThan(steepFraction(after, degrees: 40), 0.05, "fluted walls have cliffs")
+        XCTAssertEqual(after.range.max, before.range.max, accuracy: 4 * Float(fluted.detail), "crests keep their height")
+        XCTAssertEqual(Realism.measure(after).pits, 0, "still drains to the sea")
+
+        // A coastal plain rising 2 m per 100 m stays nearly as smooth as bicubic.
+        var plain = Grid(width: 32, height: 32, cellSize: 78.125)
+        for y in 0..<32 { for x in 0..<32 { plain[x, y] = x < 2 ? -5 : Float(Double(x) * 78.125 * 0.02) } }
+        let plainArea = Realism.drainageArea(plain, seaLevel: 0)
+        let flat = Refine.refine(plain, drainageArea: plainArea, seaLevel: 0, params: smooth)
+        let rough = Refine.refine(plain, drainageArea: plainArea, seaLevel: 0, params: fluted)
+        var squares = 0.0, count = 0.0
+        for i in 0..<flat.count where flat.values[i] > 5 {
+            squares += Double((rough.values[i] - flat.values[i]) * (rough.values[i] - flat.values[i]))
+            count += 1
+        }
+        XCTAssertLessThan((squares / count).squareRoot(), 0.5, "plains get well under a metre of detail")
+    }
+
+    func testDrainageAreaOfAPlaneSumsEveryUphillCell() {
+        var h = Grid(width: 8, height: 4, cellSize: 10)
+        for y in 0..<4 { for x in 0..<8 { h[x, y] = x == 0 ? -1 : Float(x) } }
+        let area = Realism.drainageArea(h, seaLevel: 0)
+        XCTAssertEqual(area[1, 2], 7 * 100, accuracy: 1, "the shore cell drains its whole row")
+        XCTAssertEqual(area[7, 2], 100, accuracy: 1, "the top cell drains only itself")
+        XCTAssertEqual(area[0, 2], 0, "the sea drains nothing")
+    }
+
     func testPondBuriesOnlyTheDeepestShareOfTheSaddle() {
         // A saddle surface at 200 m over eroded ground whose height rises 0..99 m by column.
         var h = Grid(width: 100, height: 4, cellSize: 100)
