@@ -465,7 +465,8 @@ struct Shrub {
             let r = (1 - z * z).squareRoot()
             let a = Float(k) * golden + rng.float(-0.2, 0.2)
             let unit = SIMD3<Float>(r * cos(a), r * sin(a), z)
-            let p: SIMD3<Float> = unit * radii * rng.float(0.88, 1.0)
+            let reach: Float = rng.float(0.88, 1.0)
+            let p: SIMD3<Float> = (unit * radii) * reach
             let facing = simd_normalize(crown.normal(p) + SIMD3(0, 0, 0.5) + rng.direction() * 0.35)
             let right = rotate(perpendicular(facing), about: facing, by: rng.float(0, 2 * .pi))
             let s = card * scale * rng.float(0.85, 1.15)
@@ -475,7 +476,8 @@ struct Shrub {
             for _ in 0..<innerCards {
                 var unit = rng.direction()
                 unit.z = abs(unit.z)
-                let p: SIMD3<Float> = unit * radii * rng.float(0.4, 0.75)
+                let reach: Float = rng.float(0.4, 0.75)
+                let p: SIMD3<Float> = (unit * radii) * reach
                 let facing = simd_normalize(rng.direction() + SIMD3(0, 0, 0.8))
                 let right = perpendicular(facing)
                 let s = card * rng.float(0.9, 1.2)
