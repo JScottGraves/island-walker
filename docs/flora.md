@@ -116,8 +116,7 @@ photos. Keep the table in one place (`Flora.Communities`) so it is easy to chang
   - Beyond 400 m the terrain's biome colour carries the look. If the edge shows, extend
     LOD1 for the large canopy species only, or add a cheap crossed-card LOD2 out to
     ~1.5 km, within the budget.
-  - Octahedral impostors to 1.5 km and tree-cast ray-traced shadows (opaque trunk+crown
-    proxies in an instance acceleration structure) are the next PR.
+  - Octahedral impostors to 1.5 km are a later PR; tree-cast ray-traced shadows are §8.
 
 ## 6. Checking it
 
@@ -165,3 +164,105 @@ What changed from the plan above while building it:
   layer ends at 120 m; the prepass draws LOD0 before LOD1 before impostors.
 - `floragen --sites BUNDLE` prints a close-up `--camera` in each community's purest
   gentle stand; `IslandApp --views a,b` renders only the named views.
+
+## 8. Tree shadows (step 2b)
+
+Trees cast ray-traced sun shadows on the ground and on each other within 200 m of the
+camera. Beyond that the canopy stand-in from PR #33 still shades the ground.
+
+- **Proxies** (`Flora.shadowProxy`, `ShadowProxy.swift`). Each variant gets a closed,
+  outward-wound stand-in, fitted to its LOD0 mesh, of at most 80 triangles:
+  - a 5-sided trunk prism from 0.6 m below the ground to the lowest crown lobe, following
+    the trunk's lean;
+  - a crown of three icosahedron lobes. The lobes come from k-means over the leaf-card
+    vertices and are shrunk to 70% of each cluster's 90th-percentile spread, so the
+    outer, sunlit leaves stay outside their own proxy;
+  - for loulu and hāpuʻu, one flattened 10-sided bicone (a disc) instead of the lobes.
+
+  `ShadowProxyTests` checks that every proxy is closed, consistently and outwardly wound,
+  within budget, inside its mesh's bounds, and deterministic.
+- **Acceleration structures.**
+  - The terrain's primitive structure is unchanged: the same back-face culling,
+    clockwise winding and maxHeight exit.
+  - The trees get an instance structure of their own (`FloraRenderer.Shadows`), built on
+    the GPU with `MTLIndirectInstanceAccelerationStructureDescriptor`. `floraShadows` fills
+    the descriptors and `floraShadowCount` clamps the count the build reads.
+  - That scatter shares `floraCandidate` with the drawing scatter, so each proxy stands
+    exactly where its tree is drawn (wind sway aside), with no view culling.
+  - It covers trees within 260 m: the 200 m range plus a 60 m margin for slanting shadows
+    and the camera's travel between rebuilds. Shrubs are covered to 110 m, inside the
+    120 m to which they are drawn.
+  - Each tree is two instances: its trunk (2k) and its crown (2k + 1), each in a tight box.
+    The parity tells the shader which one a ray hit.
+  - The structure is rebuilt when the camera has moved 10 m, or when the last build stood
+    on tiles still loading.
+- **Rays.** `sunShadow` keeps the terrain's own rays as they were, and adds a second ray
+  per pixel into the tree structure.
+  - The tree ray starts from the true surface, not from the shadow-mesh lift: on a valley
+    floor the coarse mesh bridges, the lifted origin would sit above or inside the trees.
+  - It uses any-hit and no culling, so a leaf inside its own crown's proxy is shaded by it.
+  - It records only what it met: nothing, a trunk or a crown.
+  - Crowns let light through in patches: `crownTransmission` is two octaves of value noise
+    about a metre across, sampled 12 m towards the sun from each pixel. Any-hit may report
+    a crown's far side, so the hit point would scatter the patches pixel by pixel.
+  - The ray bends by up to 0.08 rad with smooth noise over the surface, so the
+    icosahedra's straight facets cast ragged edges.
+  - There is no sun-disc jitter. Real canopy shadows are nearly sharp, and one jittered
+    ray per pixel left speckle.
+- **Passes.** Rays are traced coarse to fine:
+  1. One pixel per 8×8 block traces the trees.
+  2. One pixel per 4×4 block takes the coarse pixels' answer where all four show the same
+     surface and agree, and traces otherwise.
+  3. Pass 0 traces the terrain per 2×2 block. Its tree answer is taken the same way from
+     the 4×4 pixels around it, or traced, so shadow edges are traced per 2×2 block.
+  4. Pass 1 takes the mean of its 2×2 neighbours' tree answers, which softens edges over
+     two pixels.
+
+  The sun texture (rgba8: read-write textures can't be rg8) holds:
+  - r: the terrain's visibility;
+  - g, b: the trees' cover (the share of rays that met nothing, and that met a trunk);
+  - a: the light the trees let through, which adds each pixel's own crown gaps.
+
+  Shading multiplies r by a. Impostor pixels (bit 16 of the surface normal) skip the trees:
+  their quads stand inside their own proxy.
+- **Crown rays at low sun** (§7's remaining cost). In pass 1, crown pixels take their 2×2
+  anchors' mean for the terrain answer too, whatever the anchors' depths.
+- **Range edge.** The traced shadows fade out over 150–200 m, and the stand-in's sun
+  dimming fades in over the same distance. The stand-in's sky occlusion (half the sky
+  hidden under a full canopy) stays everywhere within the canopy range, since the proxies
+  only block the sun. Nothing is darkened twice and nothing pops at the edge.
+- **Stable while walking.** Each proxy stands on the finest ground, so it doesn't move with
+  the camera between rebuilds. Rays take the nearest proxy hit: any-hit reports whichever
+  proxy the traversal meets first, which a rebuild changes, so pixels flipped between a
+  trunk's shadow and a crown's (up to 1.6% of the frame). Rendering a 40 m walk at 2 m
+  steps with a stale structure and with a fresh one now differs in at most 0.005% of
+  pixels. The edge bend shrinks with the sun's height; at low sun it was drawn out into
+  snakes along the shadows.
+- **Cost.** Rays run at about 200 Mrays/s against this structure on the M3. At one ray
+  per 2×2 block, shadows cost 3–5 ms at 1440p; the 8×8 pass and the per-pixel crown gaps
+  are what fit them in. Things that didn't help:
+  - a shorter range (the cost is in near pixels);
+  - capping ray length;
+  - `preferFastIntersection`;
+  - interpolating distant edges.
+
+  2560×1440 GPU ms, median of 5:
+
+  | View | Hour | Trees off | #33 trees on | Tree shadows | Δ vs off | Δ vs #33 |
+  |---|---|---|---|---|---|---|
+  | Oʻahu ridge | 07 / 13 / 17:30 | 8.22 / 8.37 / 8.71 | 11.96 / 9.53 / 11.24 | 13.19 / 11.30 / 12.57 | +5.0 / +2.9 / +3.9 | +1.2 / +1.8 / +1.3 |
+  | Oʻahu riparian | | 7.16 / 7.32 / 7.27 | 8.73 / 8.04 / 8.63 | 9.50 / 9.82 / 9.49 | +2.3 / +2.5 / +2.2 | +0.8 / +1.8 / +0.9 |
+  | Oʻahu mesic | | 7.54 / 7.96 / 7.70 | 7.95 / 8.07 / 9.36 | 9.99 / 9.53 / 10.13 | +2.5 / +1.6 / +2.4 | +2.0 / +1.5 / +0.8 |
+  | Oʻahu wet forest | | 6.65 / 6.63 / 7.48 | 7.05 / 7.42 / 9.50 | 8.67 / 8.21 / 8.12 | +2.0 / +1.6 / +0.6 | +1.6 / +0.8 / −1.4 |
+  | Oʻahu pali | | 11.56 / 7.27 / 7.80 | 13.30 / 7.25 / 8.21 | 13.92 / 8.22 / 9.88 | +2.4 / +1.0 / +2.1 | +0.6 / +1.0 / +1.7 |
+  | Oʻahu coast | | 6.93 / 7.18 / 7.81 | 7.27 / 7.73 / 8.99 | 8.64 / 8.99 / 10.95 | +1.7 / +1.8 / +3.1 | +1.4 / +1.3 / +2.0 |
+  | seed 42 pali | | 8.74 / 8.93 / 8.59 | 11.95 / 8.29 / 11.80 | 14.41 / 10.12 / 12.26 | +5.7 / +1.2 / +3.7 | +2.5 / +1.8 / +0.5 |
+  | seed 42 mesic | | 7.59 / 7.60 / 7.61 | 7.77 / 7.87 / 10.02 | 9.97 / 9.69 / 10.90 | +2.4 / +2.1 / +3.3 | +2.2 / +1.8 / +0.9 |
+  | seed 42 riparian | | 8.14 / 6.49 / 6.51 | 10.81 / 6.77 / 6.72 | 13.76 / 8.43 / 7.78 | +5.6 / +1.9 / +1.3 | +3.0 / +1.7 / +1.1 |
+
+  Every view stays under 16.7 ms (worst 14.4). Against the targets of +2.0 ms at noon and
+  +2.5 at low sun, measured from trees off, Oʻahu ridge, riparian and seed 42 mesic are
+  over at noon, and most views are over at low sun. In several of those the trees alone
+  already cost more than the target before any shadows (#33: ridge +3.7 at 07:00, seed 42
+  pali +3.2).
+

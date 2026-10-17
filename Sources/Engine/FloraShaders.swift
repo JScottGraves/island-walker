@@ -121,9 +121,59 @@ void floraAppend(device atomic_uint *counts, device FloraInstance *instances, ui
     if (index < capacity) instances[uint(bucket) * capacity + index] = inst;
 }
 
-// One candidate per hash-grid cell around the camera: layer 0 the canopy, layer 1 the
-// shrubs and subcanopy. A tree always stands at the same place on revisits, and nothing
-// is stored per tree.
+// The plant (if any) a hash-grid cell grows: layer 0 the canopy, layer 1 the shrubs and
+// subcanopy. A tree always stands at the same place on revisits, and nothing is stored
+// per tree. Fills everything in `inst` but the fade. Shared by the draw scatter and the
+// shadow scatter, so shadows stand exactly where the trees are drawn.
+bool floraCandidate(constant Uniforms &u, constant FloraParams &f, constant TerrainParams &t,
+                    constant DetailParams &d, const device int *pages, texture2d_array<ushort, access::read> tiles,
+                    texture2d_array<float, access::read> detail, texture2d<float> biome0, texture2d<float> biome1,
+                    texture2d<float> biome2, bool canopy, int2 cell, float range, bool finest,
+                    thread FloraInstance &inst, thread int &plantOut, thread int &variantOut) {
+    float cellSize = canopy ? f.cells.x : f.cells.y;
+    uint h = floraHash(cell, canopy ? 0u : 1u, uint(f.counts.w));
+    float2 xy = (float2(cell) + float2(floraRandom(h, 0), floraRandom(h, 1))) * cellSize;
+    float2 rel = xy - u.cameraPosition.xy;
+    if (dot(rel, rel) > range * range) return false;
+
+    constexpr sampler linear(filter::linear, address::clamp_to_edge);
+    float2 uv = xy / f.lods.w;
+    float4 w0 = biome0.sample(linear, uv, level(0)), w1 = biome1.sample(linear, uv, level(0)),
+           w2 = biome2.sample(linear, uv, level(0));
+    int community = floraPickCommunity(w0, w1, w2, floraRandom(h, 2));
+    if (community < 0) return false;
+    float density = canopy ? f.community[community].x : f.community[community].y;
+    if (floraRandom(h, 3) >= density * cellSize * cellSize * 1e-4) return false;
+    int plant = floraPickPlant(canopy ? f.canopyShare : f.shrubShare, community, floraRandom(h, 4));
+    if (plant < 0) return false;
+    float4 info = f.plant[plant];
+
+    float2 gradient;
+    // On the terrain level drawn at this distance, or (`finest`: shadow proxies, which must
+    // not move as the camera does between rebuilds) the finest.
+    float ground = floraGround(t, d, detail, pages, tiles, xy, finest ? 0.0 : length(float3(rel, u.cameraPosition.z)), gradient);
+    if (ground < f.lods.z + 0.5 || length(gradient) > info.w) return false;
+    // Taller where wetter and sheltered (site, in biome2.w), with some spread.
+    float site = w2.w;
+    float height = mix(info.x, info.y, 0.2 + 0.8 * site) * (0.75 + 0.4 * floraRandom(h, 5));
+
+    inst.position = packed_float3(xy.x, xy.y, ground);
+    inst.scale = height / info.z;
+    float yaw = floraRandom(h, 6) * 6.2831853;
+    inst.rotation = float2(cos(yaw), sin(yaw));
+    float leanAngle = floraRandom(h, 7) * 6.2831853;
+    inst.lean = float2(cos(leanAngle), sin(leanAngle)) * (0.04 * floraRandom(h, 8));
+    inst.fade = 0.0;
+    inst.tint = 0.85 + 0.3 * floraRandom(h, 9);
+    inst.phase = floraRandom(h, 10) * 6.2831853;
+    inst.height = height;
+    plantOut = plant;
+    variantOut = int(floraRandom(h, 11) * float(kFloraVariants)) % kFloraVariants;
+    return true;
+}
+
+// One candidate per hash-grid cell around the camera, culled to the view and sorted into
+// its (plant, variant, LOD) bucket.
 kernel void floraScatter(constant Uniforms &u [[buffer(0)]],
                          constant FloraParams &f [[buffer(1)]],
                          constant TerrainParams &t [[buffer(2)]],
@@ -141,36 +191,16 @@ kernel void floraScatter(constant Uniforms &u [[buffer(0)]],
     bool canopy = layer == 0;
     int side = int(canopy ? f.counts.x : f.counts.y);
     if (int(gid.x) >= side || int(gid.y) >= side) return;
-    float cellSize = canopy ? f.cells.x : f.cells.y;
     float range = canopy ? f.cells.z : f.cells.w;
     int2 cell = int2(canopy ? f.origins.xy : f.origins.zw) + int2(gid);
-    uint h = floraHash(cell, layer, uint(f.counts.w));
-    float2 xy = (float2(cell) + float2(floraRandom(h, 0), floraRandom(h, 1))) * cellSize;
-    float2 rel = xy - u.cameraPosition.xy;
-    if (dot(rel, rel) > range * range) return;
-
-    constexpr sampler linear(filter::linear, address::clamp_to_edge);
-    float2 uv = xy / f.lods.w;
-    float4 w0 = biome0.sample(linear, uv, level(0)), w1 = biome1.sample(linear, uv, level(0)),
-           w2 = biome2.sample(linear, uv, level(0));
-    int community = floraPickCommunity(w0, w1, w2, floraRandom(h, 2));
-    if (community < 0) return;
-    float density = canopy ? f.community[community].x : f.community[community].y;
-    if (floraRandom(h, 3) >= density * cellSize * cellSize * 1e-4) return;
-    int plant = floraPickPlant(canopy ? f.canopyShare : f.shrubShare, community, floraRandom(h, 4));
-    if (plant < 0) return;
-    float4 info = f.plant[plant];
-
-    float2 gradient;
-    float ground = floraGround(t, d, detail, pages, tiles, xy, length(float3(rel, u.cameraPosition.z)), gradient);
-    if (ground < f.lods.z + 0.5 || length(gradient) > info.w) return;
-    // Taller where wetter and sheltered (site, in biome2.w), with some spread.
-    float site = w2.w;
-    float height = mix(info.x, info.y, 0.2 + 0.8 * site) * (0.75 + 0.4 * floraRandom(h, 5));
-    float scale = height / info.z;
+    FloraInstance inst;
+    int plant, variant;
+    if (!floraCandidate(u, f, t, d, pages, tiles, detail, biome0, biome1, biome2, canopy, cell, range, false,
+                        inst, plant, variant)) return;
+    float height = inst.height;
 
     // Frustum test on a sphere round the plant.
-    float3 centre = float3(xy, ground + 0.55 * height) - u.cameraPosition;
+    float3 centre = float3(inst.position) + float3(0.0, 0.0, 0.55 * height) - u.cameraPosition;
     float radius = 0.65 * height + 1.0;
     for (int i = 0; i < 6; i++) {
         if (dot(f.planes[i].xyz, centre) + f.planes[i].w < -radius) return;
@@ -182,17 +212,6 @@ kernel void floraScatter(constant Uniforms &u [[buffer(0)]],
     float fadeWidth = f.lods.y * bias;
     float lod0 = f.lods.x * bias, lod1 = min(f.lods2.x * bias, range - fadeWidth);
 
-    FloraInstance inst;
-    inst.position = packed_float3(xy.x, xy.y, ground);
-    inst.scale = scale;
-    float yaw = floraRandom(h, 6) * 6.2831853;
-    inst.rotation = float2(cos(yaw), sin(yaw));
-    float leanAngle = floraRandom(h, 7) * 6.2831853;
-    inst.lean = float2(cos(leanAngle), sin(leanAngle)) * (0.04 * floraRandom(h, 8));
-    inst.tint = 0.85 + 0.3 * floraRandom(h, 9);
-    inst.phase = floraRandom(h, 10) * 6.2831853;
-    inst.height = height;
-    int variant = int(floraRandom(h, 11) * float(kFloraVariants)) % kFloraVariants;
     int bucket0 = (plant * kFloraVariants + variant) * kFloraLods;
     uint capacity = uint(f.counts.z);
     // Each LOD fades out over the last fadeWidth before its far edge while the next fades
@@ -211,6 +230,83 @@ kernel void floraScatter(constant Uniforms &u [[buffer(0)]],
         inst.fade = 1.0 - inside;
         floraAppend(counts, instances, capacity, bucket0 + lod + 1, inst);
     }
+}
+
+// ---- Tree shadows ----
+// Every plant within the shadow range (no view culling: trees behind the camera shade what
+// it sees) becomes an instance of its variant's shadow proxy in an instance acceleration
+// structure, built on the GPU from these descriptors (FloraRenderer.updateShadows).
+
+// MTLIndirectAccelerationStructureInstanceDescriptor (72 bytes).
+struct FloraShadowInstance {
+    packed_float3 columns[4];   // MTLPackedFloat4x3: the linear part, then the translation
+    uint options;
+    uint mask;
+    uint intersectionFunctionTableOffset;
+    uint userID;
+    uint2 accelerationStructure; // MTLResourceID of the variant's proxy
+};
+
+// Where the shadow scatter looks, laid out as FloraRenderer.ShadowParams.
+struct FloraShadowParams {
+    float4 origins;         // first canopy cell (xy), first shrub cell (zw)
+    float4 extent;          // canopy cells per side, shrub cells per side, canopy range, shrub range (m)
+    float4 capacity;        // instances (x)
+};
+
+kernel void floraShadows(constant Uniforms &u [[buffer(0)]],
+                         constant FloraParams &f [[buffer(1)]],
+                         constant TerrainParams &t [[buffer(2)]],
+                         constant DetailParams &d [[buffer(3)]],
+                         const device int *pages [[buffer(4)]],
+                         device atomic_uint *count [[buffer(5)]],
+                         device FloraShadowInstance *out [[buffer(6)]],
+                         constant uint &layer [[buffer(7)]],
+                         constant FloraShadowParams &s [[buffer(8)]],
+                         const device uint2 *proxies [[buffer(9)]],
+                         texture2d_array<ushort, access::read> tiles [[texture(0)]],
+                         texture2d_array<float, access::read> detail [[texture(1)]],
+                         texture2d<float> biome0 [[texture(2)]],
+                         texture2d<float> biome1 [[texture(3)]],
+                         texture2d<float> biome2 [[texture(4)]],
+                         uint2 gid [[thread_position_in_grid]]) {
+    bool canopy = layer == 0;
+    int side = int(canopy ? s.extent.x : s.extent.y);
+    if (int(gid.x) >= side || int(gid.y) >= side) return;
+    int2 cell = int2(canopy ? s.origins.xy : s.origins.zw) + int2(gid);
+    FloraInstance inst;
+    int plant, variant;
+    if (!floraCandidate(u, f, t, d, pages, tiles, detail, biome0, biome1, biome2, canopy, cell,
+                        canopy ? s.extent.z : s.extent.w, true, inst, plant, variant)) return;
+    // Trunk and crown are instances of their own (2k and 2k + 1), so each has a tight box:
+    // a ray along the ground meets few crown boxes, and few trunk boxes higher up.
+    uint index = atomic_fetch_add_explicit(count, 1u, memory_order_relaxed);
+    if (2u * index + 1u >= uint(s.capacity.x)) return;
+    // floraVertex's placement without the wind: scale, yaw, then lean with height.
+    float k = inst.scale;
+    float2 r = inst.rotation;
+    FloraShadowInstance o;
+    o.columns[0] = packed_float3(k * r.x, k * r.y, 0.0);
+    o.columns[1] = packed_float3(-k * r.y, k * r.x, 0.0);
+    o.columns[2] = packed_float3(k * inst.lean.x, k * inst.lean.y, k);
+    o.columns[3] = inst.position;
+    o.options = 5u;  // disable triangle culling | opaque
+    o.mask = 1u;  // trunks: kTrunkMask
+    o.intersectionFunctionTableOffset = 0u;
+    o.userID = 0u;
+    uint proxy = uint(plant * kFloraVariants + variant);
+    o.accelerationStructure = proxies[2u * proxy];
+    out[2u * index] = o;
+    o.accelerationStructure = proxies[2u * proxy + 1u];
+    o.mask = 2u;  // crowns: kCrownMask
+    out[2u * index + 1u] = o;
+}
+
+// The instance count the build reads, no more than the descriptors written.
+kernel void floraShadowCount(const device uint *scattered [[buffer(5)]],
+                             device uint *count [[buffer(10)]],
+                             constant FloraShadowParams &s [[buffer(8)]]) {
+    count[0] = min(2u * scattered[0], uint(s.capacity.x) & ~1u);
 }
 
 // One thread per bucket: this frame's instance count into its indirect draw arguments.
@@ -311,7 +407,7 @@ fragment uint4 floraSurface(FloraOut in [[stage_in]], texture2d_array<float> car
     if (!floraVisible(in, cards)) discard_fragment();
     float3 n = normalize(in.normal);
     float3 p = in.world;
-    return uint4(as_type<uint>(p.x), as_type<uint>(p.y), as_type<uint>(p.z), pack_float_to_snorm2x16(octEncode(n)) | kTreeSurface);
+    return uint4(as_type<uint>(p.x), as_type<uint>(p.y), as_type<uint>(p.z), (pack_float_to_snorm2x16(octEncode(n)) & ~kImpostorSurface) | kTreeSurface);
 }
 
 // Prepass without ray tracing: depth only.
@@ -350,7 +446,7 @@ fragment float4 floraFragment(FloraOut in [[stage_in]], constant Uniforms &u [[b
     float sunVisibility = 0.0;
     if (l.z > -0.01 && cloudSun > 0.01) {
         if (kRayTraced) {
-            sunVisibility = tracedSun.read(uint2(in.position.xy)).r;
+            sunVisibility = tracedSunAt(tracedSun, uint2(in.position.xy));
         } else {
             int side = int(horizons.get_width());
             uint2 cell = uint2(clamp(int2(in.world.xy / u.cloudLayer.w * float(side)), int2(0), int2(side - 1)));
@@ -479,7 +575,8 @@ fragment uint4 floraImpostorSurface(FloraImpostorOut in [[stage_in]], texture2d_
     if (!floraImpostorVisible(in, albedo)) discard_fragment();
     float3 p = in.world;
     float3 n = float3(-in.right.y, in.right.x, 0.0);
-    return uint4(as_type<uint>(p.x), as_type<uint>(p.y), as_type<uint>(p.z), pack_float_to_snorm2x16(octEncode(n)) | kTreeSurface);
+    return uint4(as_type<uint>(p.x), as_type<uint>(p.y), as_type<uint>(p.z),
+                 pack_float_to_snorm2x16(octEncode(n)) | kTreeSurface | kImpostorSurface);
 }
 
 fragment void floraImpostorDepth(FloraImpostorOut in [[stage_in]], texture2d_array<float> albedo [[texture(10)]]) {
@@ -512,7 +609,7 @@ fragment float4 floraImpostorFragment(FloraImpostorOut in [[stage_in]], constant
     float sunVisibility = 0.0;
     if (l.z > -0.01 && cloudSun > 0.01) {
         if (kRayTraced) {
-            sunVisibility = tracedSun.read(uint2(in.position.xy)).r;
+            sunVisibility = tracedSunAt(tracedSun, uint2(in.position.xy));
         } else {
             int side = int(horizons.get_width());
             uint2 cell = uint2(clamp(int2(in.world.xy / u.cloudLayer.w * float(side)), int2(0), int2(side - 1)));

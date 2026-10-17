@@ -12,6 +12,8 @@ using namespace raytracing;
 // True: sun shadows from rays traced against the terrain mesh. False: from the baked
 // horizon map, for GPUs that can't trace rays from a fragment shader.
 constant bool kRayTraced [[function_constant(0)]];
+// True: the native trees cast ray-traced shadows from their proxies (FloraRenderer).
+constant bool kTreeShadows [[function_constant(1)]];
 
 // The streamed heightfield (TerrainStreamer) and the CDLOD layout (TerrainQuadtree).
 struct TerrainParams {
@@ -179,6 +181,10 @@ vertex VOut terrainVertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     return o;
 }
 
+// Tree shadows fade out over the last stretch of their range while the canopy stand-in
+// fades in, so neither pops at the edge.
+constant float kTreeShadowFade = 50.0;
+
 // The sun's disc is 0.53° across; shadows are softened over about a degree, like the
 // CPU bake, which also hides the mesh's facets in shadow edges.
 constant float kSunConeRadius = 0.01;
@@ -237,6 +243,13 @@ float horizonMargin(float4 h0, float4 h1, float4 h2, float4 h3, float3 l, thread
     return elevation - horizonAngle;
 }
 
+// The traced sun (sunShadow): terrain visibility (r) times what the trees' shadow
+// proxies let through (a).
+float tracedSunAt(texture2d<float, access::read> traced, uint2 pixel) {
+    float4 v = traced.read(pixel);
+    return v.x * v.w;
+}
+
 // Sun visibility from the horizon map, with the same soft edge as the CPU bake.
 float horizonSun(VOut in, float3 l) {
     float2 bounds;
@@ -285,7 +298,7 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
                                 texture2d<float, access::read> tracedSun [[texture(5), function_constant(kRayTraced)]],
                                 texture2d<float> canopyMap [[texture(6)]],
                                 texture2d<float> canopyCover [[texture(7)]],
-                                constant float &floraRange [[buffer(2)]]) {
+                                constant float2 &floraRange [[buffer(2)]]) {
     float3 n = normalize(in.normal);
     float slope = 1.0 - n.z;
     float h = in.world.z - u.seaLevel;
@@ -293,10 +306,12 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
 
     float3 albedo;
     float3 surface = in.world;
-    // Ground under the trees drawn around the camera (out to floraRange), which cast no
-    // shadows of their own yet: shaded by the stand's canopy cover. Further out the terrain
-    // colour is the canopy itself, seen from above.
-    float underCanopy = 0.0;
+    // Ground under the trees drawn around the camera (out to floraRange.x): the crowns hide
+    // half its sky, by the stand's canopy cover. They block its sun too: within their
+    // proxies' shadow range (floraRange.y, 0 without) the traced shadows do that, and beyond
+    // it the cover stands in for them, fading in where those fade out. Further out the
+    // terrain colour is the canopy itself, seen from above.
+    float underCanopy = 0.0, sunCover = 0.0;
     if (h < 0.0) {
         albedo = waterAlbedo(-h);
         n = float3(0.0, 0.0, 1.0);
@@ -305,8 +320,10 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
         constexpr sampler linear(filter::linear, address::clamp_to_edge);
         float4 canopy = canopyMap.sample(linear, in.world.xy / u.cloudLayer.w);
         albedo = terrainAlbedo(in.world.xy, h, slope, u.maxHeight, canopy);
-        float nearby = 1.0 - smoothstep(floraRange - 100.0, floraRange, distance(u.cameraPosition, in.world));
+        float d = distance(u.cameraPosition, in.world);
+        float nearby = 1.0 - smoothstep(floraRange.x - 100.0, floraRange.x, d);
         if (nearby > 0.0) underCanopy = nearby * canopyCover.sample(linear, in.world.xy / u.cloudLayer.w).r;
+        sunCover = underCanopy * smoothstep(floraRange.y - kTreeShadowFade, floraRange.y, d);
     }
 
     float skyVisibility = saturate(in.light.x);
@@ -317,14 +334,14 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
     if (nDotL > 0.0 && l.z > -0.01 && cloudSun > 0.01) {
         // Traced per pixel by sunShadow, over the surface this pixel shows.
         if (kRayTraced) {
-            sunVisibility = tracedSun.read(uint2(in.position.xy)).r;
+            sunVisibility = tracedSunAt(tracedSun, uint2(in.position.xy));
         } else {
             sunVisibility = horizonSun(in, l);
         }
     }
     sunVisibility *= cloudSun;
     // Sunflecks get through gaps in the crowns; the sky is half hidden by them.
-    sunVisibility *= 1.0 - 0.85 * underCanopy;
+    sunVisibility *= 1.0 - 0.85 * sunCover;
     float3 color = litSurface(u, albedo, n, nDotL, sunVisibility, skyVisibility, 1.0 - 0.5 * underCanopy, cloudSun);
 
     float3 toEye = u.cameraPosition - in.world;
@@ -343,6 +360,9 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
 // The normal's lowest bit marks tree pixels (FloraShaders), which stand above the ground
 // the horizon map describes.
 constant uint kTreeSurface = 1u;
+// Bit 16 (the y component's lowest) marks impostor pixels, whose flat quads stand inside
+// their own tree's shadow proxy.
+constant uint kImpostorSurface = 1u << 16;
 float2 octEncode(float3 n) {
     n /= abs(n.x) + abs(n.y) + abs(n.z);
     float2 o = n.xy;
@@ -363,7 +383,7 @@ fragment uint4 terrainSurface(VOut in [[stage_in]], constant Uniforms &u [[buffe
         n = float3(0.0, 0.0, 1.0);
         p.z = u.seaLevel;  // shadows fall on the water, not the sea floor
     }
-    return uint4(as_type<uint>(p.x), as_type<uint>(p.y), as_type<uint>(p.z), pack_float_to_snorm2x16(octEncode(n)) & ~kTreeSurface);
+    return uint4(as_type<uint>(p.x), as_type<uint>(p.y), as_type<uint>(p.z), pack_float_to_snorm2x16(octEncode(n)) & ~(kTreeSurface | kImpostorSurface));
 }
 
 // Sun visibility (without cloud) for every terrain pixel, traced in a compute pass over the
@@ -374,6 +394,7 @@ struct SunSurface {
     float3 n;
     bool sky;
     bool tree;
+    bool impostor;
 };
 
 SunSurface sunSurface(texture2d<uint, access::read> surface, depth2d<float, access::read> depth, uint2 g) {
@@ -383,6 +404,7 @@ SunSurface sunSurface(texture2d<uint, access::read> surface, depth2d<float, acce
     s.p = float3(as_type<float>(v.x), as_type<float>(v.y), as_type<float>(v.z));
     s.n = octDecode(unpack_snorm2x16_to_float(v.w));
     s.tree = (v.w & kTreeSurface) != 0;
+    s.impostor = (v.w & kImpostorSurface) != 0;
     return s;
 }
 
@@ -397,6 +419,71 @@ float shadowMeshHeight(texture2d<float, access::read> heights, float2 xy, float 
     float a = heights.read(uint2(c)).r, b = heights.read(uint2(c1.x, c.y)).r;
     float e = heights.read(uint2(c.x, c1.y)).r, d = heights.read(uint2(c1)).r;
     return f.x >= f.y ? a + f.x * (b - a) + f.y * (d - b) : a + f.y * (e - a) + f.x * (d - e);
+}
+
+// Value noise in 0…1 on a unit lattice.
+float treeNoise(float3 q) {
+    float3 i = floor(q), f = q - i;
+    f = f * f * (3.0 - 2.0 * f);
+    float v[8];
+    for (int k = 0; k < 8; k++) {
+        float3 c = i + float3(float(k & 1), float((k >> 1) & 1), float((k >> 2) & 1));
+        uint h = uint(int(c.x)) * 0x8da6b343u ^ uint(int(c.y)) * 0xd8163841u ^ uint(int(c.z)) * 0xcb1ab31fu;
+        h ^= h >> 15; h *= 0x2c1b3c6du; h ^= h >> 12;
+        v[k] = float(h & 0xffffu) / 65535.0;
+    }
+    float x0 = mix(mix(v[0], v[1], f.x), mix(v[2], v[3], f.x), f.y);
+    float x1 = mix(mix(v[4], v[5], f.x), mix(v[6], v[7], f.x), f.y);
+    return mix(x0, x1, f.z);
+}
+
+// Sunlight a crown proxy lets through on a ray passing q: crowns are not solid, so most
+// of a crown's shadow is deep but gaps between leaf clusters (about a metre across) let
+// sunflecks through.
+float crownTransmission(float3 q) {
+    float n = 0.6 * treeNoise(q * 0.7) + 0.4 * treeNoise(q * 1.9 + 17.0);
+    return 0.04 + 0.8 * smoothstep(0.46, 0.66, n);
+}
+
+// Instance masks of the trees' trunk and crown proxies (floraShadows).
+constant uint kTrunkMask = 1u, kCrownMask = 2u;
+
+// Largest bend of a proxy ray (radians): edges wander by up to ~0.5 m under a crown 12 m up.
+constant float kProxyWobble = 0.08;
+
+// What a ray towards the sun meets among the trees' shadow proxies, as (clear, trunk):
+// (1, 0) nothing, (0, 1) a trunk, (0, 0) a crown, whose gaps `treeSun` adds per pixel.
+// Real tree shadows are nearly sharp (a 0.5° sun, crowns a few metres up); one jittered ray
+// per pixel left their narrow penumbrae as speckle, and interpolating between traced pixels
+// softens the edges enough. Instead the ray bends a little with smooth noise over the
+// surface, so the proxies' straight facets cast ragged, leafy edges. Proxies are closed but
+// drawn two-sided, so a leaf inside its own crown's proxy is shaded by it.
+float2 proxyHit(float3 origin, float3 l, instance_acceleration_structure trees) {
+    float3 t = normalize(cross(l, abs(l.z) < 0.9 ? float3(0.0, 0.0, 1.0) : float3(1.0, 0.0, 0.0)));
+    float3 b = cross(l, t);
+    float2 wobble = float2(treeNoise(origin * 1.7), treeNoise(origin * 1.7 + 31.0)) - 0.5;
+    // Less at low sun, where the bend is drawn out along the shadow's length into snakes.
+    float3 d = normalize(l + (t * wobble.x + b * wobble.y) * (kProxyWobble * clamp(l.z, 0.2, 1.0)));
+    intersector<instancing> isect;
+    isect.set_triangle_cull_mode(triangle_cull_mode::none);
+    // Tree tops stand at most ~30 m over their ground.
+    ray shadowRay(origin, d, 0.02, 35.0 / max(d.z, 0.15));
+    auto hit = isect.intersect(shadowRay, trees, kTrunkMask | kCrownMask);
+    if (hit.type == intersection_type::none) return float2(1.0, 0.0);
+    // The nearest proxy: any-hit would report whichever the traversal finds first, which a
+    // rebuild can change, flipping a pixel between a trunk's shadow and a crown's.
+    return (hit.instance_id & 1u) != 0u ? float2(0.0) : float2(0.0, 1.0);
+}
+
+// The sun the trees let through at p, from the share of nearby rays that met nothing
+// (cover.x) or a trunk (cover.y): the rest crossed crowns, whose gaps are looked up per
+// pixel a fixed way towards the sun, so they stay sharp however coarsely the rays are
+// traced. `fade` (1 at the end of the range) hands over to the canopy stand-in.
+float treeSun(float2 cover, float3 p, float3 l, float fade) {
+    float crowns = saturate(1.0 - cover.x - cover.y);
+    float through = cover.x;
+    if (crowns > 0.001) through += crowns * crownTransmission(p + l * 12.0);
+    return mix(through, 1.0, fade);
 }
 
 // −1 where only rays can tell; otherwise the answer (sky, facing away, under thick cloud,
@@ -422,9 +509,48 @@ float sunWithoutRays(constant Uniforms &u, SunSurface s, bool crown, float3 l,
     return -1.0;
 }
 
-// Two passes. Pass 0 traces one pixel in each 2×2 block. Pass 1 fills in the other three:
-// where the traced pixels around one agree (all lit or all shadowed, on the same surface),
-// it takes their answer; at shadow edges and penumbrae it traces its own rays.
+// The traced pixels at `step` spacing (4 or 2) around g: its block's corner and those
+// it lies between (g sits at an odd multiple of step / 2 along x, y or both).
+struct Corners {
+    uint2 c[4];
+};
+
+Corners blockCorners(uint2 g, uint step, uint2 size) {
+    uint mask = step - 1u;
+    uint2 base = g & ~mask;
+    uint2 off = select(uint2(0u), uint2(step), (g & (step >> 1)) != 0u);
+    uint2 last = (size - 1u) & ~mask;
+    Corners k;
+    k.c[0] = min(base, last);
+    k.c[1] = min(base + uint2(off.x, 0u), last);
+    k.c[2] = min(base + uint2(0u, off.y), last);
+    k.c[3] = min(base + off, last);
+    return k;
+}
+
+// Sun-ray passes, coarse to fine.
+constant uint kTreeCoarse = 3u, kTreeFine = 2u;
+
+// Trees' cover written where it was never looked for (the terrain hides the sun, or no
+// proxies apply): clear plus trunk can't both be 1, so neighbours can tell it from "clear"
+// and trace rather than take it, or a lit pixel by a terrain shadow edge would lose its
+// tree shadow.
+constant float2 kCoverUnknown = float2(1.0, 1.0);
+bool coverKnown(float2 cover) { return cover.x + cover.y < 1.5; }
+
+// Four passes over the prepass surface.
+//  - Trees, coarse (with tree shadows): one pixel per 8×8 block traces the trees' proxies.
+//  - Trees, fine: one per 4×4 block takes the coarse pixels' answer where they agree on the
+//    same surface (open ground, or deep under a stand), and traces otherwise.
+//  - Pass 0: one pixel per 2×2 block traces the terrain; the trees' cover comes from the
+//    fine pixels around where they agree on the same surface, and is traced otherwise.
+//  - Pass 1 fills in the other three pixels: where the traced ones around agree (all lit
+//    or all shadowed, on the same surface) it takes their answer, at shadow edges and
+//    penumbrae it traces its own rays; the trees' cover is its neighbours' mean.
+// Writes the terrain's visibility (r), the trees' cover (gb: see proxyHit) and the sun
+// the trees let through (a); shading multiplies r and a. Within the tree shadow range,
+// ground and tree pixels look for the proxies even where the horizon map has the terrain
+// leave them in sun (impostors excepted: their quads stand inside their own proxy).
 kernel void sunShadow(constant Uniforms &u [[buffer(0)]],
                       primitive_acceleration_structure terrain [[buffer(1)]],
                       constant uint &pass [[buffer(2)]],
@@ -434,42 +560,90 @@ kernel void sunShadow(constant Uniforms &u [[buffer(0)]],
                       texture2d<float> cloudShadows [[texture(3)]],
                       texture2d<float, access::read_write> out [[texture(4)]],
                       texture2d<float, access::read> meshHeights [[texture(5)]],
+                      instance_acceleration_structure trees [[buffer(3), function_constant(kTreeShadows)]],
+                      constant float &treeRange [[buffer(4)]],
                       uint2 gid [[thread_position_in_grid]]) {
-    uint2 g = pass == 0 ? gid * 2 : gid;
+    uint step = pass == kTreeCoarse ? 8u : (pass == kTreeFine ? 4u : (pass == 0u ? 2u : 1u));
+    uint2 g = gid * step;
     uint2 size = uint2(out.get_width(), out.get_height());
     if (any(g >= size)) return;
-    bool anchor = all((g & 1) == 0);
-    if (pass == 1 && anchor) return;
+    if ((pass == kTreeFine && all((g & 7u) == 0u)) || (pass == 1u && all((g & 1u) == 0u))) return;
     float3 l = normalize(u.sunDirection);
     SunSurface s = sunSurface(surface, depth, g);
     float meshHeight = s.sky ? 0.0 : shadowMeshHeight(meshHeights, s.p.xy, u.cloudLayer.w);
     bool crown = s.tree && !s.sky && s.p.z > meshHeight + 1.0;
+    float distance = length(u.cameraPosition - s.p);
+    bool proxied = kTreeShadows && !s.sky && !s.impostor && distance < treeRange;
     float visibility = sunWithoutRays(u, s, crown, l, horizons, cloudShadows);
-    if (visibility < 0.0 && pass == 1) {
-        // The traced pixels of the 2×2 blocks touching this one.
-        int2 base = int2(g) & ~1;
-        int2 corners[4] = { base, base + int2(2 * int(g.x & 1), 0), base + int2(0, 2 * int(g.y & 1)),
-                            base + int2(2 * int(g.x & 1), 2 * int(g.y & 1)) };
-        float distance = length(u.cameraPosition - s.p);
-        float lo = 1.0, hi = 0.0;
-        bool same = true;
-        for (int k = 0; k < 4 && same; k++) {
-            uint2 c = uint2(min(corners[k], int2(size) - 2 + int2(size & 1)));
-            SunSurface t = sunSurface(surface, depth, c);
-            same = !t.sky && length(t.p - s.p) < 0.02 * distance + 2.0;
-            float v = out.read(c).r;
-            lo = min(lo, v);
-            hi = max(hi, v);
+    bool traceTrees = proxied && visibility != 0.0;
+    float2 cover = kCoverUnknown;
+    bool covered = !traceTrees;  // nothing more to look for
+
+    // The traced pixels around this one, at `corners` spacing. Their trees' cover where they
+    // show the same surface and agree on it, so shadow edges are traced at least per 2×2
+    // block; tree pixels among tree pixels take their mean whatever the depths, foliage being
+    // noisy anyway. Their terrain answer where they show the same surface and agree on it,
+    // and for crowns among tree pixels their mean (pass 1).
+    uint corners = pass == kTreeFine ? 8u : (pass == 0u ? 4u : 2u);
+    bool own = pass == 0u && all((g & 3u) == 0u);  // pass 0 on a fine pixel: its own answer
+    bool wantTerrain = pass == 1u && visibility < 0.0;
+    if (pass == 1u && traceTrees && !wantTerrain) {
+        // Pass 1 needing only the trees' cover takes the mean of its neighbours' without
+        // checking their surfaces: across a silhouette it bleeds by a pixel at most. Pass 0
+        // traced shadow edges per 2×2 block, so this softens them over two pixels.
+        // A neighbour that never looked (in the terrain's shadow) has it traced instead.
+        Corners k = blockCorners(g, 2u, size);
+        float2 c0 = out.read(k.c[0]).gb, c1 = out.read(k.c[1]).gb, c2 = out.read(k.c[2]).gb, c3 = out.read(k.c[3]).gb;
+        if (coverKnown(c0) && coverKnown(c1) && coverKnown(c2) && coverKnown(c3)) {
+            cover = 0.25 * (c0 + c1 + c2 + c3);
+            covered = true;
         }
-        if (same && (hi <= 0.0 || lo >= 1.0)) visibility = lo;
+    } else if (pass != kTreeCoarse && !own && (traceTrees || wantTerrain)) {
+        Corners k = blockCorners(g, corners, size);
+        float3 sum = 0.0, low = 1.0, high = 0.0;
+        bool same = true, foliage = s.tree && !s.sky, known = true;
+        for (int i = 0; i < 4; i++) {
+            SunSurface t = sunSurface(surface, depth, k.c[i]);
+            same = same && !t.sky && length(t.p - s.p) < 0.02 * distance + 2.0;
+            foliage = foliage && t.tree && !t.sky;
+            float3 v = out.read(k.c[i]).rgb;
+            known = known && coverKnown(v.yz);
+            low = min(low, v);
+            high = max(high, v);
+            sum += v;
+        }
+        bool agree = all(high.yz - low.yz < 0.01);
+        if (traceTrees && known && (foliage || (same && (agree || pass == 1u)))) {
+            cover = 0.25 * sum.yz;
+            covered = true;
+        }
+        if (wantTerrain) {
+            if (crown && foliage) visibility = 0.25 * sum.x;
+            else if (same && (high.x <= 0.0 || low.x >= 1.0)) visibility = low.x;
+        }
     }
-    // Crown pixels leave towards the sun: a card's normal may face away from it. Anything
-    // else starts no lower than the shadow mesh: from under it (a valley floor the coarse
-    // mesh bridges over) a ray would pass out through the backs of the ridges around it.
-    float3 origin = crown ? s.p : float3(s.p.xy, max(s.p.z, meshHeight));
-    if (visibility < 0.0) visibility = rayTracedSun(origin, crown ? l : s.n, l, float2(g) + 0.5, length(u.cameraPosition - s.p),
-                                                    u.maxHeight, terrain);
-    out.write(float4(visibility), g);
+    if (own && traceTrees) {
+        cover = out.read(g).gb;
+        covered = coverKnown(cover);
+    }
+    bool treePass = pass == kTreeCoarse || pass == kTreeFine;
+    if (visibility < 0.0 && !treePass) {
+        // Crown pixels leave towards the sun: a card's normal may face away from it. Anything
+        // else starts no lower than the shadow mesh: from under it (a valley floor the coarse
+        // mesh bridges over) a ray would pass out through the backs of the ridges around it.
+        float3 origin = crown ? s.p : float3(s.p.xy, max(s.p.z, meshHeight));
+        visibility = rayTracedSun(origin, crown ? l : s.n, l, float2(g) + 0.5, distance, u.maxHeight, terrain);
+    }
+    // In the terrain's shadow the trees can't make it darker (the tree passes don't know
+    // yet). From the true surface: the lift above would start over or inside the trees of
+    // a bridged valley.
+    if (kTreeShadows && !covered && (visibility != 0.0 || treePass)) {
+        cover = proxyHit(s.p + (s.tree ? l : s.n) * 0.05, l, trees);
+    }
+    // Still unknown here only where the terrain shadow came from the rays: sun is then 0 anyway.
+    float sun = 1.0;
+    if (traceTrees && !treePass && coverKnown(cover)) sun = treeSun(cover, s.p, l, smoothstep(treeRange - kTreeShadowFade, treeRange, distance));
+    out.write(float4(max(visibility, 0.0), cover, sun), g);
 }
 
 // Sky: one full-screen triangle at the far plane, drawn after the terrain's depth prepass
