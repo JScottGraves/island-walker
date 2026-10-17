@@ -14,7 +14,8 @@ import Walker
 // Controls: WASD walk, Shift run, drag to look, F toggles fly mode, Space/C up/down in fly mode,
 // [ and ] move the time of day, T lets time run (an hour every 20 s). `--time 16.5` starts at
 // 16:30 local solar time, `--day N` picks the day of year, `--shadows horizon` skips ray tracing,
-// `--view coast` starts at that snapshot viewpoint (summit, ridge, coast, pali).
+// `--view coast` starts at that snapshot viewpoint (summit, ridge, coast, pali), `--camera X,Y,YAW,PITCH`
+// (metres, degrees) at that spot, and `--flora off` draws no trees.
 
 @main
 struct IslandApp: App {
@@ -99,7 +100,8 @@ final class Coordinator: NSObject, MTKViewDelegate {
                                            depthFormat: .depth32Float, terrain: tiles,
                                            shadows: requested, clouds: clouds,
                                            detailMaps: IslandSource.detailMaps(),
-                                           fineDetail: Snapshots.option("--detail") != "off")
+                                           fineDetail: Snapshots.option("--detail") != "off",
+                                           flora: IslandSource.floraMaps())
         } catch {
             print("renderer failed: \(error)")
             return
@@ -107,10 +109,10 @@ final class Coordinator: NSObject, MTKViewDelegate {
         hour = Snapshots.option("--time").flatMap { Double($0) } ?? hour
         day = Snapshots.option("--day").flatMap { Int($0) } ?? day
         guard let overview = try? tiles.grid(level: tiles.overviewLevel()) else { return }
-        // `--view coast` (or summit, ridge, pali…) starts at that snapshot viewpoint, facing
-        // the same way; otherwise at the highest point so the whole island is in view.
-        if let name = Snapshots.option("--view"),
-           let view = Snapshots.viewpoints(overview).first(where: { $0.name == name }) {
+        // `--camera X,Y,YAW,PITCH` or `--view coast` (or summit, ridge, pali…) starts there,
+        // facing that way; otherwise at the highest point so the whole island is in view.
+        let named = Snapshots.option("--view").flatMap { name in Snapshots.viewpoints(overview).first { $0.name == name } }
+        if let view = Snapshots.cameras().first ?? named.map({ (name: $0.name, camera: $0.camera) }) {
             renderer?.prepareGround(x: view.camera.x, y: view.camera.y)
             var w = Walker(x: view.camera.x, y: view.camera.y, ground: ground)
             w.yaw = view.camera.yaw

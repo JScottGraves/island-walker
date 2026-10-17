@@ -30,7 +30,7 @@ rng = np.random.default_rng(42)
 SOURCES = {
     'ohia-leaves': ('Starr-110817-8234-Metrosideros_polymorpha-voucher-Kulamanu_Kula-Maui_24985192002.jpg', (0.14, 0.43, 0.78, 0.99)),
     'ohia-flowers': ('Starr-030329-0001-Metrosideros_polymorpha-red_flower-Auwahi-Maui_24547066961_.jpg', (0.17, 0.0, 0.97, 1.0)),
-    'koa-phyllodes': ('Acacia_koa_with_phyllode_between_the_branch_and_the_compound_leaves.jpg', (0.0, 0.0, 0.56, 0.62)),
+    'koa-phyllodes': ('Acacia_koa_with_phyllode_between_the_branch_and_the_compound_leaves.jpg', (0.075, 0.085, 0.56, 0.62)),
     'naupaka-leaves': ('Starr-110209-0697-Scaevola_taccada-leaves-Resort_Management_Group_Nursery_Kihei-.jpg', None),
     'aalii-leaves': ('Starr-041227-9001-Dodonaea_viscosa-plant_voucher-Moaulanui-Kahoolawe_24722924315.jpg', (0.12, 0.08, 0.72, 0.56)),
     'hapuu-frond': ('Cibotium_chamissoi_4969582483_.jpg', (0.0, 0.12, 0.885, 0.96)),
@@ -132,9 +132,9 @@ def bleed(rgb, alpha):
     return filled * (1 - w) + rgb * w
 
 
-def recolour(rgb, alpha, target, keep=0.35):
+def recolour(rgb, alpha, target, keep=0.35, contrast=1.0):
     """Moves a card's mean colour to `target` (sRGB swatch), keeping its light and dark detail
-    and `keep` of its own hue variation."""
+    (raised to `contrast`) and `keep` of its own hue variation."""
     if target is None:
         return rgb
     t = decode(np.array(target) / 255.0)
@@ -142,9 +142,9 @@ def recolour(rgb, alpha, target, keep=0.35):
     mean = (rgb * w).sum(axis=(0, 1)) / max(w.sum(), 1)
     lum = luminance(rgb)
     mean_lum = max(luminance(mean[None, None, :])[0, 0], 1e-4)
-    detail = (lum / mean_lum)[..., None]
+    detail = (np.maximum(lum, 1e-5) / mean_lum)[..., None] ** contrast
     tinted = t * detail
-    own = rgb * (luminance(t[None, None, :])[0, 0] / mean_lum)
+    own = rgb * (luminance(t[None, None, :])[0, 0] / mean_lum) * (detail / np.maximum(lum / mean_lum, 1e-5)[..., None])
     return np.clip(tinted * (1 - keep) + own * keep, 0, 1)
 
 
@@ -257,8 +257,10 @@ def aalii_leaves(photos):
 
 
 def hapuu_frond(photos):
-    """One side of a Cibotium frond (pinnae against dark shade), mirrored about a drawn
-    rachis so the card is the whole frond's width; tiles along its length."""
+    """A whole Cibotium frond, base at the bottom of the card and tip at the top: pinnae keyed
+    off dark shade (one side of the rachis, mirrored), stacked so the frond carries ~20
+    pairs, and cut to a long, narrow lanceolate outline (widest a third of the way up,
+    pinnae shortening to the tip) with soft ends, so no straight row edges show."""
     rgb = load(photos, 'hapuu-frond')
     g = rgb[..., 1]
     a = smoothstep(0.02, 0.06, g) * smoothstep(0.0, 0.03, g - rgb[..., 2])
@@ -266,24 +268,37 @@ def hapuu_frond(photos):
     half = SIZE // 2
     def resize(x, w, h):
         return np.asarray(Image.fromarray(x.astype(np.float32), 'F').resize((w, h), Image.LANCZOS))
-    pre = [resize(rgb[..., k] * a, half - 6, SIZE) for k in range(3)]
-    ah = np.clip(resize(a, half - 6, SIZE), 0, 1)
-    left = np.stack(pre, axis=2) / np.maximum(ah, 1e-4)[..., None]
+    # One strip of pinnae, half the card wide, a third of it tall, feathered at its ends.
+    sh = SIZE // 3 + 8
+    strip_a = np.clip(resize(a, half - 5, sh), 0, 1)
+    strip = np.stack([resize(rgb[..., k] * a, half - 5, sh) for k in range(3)], axis=2) / np.maximum(strip_a, 1e-4)[..., None]
+    feather = np.minimum(np.arange(sh), np.arange(sh)[::-1])[:, None]
+    strip_a *= smoothstep(0, 10, feather)
+    left = np.zeros((SIZE, half - 5, 3)); left_a = np.zeros((SIZE, half - 5))
+    for k, y in enumerate(range(-6, SIZE, sh - 8)):
+        y0, y1 = max(y, 0), min(y + sh, SIZE)
+        if y1 <= y0:
+            continue
+        src = slice(y0 - y, y1 - y)
+        take = strip_a[src] > left_a[y0:y1]
+        left[y0:y1] = np.where(take[..., None], strip[src], left[y0:y1])
+        left_a[y0:y1] = np.maximum(left_a[y0:y1], strip_a[src])
     out = np.zeros((SIZE, SIZE, 3)); out_a = np.zeros((SIZE, SIZE))
-    out[:, :half - 6], out_a[:, :half - 6] = left, ah
-    out[:, half + 6:], out_a[:, half + 6:] = left[:, ::-1], ah[:, ::-1]
-    # Seamless along the length: blend the last rows into the first.
-    n = 48
-    t = np.linspace(0, 1, n)[:, None]
-    out_a[:n] = np.maximum(out_a[:n] * t, out_a[-n:] * (1 - t))
-    out[:n] = np.where((out_a[-n:] * (1 - t) > out_a[:n] * t)[..., None], out[-n:], out[:n])
-    out_a, out = out_a[:-n], out[:-n]
-    out = np.asarray(Image.fromarray((np.clip(encode(out), 0, 1) * 255).astype(np.uint8)).resize((SIZE, SIZE), Image.LANCZOS)) / 255.0
-    out = decode(out)
-    out_a = np.clip(resize(out_a, SIZE, SIZE), 0, 1)
-    # Rachis: a pale stripe down the middle.
-    out[:, half - 7:half + 7] = decode(np.array([150, 160, 96]) / 255.0)
-    out_a[:, half - 7:half + 7] = 1
+    out[:, :half - 5], out_a[:, :half - 5] = left, left_a
+    out[:, half + 5:], out_a[:, half + 5:] = left[:, ::-1], left_a[:, ::-1]
+    # Lanceolate outline: pinna reach by height (v = 0 at the base, row 0 is the top).
+    v = 1 - (np.arange(SIZE) + 0.5) / SIZE
+    reach = np.where(v < 0.33, 0.55 + 0.45 * smoothstep(0.0, 0.33, v), 1 - 0.94 * smoothstep(0.33, 1.0, v) ** 0.9)
+    reach *= smoothstep(0.0, 0.05, v)  # bare stipe at the very base
+    across = np.abs((np.arange(SIZE) + 0.5) / SIZE - 0.5) * 2
+    edge = reach[:, None] - across[None, :]
+    out_a *= smoothstep(-0.02, 0.04, edge)
+    # Rachis: a pale stripe down the middle, thinning to the tip.
+    rw = (6 * (1 - 0.6 * v)).astype(int)
+    rachis = decode(np.array([150, 160, 96]) / 255.0)
+    for y in range(SIZE):
+        out[y, half - rw[y]:half + rw[y]] = rachis
+        out_a[y, half - rw[y]:half + rw[y]] = 1.0 if v[y] < 0.985 else 0.0
     return recolour(out, out_a, TARGETS['hapuu-frond'], keep=0.5), out_a
 
 
@@ -317,7 +332,7 @@ def loulu_fan(photos):
     # Paler and yellower towards the hastula; tips a little browner.
     rgb *= (1 + 0.25 * (1 - smoothstep(0.0, 0.35, rho)))[..., None]
     rgb = rgb * (1 - 0.25 * smoothstep(0.8, 1.0, rho))[..., None] + 0.25 * smoothstep(0.8, 1.0, rho)[..., None] * decode(np.array([130, 120, 80]) / 255.0)
-    rgb = recolour(rgb, a, (98, 112, 76), keep=0.7)
+    rgb = recolour(rgb, a, (84, 108, 70), keep=0.6)
     return rgb, a
 
 
@@ -357,7 +372,7 @@ def bark(photos, name):
     rgb = decode(np.asarray(im) / 255.0)
     rgb = make_tileable(rgb)
     # Recolour with the full alpha (every texel counts).
-    return recolour(rgb, np.ones(rgb.shape[:2]), TARGETS[name], keep=0.55)
+    return recolour(rgb, np.ones(rgb.shape[:2]), TARGETS[name], keep=0.55, contrast=0.65)
 
 
 def periodic_noise(shape, scale_u, scale_v, seed):
@@ -378,8 +393,8 @@ def hapuu_bark():
     shape = (SIZE, SIZE)
     fibres = 0.6 * periodic_noise(shape, 14, 260, 1) + 0.4 * periodic_noise(shape, 6, 90, 2)
     strands = np.abs(periodic_noise(shape, 30, 400, 3))
-    dark = decode(np.array([42, 30, 22]) / 255.0)
-    mid = decode(np.array([92, 62, 40]) / 255.0)
+    dark = decode(np.array([30, 23, 18]) / 255.0)
+    mid = decode(np.array([72, 52, 36]) / 255.0)
     t = smoothstep(-1.0, 1.4, fibres + 0.6 * (strands < 0.25))
     rgb = dark * (1 - t[..., None]) + mid * t[..., None]
     rgb *= (0.8 + 0.4 * smoothstep(-2, 2, periodic_noise(shape, 30, 30, 4)))[..., None]
@@ -408,8 +423,9 @@ def credits_md(photos, out):
     }
     for name, (file, _) in SOURCES.items():
         c = credits[file]
+        licence_url = c['licenseUrl'] or c['page'] + '#Licensing'
         lines.append(f"| `{name}.png` | [{c['title'][5:]}]({c['page']}) | {c['artist']} | "
-                     f"[{c['license']}]({c['licenseUrl']}) | {notes[name]} |")
+                     f"[{c['license']}]({licence_url}) | {notes[name]} |")
     lines.append('| `hapuu-bark.png` | — | — | — | **Drawn procedurally** (no photo of the fibrous trunk cut cleanly). |')
     lines.append('')
     open(os.path.join(out, 'CREDITS.md'), 'w').write('\n'.join(lines))

@@ -66,8 +66,11 @@ public struct FloraTextures: Sendable {
 
     /// Box-filtered mips (colour averaged in linear light, weighted by alpha). With
     /// `preserveCoverage`, each mip's alpha is scaled so the share of texels passing the
-    /// alpha test stays that of mip 0; otherwise distant crowns thin out.
-    public static func mipChain(_ base: [UInt8], size: Int, preserveCoverage: Bool) -> [[UInt8]] {
+    /// alpha test stays that of mip 0; otherwise distant crowns thin out. `linearData`
+    /// averages the channels as they are (normals, not colours).
+    public static func mipChain(_ base: [UInt8], size: Int, preserveCoverage: Bool, linearData: Bool = false) -> [[UInt8]] {
+        let decode: (Float) -> Float = linearData ? { $0 } : srgbDecode
+        let encode: (Float) -> Float = linearData ? { $0 } : srgbEncode
         var mips = [base]
         var level = base.map { Float($0) / 255 }
         var n = size
@@ -88,16 +91,16 @@ public struct FloraTextures: Sendable {
                         let o = ((2 * y + dy) * n + 2 * x + dx) * 4
                         let a = level[o + 3]
                         let w = preserveCoverage ? a + 1e-3 : 1
-                        rgb.0 += srgbDecode(level[o]) * w
-                        rgb.1 += srgbDecode(level[o + 1]) * w
-                        rgb.2 += srgbDecode(level[o + 2]) * w
+                        rgb.0 += decode(level[o]) * w
+                        rgb.1 += decode(level[o + 1]) * w
+                        rgb.2 += decode(level[o + 2]) * w
                         alpha += a
                         weight += w
                     }
                     let o = (y * m + x) * 4
-                    next[o] = srgbEncode(rgb.0 / weight)
-                    next[o + 1] = srgbEncode(rgb.1 / weight)
-                    next[o + 2] = srgbEncode(rgb.2 / weight)
+                    next[o] = encode(rgb.0 / weight)
+                    next[o + 1] = encode(rgb.1 / weight)
+                    next[o + 2] = encode(rgb.2 / weight)
                     next[o + 3] = alpha / 4
                 }
             }

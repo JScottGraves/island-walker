@@ -1,5 +1,6 @@
 import Foundation
 import Engine
+import Flora
 import IslandCore
 import IslandGen
 
@@ -59,6 +60,27 @@ enum IslandSource {
         let domain = (try? bundle.channel("height")).map { Double($0.size) * $0.cellMetres } ?? 0
         let canopy = domain > 0 ? Look.canopyMap(weights: weights, domain: domain) : nil
         return DetailMaps(rain: map("rain"), drainage: map("drainage"), hardness: map("hardness"), canopy: canopy)
+    }
+
+    /// The plant-community maps the native trees are scattered from, or nil with
+    /// `--flora off` or when the bundle predates the biome channels.
+    static func floraMaps() -> FloraMaps? {
+        guard Snapshots.option("--flora") != "off", let bundle = bundle() else { return nil }
+        func map(_ name: String) -> Grid? {
+            guard let c = try? bundle.channel(name) else { return nil }
+            var level = 0
+            while level < c.levels - 1 && IslandBundle.levelSize(c.size, level: level) > 1024 { level += 1 }
+            return try? bundle.grid(name, level: level)
+        }
+        var weights: [Grid] = []
+        for entry in Communities.table {
+            guard let g = map(entry.channel) else {
+                print("no \(entry.channel) in the bundle: drawing without trees (rebake with islandgen)")
+                return nil
+            }
+            weights.append(g)
+        }
+        return FloraMaps(weights: weights, site: FloraMaps.site(mai: map("mai"), exposure: map("exposure")))
     }
 
     /// Standing trade-wind cloud coverage: islandgen's clouds-trades.r32 next to the

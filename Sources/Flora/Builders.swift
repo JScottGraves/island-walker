@@ -42,6 +42,9 @@ struct BranchingTree {
     /// Leaf-cluster card half-size (metres) and cards per tip.
     var card: Float
     var cardsPerTip: ClosedRange<Int>
+    /// Cards per ring along terminal branches and along the order before them.
+    var alongTerminal = 2
+    var alongOuter = 1
     var leaves: FloraMaterial.ID
     var flowers: FloraMaterial.ID?
     var flowerChance: Float = 0
@@ -87,6 +90,16 @@ struct BranchingTree {
             return Swift.max(t, 0.05 * height)
         }
 
+        // A leaf-cluster card near `p`, facing roughly out of the crown.
+        func addCard(at p: SIMD3<Float>, along d: SIMD3<Float>, size: Float, cluster: Int, rng: inout SplitMix64) {
+            let facing = simd_normalize(crown.normal(p) * 0.8 + rng.direction())
+            let right = rotate(perpendicular(facing), about: facing, by: rng.float(0, 2 * .pi))
+            let up = simd_cross(facing, right)
+            let s = card * size * rng.float(0.8, 1.2)
+            let centre = p + rng.direction() * (card * 0.6)
+            cards.append(Card(centre: centre, right: right * s, up: up * s, material: leaves, cluster: cluster))
+        }
+
         // One branch: a crooked path from `start` heading along `dir`.
         func grow(start: SIMD3<Float>, dir d0: SIMD3<Float>, length: Float, radius r0: Float, tipRadius r1: Float,
                   order: Int, parent: Int, cluster c0: Int, rng: inout SplitMix64) {
@@ -106,6 +119,15 @@ struct BranchingTree {
             let index = branches.count
             branches.append(Branch(rings: rings, order: order, parent: parent))
             let cluster = order == lod1Order ? index : c0
+            // Leaves along the outer branches too, so the crown reads as foliage, not twigs.
+            if order >= orders - 1 && order > 0 {
+                let leafCluster = order <= lod1Order ? index : cluster
+                for ring in rings.dropFirst() {
+                    for _ in 0..<(order == orders ? alongTerminal : alongOuter) {
+                        addCard(at: ring.position, along: ring.direction, size: 0.9, cluster: leafCluster, rng: &rng)
+                    }
+                }
+            }
             if order < orders {
                 branches[index].terminal = false
                 let count = rng.int(children)
@@ -127,13 +149,7 @@ struct BranchingTree {
                 // Leaf tuft at the tip.
                 let tuftCluster = order <= lod1Order ? index : cluster
                 for _ in 0..<rng.int(cardsPerTip) {
-                    let facing = simd_normalize(crown.normal(p) * 0.8 + rng.direction())
-                    let right0 = perpendicular(facing)
-                    let right = rotate(right0, about: facing, by: rng.float(0, 2 * .pi))
-                    let up = simd_cross(facing, right)
-                    let s = card * rng.float(0.8, 1.2)
-                    let centre = p + rng.direction() * (card * 0.6) + d * (card * 0.4)
-                    cards.append(Card(centre: centre, right: right * s, up: up * s, material: leaves, cluster: tuftCluster))
+                    addCard(at: p + d * (card * 0.4), along: d, size: 1, cluster: tuftCluster, rng: &rng)
                 }
                 if let flowers, rng.float(0, 1) < flowerChance {
                     let facing = simd_normalize(crown.normal(p) + SIMD3(0, 0, 0.6))
@@ -205,20 +221,21 @@ struct Palm {
     var height: Float
     var trunkRadius: Float = 0.14
     var leaves: ClosedRange<Int> = 20...28
-    var leafRadius: ClosedRange<Float> = 0.6...0.75
-    var petiole: Float = 1.0
+    var leafRadius: ClosedRange<Float> = 0.8...0.95
+    var petiole: Float = 1.1
     var deadChance: Float = 0.6
 
     func build(seed: UInt64, lod: Int) -> PlantMesh {
         var rng = SplitMix64(seed: seed)
+        // The height is to the top of the crown, which reaches ~1.5 m above the trunk.
         let crownTop = height
-        let crown = Crown(centre: SIMD3(0, 0, crownTop - 0.6), radii: SIMD3(2.0, 2.0, 1.4))
+        let crown = Crown(centre: SIMD3(0, 0, crownTop - 1.4), radii: SIMD3(2.2, 2.2, 1.6))
         var b = MeshBuilder(height: height, crown: crown)
 
         // Trunk: a gentle curve, swollen at the base.
         let lean = rng.float(0.02, 0.09), azimuth = rng.float(0, 2 * .pi)
         let bendDir = SIMD3<Float>(cos(azimuth), sin(azimuth), 0)
-        let trunkTop = crownTop - 0.5
+        let trunkTop = crownTop - 2.1
         let steps = lod == 0 ? 12 : 4
         var rings: [Ring] = []
         var top = SIMD3<Float>(0, 0, 0), topDir = SIMD3<Float>(0, 0, 1)
@@ -247,7 +264,7 @@ struct Palm {
             let isDead = k >= count
             // Spread: young leaves near upright, old ones out and down; dead ones hang.
             let age = isDead ? 1 : (Float(k) + rng.float(0, 1)) / Float(count)
-            let fromVertical = isDead ? rng.float(2.5, 2.9) : 0.25 + 1.55 * age + rng.float(-0.15, 0.15)
+            let fromVertical = isDead ? rng.float(2.5, 2.9) : 0.2 + 1.85 * age + rng.float(-0.15, 0.15)
             let az = Float(k) * 2.39996 + rng.float(-0.3, 0.3)
             let out = SIMD3<Float>(cos(az), sin(az), 0)
             let d = simd_normalize(SIMD3(0, 0, cos(fromVertical)) + out * sin(fromVertical))
@@ -313,15 +330,14 @@ struct TreeFern {
     var height: Float
     var trunkRadius: Float = 0.22
     var fronds: ClosedRange<Int> = 9...14
-    var frondLength: ClosedRange<Float> = 2.2...3.0
+    var frondLength: ClosedRange<Float> = 2.6...3.4
 
     func build(seed: UInt64, lod: Int) -> PlantMesh {
         var rng = SplitMix64(seed: seed)
-        let crown = Crown(centre: SIMD3(0, 0, height - 0.2), radii: SIMD3(2.4, 2.4, 1.2))
-        var b = MeshBuilder(height: height, crown: crown)
+        var b = MeshBuilder(height: height, crown: Crown(centre: SIMD3(0, 0, height * 0.75), radii: SIMD3(2.6, 2.6, 1.4)))
         let lean = rng.float(0.0, 0.12), azimuth = rng.float(0, 2 * .pi)
         let leanDir = SIMD3<Float>(cos(azimuth), sin(azimuth), 0)
-        let trunkTop = height - 0.35
+        let trunkTop = height * rng.float(0.38, 0.55)
         let steps = lod == 0 ? 8 : 3
         var rings: [Ring] = []
         var top = SIMD3<Float>(0, 0, 0)
@@ -346,7 +362,7 @@ struct TreeFern {
         let count = lod == 0 ? rng.int(fronds) : 8
         for k in 0..<count {
             let az = Float(k) * 2.39996 + rng.float(-0.25, 0.25)
-            let rise = rng.float(0.45, 1.0)   // radians from vertical at the base
+            let rise = rng.float(0.3, 0.75)   // radians from vertical at the base
             let length = rng.float(frondLength.lowerBound, frondLength.upperBound) * (lod == 0 ? 1 : 1.05)
             frond(&b, from: hub, azimuth: az, rise: rise, length: length, lod: lod)
         }
@@ -371,8 +387,8 @@ struct TreeFern {
         return b.mesh
     }
 
-    /// An arching frond: a ribbon with a slight V across it, bare stipe at the base, widest
-    /// about 40% along, tapering to the tip. The texture repeats along it.
+    /// An arching frond: a ribbon with a slight V across it carrying the whole frond texture
+    /// (its lanceolate outline and bare stipe are in the texture's alpha).
     func frond(_ b: inout MeshBuilder, from hub: SIMD3<Float>, azimuth: Float, rise: Float, length: Float, lod: Int) {
         let steps = lod == 0 ? 10 : 4
         let out = SIMD3<Float>(cos(azimuth), sin(azimuth), 0)
@@ -380,24 +396,20 @@ struct TreeFern {
         let base = UInt32(b.mesh.vertices.count)
         let columns = lod == 0 ? 3 : 2
         var p = hub
-        var along: Float = 0
         for k in 0...steps {
             let t = Float(k) / Float(steps)
             // Arch: starts at `rise` from vertical and bends over past horizontal.
-            let angle = rise + t * t * 1.7
+            let angle = rise + t * t * 1.5
             let d = simd_normalize(SIMD3(0, 0, cos(angle)) + out * sin(angle))
-            if k > 0 {
-                p += d * (length / Float(steps))
-                along += length / Float(steps)
-            }
-            let width: Float = t < 0.15 ? 0.06 : 0.55 * smoothstep(0.15, 0.4, t) * (1 - smoothstep(0.55, 1.0, t) * 0.92)
+            if k > 0 { p += d * (length / Float(steps)) }
+            let width: Float = 0.62 * (0.35 + 0.65 * smoothstep(0.0, 0.3, t)) * (1 - 0.5 * smoothstep(0.5, 1.0, t))
             let lift = simd_normalize(simd_cross(across, d))
             for c in 0..<columns {
                 let s: Float = columns == 2 ? Float(c) * 2 - 1 : Float(c) - 1
                 let pos: SIMD3<Float> = p + across * (s * width) + lift * ((1 - abs(s)) * width * 0.25)
                 let n = simd_normalize(lift * 0.8 + across * (-s * 0.3) + b.crown.normal(pos) * 0.4)
                 let u: Float = 0.5 + 0.5 * s
-                _ = b.vertex(pos, n, SIMD2(u, along / 1.4), material: .hapuuFrond, flutter: t)
+                _ = b.vertex(pos, n, SIMD2(u, t), material: .hapuuFrond, flutter: t)
             }
         }
         let row = UInt32(columns)

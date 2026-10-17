@@ -244,6 +244,36 @@ float horizonSun(VOut in, float3 l) {
     return smoothstep(0.0, 1.0, saturate((margin + 0.01) / 0.02));
 }
 
+// The lighting tail shared by the terrain and the trees (FloraShaders), so the two can't
+// drift apart. Sun (already scaled by its visibility, traced shadows and cloud), sky light
+// from the open part of the sky, and one bounce off the surrounding terrain
+// (global-illumination.md §6, cheap version): it fills the sky the terrain blocks, plus
+// the ground a tilted face looks down at. Neighbours are taken to share this albedo and to
+// be half in sun. `occlusion` darkens the sky and bounce light (AO inside a crown; 1 on
+// the terrain). Mirrors Look.lit.
+float3 litSurface(constant Uniforms &u, float3 albedo, float3 n, float nDotL, float sunVisibility,
+                  float skyVisibility, float occlusion, float cloudSun) {
+    float3 l = normalize(u.sunDirection);
+    float3 direct = u.sunRadiance * (nDotL * sunVisibility);
+    float3 ambient = skyIrradiance(u, n) * (skyVisibility * occlusion);
+    float3 groundLight = u.sunRadiance * (0.5 * max(l.z, 0.0) * cloudSun) + skyIrradiance(u, float3(0.0, 0.0, 1.0));
+    float terrainSeen = (1.0 - skyVisibility) * (0.5 + 0.5 * n.z) + (0.5 - 0.5 * n.z);
+    float3 bounced = albedo * groundLight * (terrainSeen * occlusion);
+    return albedo * (direct + ambient + bounced);
+}
+
+// Aerial perspective (haze takes the colour of the sky behind it, so it brightens towards
+// the sun and warms at sunset), the clouds in front, and tone mapping. The render target is
+// an _srgb format, which applies the sRGB encoding on write.
+float4 finishSurface(constant Uniforms &u, texture2d<float> skyView, texture2d<float> clouds,
+                     texture2d<float> cloudDistance, float3 color, float3 world, float2 pixel) {
+    float3 toEye = u.cameraPosition - world;
+    float dist = length(toEye);
+    color = mix(color, skyAbove(skyView, -toEye), kHazeMax * (1.0 - exp(-dist / kHazeDistance)));
+    color = compositeClouds(u, clouds, cloudDistance, color, pixel, dist);
+    return float4(pbrNeutral(color * u.exposure), 1.0);
+}
+
 // Mirrors Look.lit and GroundView.shade; constants come from Look.metalPrelude, the sun
 // and sky from SunLight through the uniforms.
 fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buffer(1)]],
@@ -285,16 +315,7 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
         }
     }
     sunVisibility *= cloudSun;
-    float3 direct = u.sunRadiance * (nDotL * sunVisibility);
-    // Sky light from the part of the sky the terrain leaves open.
-    float3 ambient = skyIrradiance(u, n) * skyVisibility;
-    // One bounce off the surrounding terrain (global-illumination.md §6, cheap version):
-    // it fills the sky the terrain blocks, plus the ground a tilted face looks down at.
-    // Neighbours are taken to share this albedo and to be half in sun.
-    float3 groundLight = u.sunRadiance * (0.5 * max(l.z, 0.0) * cloudSun) + skyIrradiance(u, float3(0.0, 0.0, 1.0));
-    float terrainSeen = (1.0 - skyVisibility) * (0.5 + 0.5 * n.z) + (0.5 - 0.5 * n.z);
-    float3 bounced = albedo * groundLight * terrainSeen;
-    float3 color = albedo * (direct + ambient + bounced);
+    float3 color = litSurface(u, albedo, n, nDotL, sunVisibility, skyVisibility, 1.0, cloudSun);
 
     float3 toEye = u.cameraPosition - in.world;
     float dist = length(toEye);
@@ -304,18 +325,14 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
         float3 reflected = float3(-toEye.xy, toEye.z);
         color = mix(color, skyAbove(skyView, reflected), waterReflectance(cosView, dist));
     }
-    // Aerial perspective: haze takes the colour of the sky behind it, so it brightens
-    // towards the sun and warms at sunset.
-    color = mix(color, skyAbove(skyView, -toEye), kHazeMax * (1.0 - exp(-dist / kHazeDistance)));
-    color = compositeClouds(u, clouds, cloudDistance, color, in.position.xy, dist);
-
-    color = pbrNeutral(color * u.exposure);
-    // The render target is an _srgb format, which applies the sRGB encoding on write.
-    return float4(color, 1.0);
+    return finishSurface(u, skyView, clouds, cloudDistance, color, in.world, in.position.xy);
 }
 
 // Depth prepass with ray-traced shadows: the surface each pixel shows (world position,
 // and its normal as a packed octahedral pair) for sunShadow. Water shows its surface.
+// The normal's lowest bit marks tree pixels (FloraShaders), which stand above the ground
+// the horizon map describes.
+constant uint kTreeSurface = 1u;
 float2 octEncode(float3 n) {
     n /= abs(n.x) + abs(n.y) + abs(n.z);
     float2 o = n.xy;
@@ -336,7 +353,7 @@ fragment uint4 terrainSurface(VOut in [[stage_in]], constant Uniforms &u [[buffe
         n = float3(0.0, 0.0, 1.0);
         p.z = u.seaLevel;  // shadows fall on the water, not the sea floor
     }
-    return uint4(as_type<uint>(p.x), as_type<uint>(p.y), as_type<uint>(p.z), pack_float_to_snorm2x16(octEncode(n)));
+    return uint4(as_type<uint>(p.x), as_type<uint>(p.y), as_type<uint>(p.z), pack_float_to_snorm2x16(octEncode(n)) & ~kTreeSurface);
 }
 
 // Sun visibility (without cloud) for every terrain pixel, traced in a compute pass over the
@@ -346,6 +363,7 @@ struct SunSurface {
     float3 p;
     float3 n;
     bool sky;
+    bool tree;
 };
 
 SunSurface sunSurface(texture2d<uint, access::read> surface, depth2d<float, access::read> depth, uint2 g) {
@@ -354,6 +372,7 @@ SunSurface sunSurface(texture2d<uint, access::read> surface, depth2d<float, acce
     uint4 v = surface.read(g);
     s.p = float3(as_type<float>(v.x), as_type<float>(v.y), as_type<float>(v.z));
     s.n = octDecode(unpack_snorm2x16_to_float(v.w));
+    s.tree = (v.w & kTreeSurface) != 0;
     return s;
 }
 
@@ -362,7 +381,8 @@ SunSurface sunSurface(texture2d<uint, access::read> surface, depth2d<float, acce
 float sunWithoutRays(constant Uniforms &u, SunSurface s, float3 l,
                      texture2d_array<float, access::read> horizons, texture2d<float> cloudShadows) {
     if (s.sky) return 1.0;
-    if (dot(s.n, l) <= 0.0 || l.z <= -0.01 || cloudSunlight(u, cloudShadows, s.p) <= 0.01) return 0.0;
+    // Leaves are two-sided and pass light through: a tree pixel facing away still counts.
+    if ((!s.tree && dot(s.n, l) <= 0.0) || l.z <= -0.01 || cloudSunlight(u, cloudShadows, s.p) <= 0.01) return 0.0;
     // The horizon map comes from the same mesh the rays trace, so where it puts the sun
     // well clear of every nearby horizon, or well below them all, the rays would only
     // agree with it; the slack covers the drawn surface sitting off the coarse mesh.
@@ -372,7 +392,8 @@ float sunWithoutRays(constant Uniforms &u, SunSurface s, float3 l,
     horizonMargin(horizons.read(cell, 0) * M_PI_2_F, horizons.read(cell, 1) * M_PI_2_F,
                   horizons.read(cell, 2) * M_PI_2_F, horizons.read(cell, 3) * M_PI_2_F, l, bounds);
     if (bounds.x > 0.05) return 1.0;
-    if (bounds.y < -0.05) return 0.0;
+    // A crown 15–25 m up can still see a sun the ground's horizon already hides.
+    if (bounds.y < -0.05 && !s.tree) return 0.0;
     return -1.0;
 }
 
@@ -414,7 +435,8 @@ kernel void sunShadow(constant Uniforms &u [[buffer(0)]],
         }
         if (same && (hi <= 0.0 || lo >= 1.0)) visibility = lo;
     }
-    if (visibility < 0.0) visibility = rayTracedSun(s.p, s.n, l, float2(g) + 0.5, length(u.cameraPosition - s.p),
+    // Tree pixels leave towards the sun: a card's normal may face away from it.
+    if (visibility < 0.0) visibility = rayTracedSun(s.p, s.tree ? l : s.n, l, float2(g) + 0.5, length(u.cameraPosition - s.p),
                                                     u.maxHeight, terrain);
     out.write(float4(visibility), g);
 }

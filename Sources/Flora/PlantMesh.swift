@@ -17,6 +17,14 @@ public struct FloraVertex: Sendable, Equatable {
     /// Index into `FloraMaterial.table`.
     public var material: Float
 
+    public init(x: Float, y: Float, z: Float, nx: Float, ny: Float, nz: Float, u: Float, v: Float,
+                ao: Float, sway: Float, flutter: Float, material: Float) {
+        self.x = x; self.y = y; self.z = z
+        self.nx = nx; self.ny = ny; self.nz = nz
+        self.u = u; self.v = v
+        self.ao = ao; self.sway = sway; self.flutter = flutter; self.material = material
+    }
+
     public var position: SIMD3<Float> { SIMD3(x, y, z) }
     public var normal: SIMD3<Float> { SIMD3(nx, ny, nz) }
 }
@@ -121,7 +129,7 @@ struct MeshBuilder {
     /// A foliage card centred at `centre`, spanning ±`right` and ±`up`. Its normal leans
     /// `bend` of the way towards the crown's surface normal (soft, volumetric crowns).
     mutating func card(centre: SIMD3<Float>, right: SIMD3<Float>, up: SIMD3<Float>, material: FloraMaterial.ID,
-                       bend: Float = 0.7, sway: Float = -1) {
+                       bend: Float = 0.85, sway: Float = -1) {
         let flat = simd_normalize(simd_cross(right, up))
         let corners: [(Float, Float)] = [(-1, -1), (1, -1), (1, 1), (-1, 1)]
         let base = UInt32(mesh.vertices.count)
@@ -139,7 +147,7 @@ struct MeshBuilder {
 
     /// Fills in what the parts left open: sway (by height and distance from the trunk where
     /// not set) and AO from depth inside the crown (and near the ground).
-    mutating func finish(aoFloor: Float = 0.3) {
+    mutating func finish(aoFloor: Float = 0.45) {
         let h = Swift.max(height, 0.1)
         let reach = Swift.max(crown.radii.x, crown.radii.y, 0.1)
         for i in mesh.vertices.indices {

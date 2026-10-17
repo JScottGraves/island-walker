@@ -114,6 +114,8 @@ public struct FloraMaterial: Sendable {
     public enum ID: Int, CaseIterable, Sendable {
         case ohiaBark, koaBark, louluTrunk, hapuuTrunk, pulu, aaliiBark, naupakaStem
         case ohiaLeaves, lehua, koaPhyllodes, louluFan, louluDead, hapuuFrond, naupakaLeaves, aaliiLeaves
+        /// floragen's 1.7 m scale figure.
+        case figure
     }
 
     /// Indexed by `ID`.
@@ -131,10 +133,11 @@ public struct FloraMaterial: Sendable {
         FloraMaterial("lehua", card: true, layer: 1, transmission: 0.35),
         FloraMaterial("koa phyllodes", card: true, layer: 2, transmission: 0.2),
         FloraMaterial("loulu fan", card: true, layer: 3, transmission: 0.15),
-        FloraMaterial("loulu dead fan", card: true, layer: 3, tint: RGB(2.2, 1.5, 0.9), transmission: 0.05),
+        FloraMaterial("loulu dead fan", card: true, layer: 3, tint: RGB(1.7, 1.35, 1.0), transmission: 0.05),
         FloraMaterial("hapuu frond", card: true, layer: 4, transmission: 0.4),
         FloraMaterial("naupaka leaves", card: true, layer: 5, transmission: 0.3),
         FloraMaterial("aalii leaves", card: true, layer: 6, transmission: 0.25),
+        FloraMaterial("figure", card: false, layer: 2, tint: RGB(0.55, 0.62, 0.9)),
     ]
 
     /// The table as Metal constants: per material, (tint rgb, transmission) and

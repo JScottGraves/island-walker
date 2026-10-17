@@ -3,6 +3,7 @@ import Metal
 import MetalKit
 import simd
 import IslandCore
+import Flora
 
 /// The terrain renderer (plan §4.2): heights stream in tile by tile from the island's mip
 /// pyramid, and a CDLOD quadtree draws them with morphing between levels, 10 m grid
@@ -109,6 +110,8 @@ public final class TerrainRenderer {
     let canopy: MTLTexture
     let seaLevel: Float
     let maxHeight: Float
+    /// Native trees and shrubs (nil when drawn without them).
+    let flora: FloraRenderer?
     /// What the last frame drew and how much is still loading, for the debug overlay.
     public private(set) var stats = Stats()
     public struct Stats: Sendable {
@@ -120,6 +123,9 @@ public final class TerrainRenderer {
         public var gpuMilliseconds = 0.0
         /// `snapshot` only: depth prepass, clouds (shadow map, march, resolve), shading.
         public var passMilliseconds: [Double] = []
+        /// `snapshot` only: tree instances drawn (cross-fading ones twice) and their triangles.
+        public var floraInstances = 0
+        public var floraTriangles = 0
     }
     /// Which shadow path this renderer uses (ray tracing unless unsupported or declined).
     public let shadows: Shadows
@@ -153,9 +159,12 @@ public final class TerrainRenderer {
     ///   - clouds: islandgen's standing cloud coverage over the same domain.
     ///   - detailMaps: the bake's rain, drainage and hardness, to shape the fine detail.
     ///   - fineDetail: false draws only the data's own grid (for comparisons).
+    ///   - flora: the plant-community maps the native trees are scattered from; nil draws
+    ///     no trees. `floraSpecimens` places them by hand instead (floragen).
     public init(device: MTLDevice, colorFormat: MTLPixelFormat, depthFormat: MTLPixelFormat,
                 terrain: TerrainTiles, shadows requested: Shadows = .rayTraced, clouds: Grid? = nil,
-                detailMaps: DetailMaps? = nil, fineDetail: Bool = true) throws {
+                detailMaps: DetailMaps? = nil, fineDetail: Bool = true, flora floraMaps: FloraMaps? = nil,
+                floraSpecimens: Bool = false) throws {
         self.device = device
         guard let queue = device.makeCommandQueue() else { throw RendererError.setup("command queue") }
         self.queue = queue
@@ -168,7 +177,7 @@ public final class TerrainRenderer {
         self.shadows = shadows
         let options = MTLCompileOptions()
         options.preserveInvariance = true  // the depth prepass and shading pass must agree
-        let library = try device.makeLibrary(source: terrainShaderSource, options: options)
+        let library = try device.makeLibrary(source: terrainShaderSource + floraShaderSource, options: options)
         let constants = MTLFunctionConstantValues()
         var rayTraced = shadows == .rayTraced
         constants.setConstantValue(&rayTraced, type: .bool, index: 0)
@@ -244,6 +253,12 @@ public final class TerrainRenderer {
         detail = try TerrainDetail(device: device, library: library, levels: detailLods, cellMetres: terrain.cellMetres,
                                    seaLevel: terrain.seaLevel, seed: TerrainDetail.seed(of: overview), maps: detailMaps)
         canopy = try TerrainRenderer.canopyTexture(device: device, map: detailMaps?.canopy)
+        flora = floraMaps != nil || floraSpecimens
+            ? try FloraRenderer(device: device, library: library, constants: constants, colorFormat: colorFormat,
+                                depthFormat: depthFormat, rayTraced: shadows == .rayTraced, maps: floraMaps,
+                                seed: TerrainDetail.seed(of: overview), seaLevel: terrain.seaLevel,
+                                domainSize: Float(terrain.domainMetres))
+            : nil
         // Rings two node sizes wide: three drew 40% more triangles, mostly a few pixels across
         // far away (shading 3 ms slower at 1440p), with no relief visible in the difference.
         let tree = TerrainQuadtree(quads: TerrainRenderer.nodeQuads, cellMetres: terrain.cellMetres / Double(1 << detailLods),
@@ -386,6 +401,17 @@ public final class TerrainRenderer {
                             height: Grid, seaLevel: Float, shadows: Shadows = .rayTraced, clouds: Grid? = nil) throws {
         try self.init(device: device, colorFormat: colorFormat, depthFormat: depthFormat,
                       terrain: GridTerrain(height: height, seaLevel: seaLevel), shadows: shadows, clouds: clouds)
+    }
+
+    /// Places trees by hand (floragen's specimen sheets) instead of scattering them; needs
+    /// a renderer made with `floraSpecimens`. Heights are metres; LOD 0 or 1; a nil plant is
+    /// a 1.7 m scale figure.
+    public func placeSpecimens(_ list: [(plant: Plant?, variant: Int, lod: Int, x: Double, y: Double, yaw: Double, height: Double)]) {
+        flora?.place(list.map { s in
+            FloraRenderer.Specimen(plant: s.plant, variant: s.variant, lod: s.lod,
+                                   position: SIMD3(Float(s.x), Float(s.y), Float(groundHeight(x: s.x, y: s.y))),
+                                   yaw: Float(s.yaw), height: Float(s.height))
+        })
     }
 
     /// Ground height (metres) under a world position, as drawn up close: for the walker.
@@ -532,6 +558,10 @@ public final class TerrainRenderer {
         timed.commit()
         timed.waitUntilCompleted()
         stats.gpuMilliseconds = (timed.gpuEndTime - timed.gpuStartTime) * 1000 / Double(timedFrames)
+        if let counts = flora?.lastCounts() {
+            stats.floraInstances = counts.instances
+            stats.floraTriangles = counts.triangles
+        }
         let passes = (0..<3).compactMap { _ in queue.makeCommandBuffer() }
         if passes.count == 3 {
             encode(passes, color: color, eye: eye, forward: forward)
@@ -712,8 +742,10 @@ public final class TerrainRenderer {
             frame: SIMD4(Float(width), Float(height), Float(frameNumber % 4096), historyValid ? 1 : 0))
         let skyView = skyViews[skyViewIndex]
         let frameTerrain = prepareTerrain(eye: eye, viewProjection: viewProjection, synchronously: synchronousStreaming)
-        // 0. Fine detail for the ground the camera has moved over.
+        // 0. Fine detail for the ground the camera has moved over, then this frame's trees on it.
         detail.update(cmd, eye: eye, streamer: streamer, terrainParams: terrainParams, pages: frameTerrain.pages)
+        flora?.scatter(cmd, uniforms: &u, eye: eye, viewProjection: viewProjection, terrainParams: terrainParams,
+                       detail: detail, pages: frameTerrain.pages, tiles: streamer.tiles)
 
         // 1. Terrain depth.
         let depthPass = MTLRenderPassDescriptor()
@@ -734,6 +766,7 @@ public final class TerrainRenderer {
         enc.setVertexBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 1)
         bindTerrain(enc, frame: frameTerrain)
         drawTerrain(enc, frame: frameTerrain)
+        flora?.drawPrepass(enc)
         enc.endEncoding()
 
         // 2. The cloud shadow map, then clouds at reduced resolution, marched up to that depth
@@ -804,6 +837,7 @@ public final class TerrainRenderer {
         if let sun = targets.sun { shade.setFragmentTexture(sun, index: 5) }
         shade.setFragmentTexture(canopy, index: 6)
         drawTerrain(shade, frame: frameTerrain)
+        flora?.drawShading(shade, skyVisibility: skyVisibility, horizons: horizons)
         shade.endEncoding()
 
         historyIndex = next
