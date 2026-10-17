@@ -111,6 +111,9 @@ public final class TerrainRenderer {
     let detail: TerrainDetail
     /// Plant-community ground colour (rgb) with alpha 1, or one texel of alpha 0 without one.
     let canopy: MTLTexture
+    /// Fraction of the ground the tree crowns cover (r32Float), for shading the floor under
+    /// the drawn trees until they cast shadows (zero without trees).
+    let canopyCover: MTLTexture
     let seaLevel: Float
     let maxHeight: Float
     /// Native trees and shrubs (nil when drawn without them).
@@ -256,6 +259,7 @@ public final class TerrainRenderer {
         detail = try TerrainDetail(device: device, library: library, levels: detailLods, cellMetres: terrain.cellMetres,
                                    seaLevel: terrain.seaLevel, seed: TerrainDetail.seed(of: overview), maps: detailMaps)
         canopy = try TerrainRenderer.canopyTexture(device: device, map: detailMaps?.canopy)
+        canopyCover = try TerrainRenderer.canopyCoverTexture(device: device, maps: floraMaps)
         flora = floraMaps != nil || floraSpecimens
             ? try FloraRenderer(device: device, library: library, constants: constants, colorFormat: colorFormat,
                                 depthFormat: depthFormat, rayTraced: shadows == .rayTraced, maps: floraMaps,
@@ -847,6 +851,9 @@ public final class TerrainRenderer {
         bindTerrain(shade, frame: frameTerrain)
         if let sun = targets.sun { shade.setFragmentTexture(sun, index: 5) }
         shade.setFragmentTexture(canopy, index: 6)
+        shade.setFragmentTexture(canopyCover, index: 7)
+        var floraRange: Float = flora?.canopyRange ?? 0
+        shade.setFragmentBytes(&floraRange, length: 4, index: 2)
         drawTerrain(shade, frame: frameTerrain)
         flora?.drawShading(shade, skyVisibility: skyVisibility, horizons: horizons)
         shade.endEncoding()
@@ -860,6 +867,32 @@ public final class TerrainRenderer {
 }
 
 extension TerrainRenderer {
+    /// Crown cover per cell from the community weights and each community's canopy
+    /// stems per hectare (Communities.table), taking a crown as ~25 m² and crowns as
+    /// randomly placed: cover = 1 − exp(−stems × area).
+    static func canopyCoverTexture(device: MTLDevice, maps: FloraMaps?) throws -> MTLTexture {
+        let first = maps?.weights.first
+        let w = first?.width ?? 1, h = first?.height ?? 1
+        let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r32Float, width: w, height: h, mipmapped: false)
+        d.usage = [.shaderRead]
+        d.storageMode = .shared
+        guard let tex = device.makeTexture(descriptor: d) else { throw RendererError.setup("canopy cover") }
+        var cover = [Float](repeating: 0, count: w * h)
+        if let maps {
+            let crownArea = 25.0
+            for (k, entry) in Communities.table.enumerated() where k < maps.weights.count {
+                let g = maps.weights[k]
+                guard g.width == w, g.height == h, entry.canopy > 0 else { continue }
+                let c = Float(1 - exp(-entry.canopy * crownArea / 10_000))
+                for i in 0..<(w * h) { cover[i] += g.values[i] * c }
+            }
+        }
+        cover.withUnsafeBytes { raw in
+            tex.replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0, withBytes: raw.baseAddress!, bytesPerRow: w * 4)
+        }
+        return tex
+    }
+
     static func canopyTexture(device: MTLDevice, map: ColourMap?) throws -> MTLTexture {
         let w = map?.width ?? 1, h = map?.height ?? 1
         let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba32Float, width: w, height: h, mipmapped: false)
