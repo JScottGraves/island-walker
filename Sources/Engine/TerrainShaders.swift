@@ -445,6 +445,9 @@ float crownTransmission(float3 q) {
     return 0.04 + 0.8 * smoothstep(0.46, 0.66, n);
 }
 
+// Instance masks of the trees' trunk and crown proxies (floraShadows).
+constant uint kTrunkMask = 1u, kCrownMask = 2u;
+
 // Largest bend of a proxy ray (radians): edges wander by up to ~0.5 m under a crown 12 m up.
 constant float kProxyWobble = 0.08;
 
@@ -459,15 +462,16 @@ float2 proxyHit(float3 origin, float3 l, instance_acceleration_structure trees) 
     float3 t = normalize(cross(l, abs(l.z) < 0.9 ? float3(0.0, 0.0, 1.0) : float3(1.0, 0.0, 0.0)));
     float3 b = cross(l, t);
     float2 wobble = float2(treeNoise(origin * 1.7), treeNoise(origin * 1.7 + 31.0)) - 0.5;
-    float3 d = normalize(l + (t * wobble.x + b * wobble.y) * kProxyWobble);
+    // Less at low sun, where the bend is drawn out along the shadow's length into snakes.
+    float3 d = normalize(l + (t * wobble.x + b * wobble.y) * (kProxyWobble * clamp(l.z, 0.2, 1.0)));
     intersector<instancing> isect;
-    isect.accept_any_intersection(true);
     isect.set_triangle_cull_mode(triangle_cull_mode::none);
     // Tree tops stand at most ~30 m over their ground.
     ray shadowRay(origin, d, 0.02, 35.0 / max(d.z, 0.15));
-    auto hit = isect.intersect(shadowRay, trees, 1u);
+    auto hit = isect.intersect(shadowRay, trees, kTrunkMask | kCrownMask);
     if (hit.type == intersection_type::none) return float2(1.0, 0.0);
-    // Instances alternate trunk, crown.
+    // The nearest proxy: any-hit would report whichever the traversal finds first, which a
+    // rebuild can change, flipping a pixel between a trunk's shadow and a crown's.
     return (hit.instance_id & 1u) != 0u ? float2(0.0) : float2(0.0, 1.0);
 }
 
