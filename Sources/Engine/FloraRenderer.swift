@@ -81,7 +81,7 @@ final class FloraRenderer {
     var lod1Distance: Float = 80
     var fadeWidth: Float = 8
     var canopyRange: Float = 600
-    var shrubRange: Float = 160
+    var shrubRange: Float = 120
 
     let device: MTLDevice
     let scatterPipeline: MTLComputePipelineState
@@ -474,7 +474,11 @@ final class FloraRenderer {
         enc.setVertexBuffer(vertices, offset: 0, index: 2)
         enc.setVertexBuffer(instances, offset: 0, index: 3)
         enc.setFragmentTexture(cards, index: 6)
-        for b in 0..<FloraRenderer.buckets where b == FloraRenderer.plantBuckets || b % FloraRenderer.lodBuckets < Flora.lods {
+        // Nearest LOD first, so the depth test rejects more of the farther trees' cards.
+        let order = (0..<Flora.lods).flatMap { lod in
+            stride(from: lod, to: FloraRenderer.plantBuckets, by: FloraRenderer.lodBuckets)
+        } + [FloraRenderer.plantBuckets]
+        for b in order {
             enc.drawIndexedPrimitives(type: .triangle, indexType: .uint32, indexBuffer: indices, indexBufferOffset: 0,
                                       indirectBuffer: arguments, indirectBufferOffset: b * 20)
         }
