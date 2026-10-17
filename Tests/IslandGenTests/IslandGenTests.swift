@@ -138,7 +138,8 @@ final class IslandGenTests: XCTestCase {
         let before = Refine.refine(coarse, drainageArea: area, seaLevel: 0, params: smooth)
         let after = Refine.refine(coarse, drainageArea: area, seaLevel: 0, params: fluted)
         XCTAssertLessThan(steepFraction(before, degrees: 40), 0.01, "the coarse walls are under 40°")
-        XCTAssertGreaterThan(steepFraction(after, degrees: 40), 0.05, "fluted walls have cliffs")
+        // Smooth sinusoidal walls are barely dissected, so they get only light flutes.
+        XCTAssertGreaterThan(steepFraction(after, degrees: 40), 0.02, "fluted walls have cliffs")
         XCTAssertEqual(after.range.max, before.range.max, accuracy: 4 * Float(fluted.detail), "crests keep their height")
         XCTAssertEqual(Realism.measure(after).pits, 0, "still drains to the sea")
 
@@ -154,6 +155,52 @@ final class IslandGenTests: XCTestCase {
             count += 1
         }
         XCTAssertLessThan((squares / count).squareRoot(), 0.5, "plains get well under a metre of detail")
+    }
+
+    /// Refines a plane rising inland at `degrees` from a coast at x = 0 with and without
+    /// detail, and returns the RMS of the added relief and of its slope (rise over run)
+    /// over the upper half, away from the shore and the larger drainage areas.
+    private func planeResidual(degrees: Double) -> (rms: Double, slopeRMS: Double, cliffs: Double) {
+        let size = 48, cell = 78.125
+        let rise = tan(degrees * Double.pi / 180)
+        var h = Grid(width: size, height: size, cellSize: cell)
+        for y in 0..<size { for x in 0..<size { h[x, y] = x < 2 ? -20 : Float(5 + rise * Double(x - 2) * cell) } }
+        let area = Realism.drainageArea(h, seaLevel: 0)
+        var smooth = Refine.Params()
+        smooth.factor = 8
+        smooth.detail = 0
+        smooth.gentle = 0
+        var detailed = Refine.Params()
+        detailed.factor = 8
+        let a = Refine.refine(h, drainageArea: area, seaLevel: 0, params: smooth)
+        let b = Refine.refine(h, drainageArea: area, seaLevel: 0, params: detailed)
+        var squares = 0.0, slopeSquares = 0.0, count = 0.0
+        let limit = tan(40 * Double.pi / 180)
+        var cliffs = 0.0
+        for y in 8..<(a.height - 8) {
+            for x in (a.width / 2)..<(a.width - 8) {
+                let r = Double(b[x, y] - a[x, y])
+                let gx = Double((b[x + 1, y] - a[x + 1, y]) - (b[x - 1, y] - a[x - 1, y])) / (2 * a.cellSize)
+                let gy = Double((b[x, y + 1] - a[x, y + 1]) - (b[x, y - 1] - a[x, y - 1])) / (2 * a.cellSize)
+                let sx = Double(b[x + 1, y] - b[x - 1, y]) / (2 * b.cellSize)
+                let sy = Double(b[x, y + 1] - b[x, y - 1]) / (2 * b.cellSize)
+                squares += r * r
+                slopeSquares += gx * gx + gy * gy
+                if (sx * sx + sy * sy).squareRoot() > limit { cliffs += 1 }
+                count += 1
+            }
+        }
+        return ((squares / count).squareRoot(), (slopeSquares / count).squareRoot(), cliffs / count)
+    }
+
+    func testRefineGivesFoothillsGentlerDetailThanWalls() {
+        let foothill = planeResidual(degrees: 12)
+        let wall = planeResidual(degrees: 40)
+        XCTAssertGreaterThan(foothill.rms, 1, "foothills still get a metre or two of rounded relief")
+        XCTAssertLessThan(foothill.rms, 0.7 * wall.rms, "foothills get less relief than walls")
+        XCTAssertLessThan(foothill.slopeRMS, 0.4 * wall.slopeRMS, "foothill relief is rounded, wall relief is fluted")
+        XCTAssertLessThan(foothill.cliffs, 0.03, "foothills have almost no cliffs")
+        XCTAssertGreaterThan(wall.cliffs, 0.3, "walls are fluted into cliffs")
     }
 
     func testDrainageAreaOfAPlaneSumsEveryUphillCell() {
