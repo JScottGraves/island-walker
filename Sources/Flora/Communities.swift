@@ -31,10 +31,10 @@ public enum Communities {
         // Hāpuʻu fill the subcanopy of wet forest and stream banks.
         Entry(channel: "biome-wet-forest", canopy: 450,
               canopyShares: [(.ohia, 0.80), (.koa, 0.12), (.loulu, 0.08)],
-              shrubs: 700, shrubShares: [(.hapuu, 1)]),
+              shrubs: 450, shrubShares: [(.hapuu, 1)]),
         Entry(channel: "biome-riparian", canopy: 400,
               canopyShares: [(.ohia, 0.60), (.koa, 0.25), (.loulu, 0.15)],
-              shrubs: 700, shrubShares: [(.hapuu, 1)]),
+              shrubs: 450, shrubShares: [(.hapuu, 1)]),
         // Dwarf ʻōhiʻa are small enough for the shrub layer's finer grid.
         Entry(channel: "biome-cloud-shrubland", canopy: 90, canopyShares: [(.loulu, 1)],
               shrubs: 600, shrubShares: [(.ohiaDwarf, 1)]),

@@ -24,7 +24,7 @@ public enum Flora {
                 children: 2...3, branchAngle: 0.45...0.95, reach: 0.42...0.62, orders: 4, segments: 5,
                 crooked: 0.32, upward: 0.05, crownCentre: 0.66, crownRadii: SIMD3(0.33, 0.33, 0.3),
                 card: 0.5, cardsPerTip: 5...8, leaves: .ohiaLeaves, flowers: .lehua, flowerChance: 0.22,
-                bark: .ohiaBark, sides: [9, 6, 5, 4, 3], sides1: [5, 4, 3]).build(seed: seed, lod: lod)
+                bark: .ohiaBark, sides: [8, 5, 4, 3, 3], sides1: [5, 4, 3]).build(seed: seed, lod: lod)
         case .ohiaDwarf:
             return BranchingTree(
                 height: h, stems: 2...4, stemLean: 0.6, trunkRadius: 0.05, forkHeight: 0.1...0.25,

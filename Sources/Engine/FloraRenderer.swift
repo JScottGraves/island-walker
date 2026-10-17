@@ -77,8 +77,8 @@ final class FloraRenderer {
 
     /// LOD0 out to `lod0Distance`, LOD1 to `lod1Distance` (both pushed out for tall plants),
     /// then impostors to the layer's range, cross-fading over `fadeWidth`.
-    var lod0Distance: Float = 35
-    var lod1Distance: Float = 110
+    var lod0Distance: Float = 30
+    var lod1Distance: Float = 80
     var fadeWidth: Float = 8
     var canopyRange: Float = 600
     var shrubRange: Float = 160

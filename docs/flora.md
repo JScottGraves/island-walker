@@ -143,7 +143,7 @@ What changed from the plan above while building it:
 - **Ground**: the scatter puts each trunk on the CDLOD level its distance falls in, on
   that level's triangles (blended into the next as it morphs), and trunks reach 0.6 m
   below their base.
-- **LODs**: LOD0 to 35 m, LOD1 to 110 m (both scaled by √(height/12 m)), then an
+- **LODs**: LOD0 to 30 m, LOD1 to 80 m (both scaled by √(height/12 m)), then an
   impostor (LOD2) to 600 m for the canopy and 160 m for shrubs, with dithered
   cross-fades. Each impostor is the variant's LOD0 drawn once at start-up from the side
   into albedo and normal/AO arrays (coverage-preserving mips), shown as a camera-facing
@@ -156,5 +156,8 @@ What changed from the plan above while building it:
 - **Sun rays**: tree pixels set the lowest bit of the surface buffer's packed normal.
   `sunShadow` then skips the ground-horizon "shadowed" early-out and the n·l early-out
   for them, and offsets their rays along the sun direction.
+- **Budget levers** that got the worst view (Oʻahu's ridge, in wet forest) near 2 ms:
+  LOD1 draws branches to order 1 only, with one large card per nine LOD0 tufts;
+  hāpuʻu ribbons follow the frond's outline; hāpuʻu at 450/ha rather than 700.
 - `floragen --sites BUNDLE` prints a close-up `--camera` in each community's purest
   gentle stand; `IslandApp --views a,b` renders only the named views.

@@ -53,9 +53,11 @@ struct BranchingTree {
     var sides: [Int]
     var sides1: [Int]
     var lod1Order = 2
+    /// Deepest branch order LOD1 still draws as tubes (the cards cover the rest).
+    var lod1Branches = 1
     /// Large LOD1 cards: half-size multiple, and LOD0 cards per LOD1 card.
-    var lod1Card: Float = 2.4
-    var lod1Ratio = 6
+    var lod1Card: Float = 2.8
+    var lod1Ratio = 9
     var barkRepeat: Float = 1.5
 
     struct Branch {
@@ -177,7 +179,7 @@ struct BranchingTree {
 
         var b = MeshBuilder(height: height, crown: crown)
         for (index, branch) in branches.enumerated() {
-            if lod > 0 && branch.order > lod1Order { continue }
+            if lod > 0 && branch.order > Swift.min(lod1Order, lod1Branches) { continue }
             let table = lod > 0 ? sides1 : sides
             let faces = table[Swift.min(branch.order, table.count - 1)]
             var rings = branch.rings
@@ -329,7 +331,7 @@ struct Palm {
 struct TreeFern {
     var height: Float
     var trunkRadius: Float = 0.22
-    var fronds: ClosedRange<Int> = 9...14
+    var fronds: ClosedRange<Int> = 7...11
     var frondLength: ClosedRange<Float> = 2.6...3.4
 
     func build(seed: UInt64, lod: Int) -> PlantMesh {
@@ -402,13 +404,17 @@ struct TreeFern {
             let angle = rise + t * t * 2.1
             let d = simd_normalize(SIMD3(0, 0, cos(angle)) + out * sin(angle))
             if k > 0 { p += d * (length / Float(steps)) }
-            let width: Float = 0.62 * (0.35 + 0.65 * smoothstep(0.0, 0.3, t)) * (1 - 0.5 * smoothstep(0.5, 1.0, t))
+            // The texture's lanceolate outline (tools/flora_textures.py), so the ribbon covers
+            // little but the frond: fewer clear texels for the alpha test to throw away.
+            let reach: Float = t < 0.33 ? 0.55 + 0.45 * smoothstep(0, 0.33, t) : 1 - 0.94 * pow(smoothstep(0.33, 1, t), 0.9)
+            let span = Swift.max(reach * smoothstep(0, 0.05, t), 0.04) + 0.03
+            let width: Float = 0.62 * span
             let lift = simd_normalize(simd_cross(across, d))
             for c in 0..<columns {
                 let s: Float = columns == 2 ? Float(c) * 2 - 1 : Float(c) - 1
                 let pos: SIMD3<Float> = p + across * (s * width) + lift * ((1 - abs(s)) * width * 0.25)
                 let n = simd_normalize(lift * 0.8 + across * (-s * 0.3) + b.crown.normal(pos) * 0.4)
-                let u: Float = 0.5 + 0.5 * s
+                let u: Float = 0.5 + 0.5 * s * span
                 _ = b.vertex(pos, n, SIMD2(u, t), material: .hapuuFrond, flutter: t)
             }
         }

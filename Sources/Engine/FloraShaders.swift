@@ -302,7 +302,7 @@ bool floraVisible(FloraOut in, texture2d_array<float> cards) {
     if (in.fade < 0.0 && noise < -in.fade) return false;
     int2 layer = kFloraLayer[in.material];
     if (layer.y == 0) return true;
-    constexpr sampler s(filter::linear, mip_filter::linear, address::repeat, max_anisotropy(4));
+    constexpr sampler s(filter::linear, mip_filter::linear, address::repeat);
     return cards.sample(s, in.uv, uint(layer.x)).a >= \(FloraTextures.alphaCutoff);
 }
 
