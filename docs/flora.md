@@ -154,8 +154,11 @@ What changed from the plan above while building it:
   no discard. Only the fragment that wrote a pixel's depth matches it, so the prepass's
   alpha test is the only one and each tree pixel is shaded once.
 - **Sun rays**: tree pixels set the lowest bit of the surface buffer's packed normal.
-  `sunShadow` then skips the ground-horizon "shadowed" early-out and the n·l early-out
-  for them, and offsets their rays along the sun direction.
+  `sunShadow` skips the n·l early-out for them. Those standing more than 1 m above the
+  coarse shadow mesh (crowns) also skip the ground-horizon "shadowed" early-out and offset
+  their rays along the sun direction; below it (trunks and low leaves on a valley floor
+  the mesh bridges over) a ray would leak out through the backs of the ridges, so they
+  take the ground's early-outs.
 - **Budget levers** that got the worst view (Oʻahu's ridge, in wet forest) near 2 ms:
   LOD1 draws branches to order 1 only, with one large card per nine LOD0 tufts;
   hāpuʻu ribbons follow the frond's outline; hāpuʻu at 450/ha rather than 700; the shrub
