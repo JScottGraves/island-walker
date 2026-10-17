@@ -283,7 +283,9 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
                                 texture2d<float> cloudDistance [[texture(3)]],
                                 texture2d<float> cloudShadows [[texture(4)]],
                                 texture2d<float, access::read> tracedSun [[texture(5), function_constant(kRayTraced)]],
-                                texture2d<float> canopyMap [[texture(6)]]) {
+                                texture2d<float> canopyMap [[texture(6)]],
+                                texture2d<float> canopyCover [[texture(7)]],
+                                constant float &floraRange [[buffer(2)]]) {
     float3 n = normalize(in.normal);
     float slope = 1.0 - n.z;
     float h = in.world.z - u.seaLevel;
@@ -291,6 +293,10 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
 
     float3 albedo;
     float3 surface = in.world;
+    // Ground under the trees drawn around the camera (out to floraRange), which cast no
+    // shadows of their own yet: shaded by the stand's canopy cover. Further out the terrain
+    // colour is the canopy itself, seen from above.
+    float underCanopy = 0.0;
     if (h < 0.0) {
         albedo = waterAlbedo(-h);
         n = float3(0.0, 0.0, 1.0);
@@ -299,6 +305,8 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
         constexpr sampler linear(filter::linear, address::clamp_to_edge);
         float4 canopy = canopyMap.sample(linear, in.world.xy / u.cloudLayer.w);
         albedo = terrainAlbedo(in.world.xy, h, slope, u.maxHeight, canopy);
+        float nearby = 1.0 - smoothstep(floraRange - 100.0, floraRange, distance(u.cameraPosition, in.world));
+        if (nearby > 0.0) underCanopy = nearby * canopyCover.sample(linear, in.world.xy / u.cloudLayer.w).r;
     }
 
     float skyVisibility = saturate(in.light.x);
@@ -315,7 +323,9 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
         }
     }
     sunVisibility *= cloudSun;
-    float3 color = litSurface(u, albedo, n, nDotL, sunVisibility, skyVisibility, 1.0, cloudSun);
+    // Sunflecks get through gaps in the crowns; the sky is half hidden by them.
+    sunVisibility *= 1.0 - 0.85 * underCanopy;
+    float3 color = litSurface(u, albedo, n, nDotL, sunVisibility, skyVisibility, 1.0 - 0.5 * underCanopy, cloudSun);
 
     float3 toEye = u.cameraPosition - in.world;
     float dist = length(toEye);
@@ -432,7 +442,8 @@ kernel void sunShadow(constant Uniforms &u [[buffer(0)]],
     if (pass == 1 && anchor) return;
     float3 l = normalize(u.sunDirection);
     SunSurface s = sunSurface(surface, depth, g);
-    bool crown = s.tree && !s.sky && s.p.z > shadowMeshHeight(meshHeights, s.p.xy, u.cloudLayer.w) + 1.0;
+    float meshHeight = s.sky ? 0.0 : shadowMeshHeight(meshHeights, s.p.xy, u.cloudLayer.w);
+    bool crown = s.tree && !s.sky && s.p.z > meshHeight + 1.0;
     float visibility = sunWithoutRays(u, s, crown, l, horizons, cloudShadows);
     if (visibility < 0.0 && pass == 1) {
         // The traced pixels of the 2×2 blocks touching this one.
@@ -452,8 +463,11 @@ kernel void sunShadow(constant Uniforms &u [[buffer(0)]],
         }
         if (same && (hi <= 0.0 || lo >= 1.0)) visibility = lo;
     }
-    // Crown pixels leave towards the sun: a card's normal may face away from it.
-    if (visibility < 0.0) visibility = rayTracedSun(s.p, crown ? l : s.n, l, float2(g) + 0.5, length(u.cameraPosition - s.p),
+    // Crown pixels leave towards the sun: a card's normal may face away from it. Anything
+    // else starts no lower than the shadow mesh: from under it (a valley floor the coarse
+    // mesh bridges over) a ray would pass out through the backs of the ridges around it.
+    float3 origin = crown ? s.p : float3(s.p.xy, max(s.p.z, meshHeight));
+    if (visibility < 0.0) visibility = rayTracedSun(origin, crown ? l : s.n, l, float2(g) + 0.5, length(u.cameraPosition - s.p),
                                                     u.maxHeight, terrain);
     out.write(float4(visibility), g);
 }
