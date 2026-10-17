@@ -19,6 +19,34 @@ public struct RGB: Sendable, Equatable {
     public var msl: String { String(format: "float3(%.5f, %.5f, %.5f)", r, g, b) }
 }
 
+/// A linear RGB colour per cell over the whole square domain, row 0 at the south edge.
+public struct ColourMap: Sendable {
+    public let width: Int, height: Int
+    /// Domain edge length in metres.
+    public let domain: Double
+    /// Three floats per cell, row-major.
+    public var rgb: [Float]
+
+    public init(width: Int, height: Int, domain: Double, rgb: [Float]) {
+        precondition(rgb.count == width * height * 3, "colour map size")
+        self.width = width; self.height = height; self.domain = domain; self.rgb = rgb
+    }
+
+    /// Bilinear colour at a world position in metres, cell k centred at (k + ½) × cell.
+    public func sample(x: Double, y: Double) -> RGB {
+        let fx = Swift.min(Swift.max(x / domain * Double(width) - 0.5, 0), Double(width - 1))
+        let fy = Swift.min(Swift.max(y / domain * Double(height) - 0.5, 0), Double(height - 1))
+        let x0 = Int(fx), y0 = Int(fy)
+        let x1 = Swift.min(x0 + 1, width - 1), y1 = Swift.min(y0 + 1, height - 1)
+        let tx = fx - Double(x0), ty = fy - Double(y0)
+        func at(_ x: Int, _ y: Int) -> RGB {
+            let o = 3 * (y * width + x)
+            return RGB(Double(rgb[o]), Double(rgb[o + 1]), Double(rgb[o + 2]))
+        }
+        return at(x0, y0).mix(at(x1, y0), tx).mix(at(x0, y1).mix(at(x1, y1), tx), ty)
+    }
+}
+
 /// Everything that decides how terrain looks, shared by the Metal shader and the CPU
 /// ground views so the two stay alike: material albedos, light, haze and tone mapping
 /// (research/global-illumination.md §3).
@@ -38,6 +66,46 @@ public enum Look {
     public static let soil = RGB.srgb(150, 70, 42)
     public static let rock = RGB.srgb(62, 60, 58)
     public static let sand = RGB.srgb(175, 165, 140)
+    /// Canopy colour of each native plant community seen from above, by its bundle channel
+    /// (islandgen's Vegetation; research/vegetation.md §2). Stands of ʻōhiʻa and uluhe are
+    /// dark blue-green, koa paler and greyer, dry forest grey-green over red soil, strand
+    /// and bog sedge straw-coloured.
+    public static let communities: [(channel: String, albedo: RGB)] = [
+        ("biome-strand", RGB.srgb(118, 120, 82)),
+        ("biome-rocky-shore", RGB.srgb(72, 72, 62)),
+        ("biome-marsh", RGB.srgb(72, 100, 52)),
+        ("biome-dry-forest", RGB.srgb(98, 94, 62)),
+        ("biome-mesic-forest", RGB.srgb(60, 84, 46)),
+        ("biome-wet-forest", RGB.srgb(36, 70, 38)),
+        ("biome-riparian", RGB.srgb(30, 68, 40)),
+        ("biome-cloud-shrubland", RGB.srgb(58, 80, 46)),
+        ("biome-bog", RGB.srgb(96, 94, 64)),
+        ("biome-cliff", RGB.srgb(40, 76, 38)),
+        ("biome-montane", RGB.srgb(36, 62, 40)),
+    ]
+
+    /// Canopy colour per cell from the community weight maps (all the same size, summing
+    /// to 1 on land). Cells with no community (the sea) take the strand colour, so the
+    /// coastline doesn't darken where the map is interpolated.
+    public static func canopyMap(weights: [String: Grid], domain: Double) -> ColourMap? {
+        guard let first = weights.values.first else { return nil }
+        let w = first.width, h = first.height
+        let fallback = communities[0].albedo
+        var rgb = [Float](repeating: 0, count: w * h * 3)
+        for i in 0..<(w * h) {
+            var c = RGB(0, 0, 0), total = 0.0
+            for (channel, albedo) in communities {
+                guard let g = weights[channel], g.width == w, g.height == h else { continue }
+                let k = Double(g.values[i])
+                c = c + albedo * k
+                total += k
+            }
+            c = total > 1e-3 ? c * (1 / total) : fallback
+            rgb[3 * i] = Float(c.r); rgb[3 * i + 1] = Float(c.g); rgb[3 * i + 2] = Float(c.b)
+        }
+        return ColourMap(width: w, height: h, domain: domain, rgb: rgb)
+    }
+
     /// Water over a sandy bottom a few metres down, and open ocean.
     public static let shallowWater = RGB.srgb(35, 150, 145)
     public static let deepWater = RGB.srgb(6, 80, 98)
@@ -66,8 +134,9 @@ public enum Look {
     /// Land albedo from world position (metres), height above the sea, slope (1 − normal.z)
     /// and the island's top. Steep pali are mostly green, with red soil streaks and black
     /// basalt breaking through in patches (`exposure`) on the steeper spurs and flute walls.
-    public static func albedo(x: Double, y: Double, above: Double, slope: Double, maxHeight: Double) -> RGB {
-        let grass = grassLow.mix(grassHigh, Swift.min(1, Swift.max(0, above / Swift.max(maxHeight, 1))))
+    /// `canopy`, from the plant-community maps, replaces the plain height-graded green.
+    public static func albedo(x: Double, y: Double, above: Double, slope: Double, maxHeight: Double, canopy: RGB? = nil) -> RGB {
+        let grass = canopy ?? grassLow.mix(grassHigh, Swift.min(1, Swift.max(0, above / Swift.max(maxHeight, 1))))
         let bare = exposure(x: x, y: y)
         var a = grass.mix(cliffGreen, smoothstep(0.2, 0.45, slope))
         a = a.mix(soil, smoothstep(0.15, 0.35, slope) * (0.12 + 0.65 * bare))
@@ -199,8 +268,9 @@ public enum Look {
                        0.6 * pow(exposureBlobs(p / 2.7 + float2(500.0, 300.0)), 2.0));
         }
 
-        float3 terrainAlbedo(float2 p, float above, float slope, float maxHeight) {
-            float3 grass = mix(kGrassLow, kGrassHigh, saturate(above / max(maxHeight, 1.0)));
+        // canopy: the plant-community colour (rgb) and whether there is one (a).
+        float3 terrainAlbedo(float2 p, float above, float slope, float maxHeight, float4 canopy) {
+            float3 grass = mix(mix(kGrassLow, kGrassHigh, saturate(above / max(maxHeight, 1.0))), canopy.rgb, canopy.a);
             float bare = exposure(p);
             float3 a = mix(grass, kCliffGreen, smoothstep(0.2, 0.45, slope));
             a = mix(a, kSoil, smoothstep(0.15, 0.35, slope) * (0.12 + 0.65 * bare));

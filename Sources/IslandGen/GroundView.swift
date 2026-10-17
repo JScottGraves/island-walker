@@ -29,9 +29,10 @@ public enum GroundView {
 
     /// - Parameter lighting: baked sky and sun visibility for `h`; baked here when nil.
     ///   Pass one in when rendering several views of the same island.
+    /// - Parameter canopy: plant-community colour over the domain (`Look.canopyMap`).
     public static func render(_ h: Grid, camera c: Camera, width: Int = 1280, height: Int = 720,
                               seaLevel: Float = 0, maxDistance: Double = 90_000,
-                              lighting: TerrainLighting? = nil) -> Preview.Image {
+                              lighting: TerrainLighting? = nil, canopy: ColourMap? = nil) -> Preview.Image {
         var rgb = [UInt8](repeating: 0, count: width * height * 3)
         let focal = Double(width) / 2 / tan(c.horizontalFOV / 2)
         let horizon = Double(height) / 2 + tan(c.pitch) * focal
@@ -74,7 +75,7 @@ public enum GroundView {
                 if row < top {
                     let drop = c.z - surface
                     let cosView = drop / (d * d + drop * drop).squareRoot()
-                    let color = shade(h, gx: gx, gy: gy, px: px, py: py, ground: ground, sea: sea, distance: d,
+                    let color = shade(h, gx: gx, gy: gy, px: px, py: py, ground: ground, sea: sea, distance: d, canopy: canopy,
                                       cosView: cosView, light: light, maxHeight: maxHeight)
                     for r in row..<top { put(col, r, color) }
                     top = row
@@ -93,7 +94,7 @@ public enum GroundView {
     }
 
     private static func shade(_ h: Grid, gx: Double, gy: Double, px: Double, py: Double, ground: Double, sea: Double,
-                              distance: Double, cosView: Double, light: TerrainLighting, maxHeight: Double) -> RGB {
+                              distance: Double, canopy: ColourMap?, cosView: Double, light: TerrainLighting, maxHeight: Double) -> RGB {
         var albedo: RGB
         var n = (0.0, 0.0, 1.0)
         let depthBelow = sea - ground
@@ -111,7 +112,8 @@ public enum GroundView {
                 hy += (detailNoise(px, py + de) - detailNoise(px, py - de)) / (2 * de) * fade
             }
             n = normalize((-hx, -hy, 1))
-            albedo = Look.albedo(x: px, y: py, above: ground - sea, slope: 1 - n.2, maxHeight: maxHeight)
+            albedo = Look.albedo(x: px, y: py, above: ground - sea, slope: 1 - n.2, maxHeight: maxHeight,
+                                 canopy: canopy?.sample(x: px, y: py))
         }
         let s = Look.sunDirection
         let color = Look.lit(albedo: albedo, normalZ: n.2, nDotL: n.0 * s.x + n.1 * s.y + n.2 * s.z,

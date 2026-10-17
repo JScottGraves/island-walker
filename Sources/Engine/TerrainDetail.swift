@@ -13,11 +13,14 @@ public struct DetailMaps: Sendable {
     public var drainage: Grid?
     /// Rock hardness (erodibility divisor; ~0.4 soft to ~1.25 dike-hardened).
     public var hardness: Grid?
+    /// Ground colour from the native plant communities (`Look.canopyMap`).
+    public var canopy: ColourMap?
 
-    public init(rain: Grid? = nil, drainage: Grid? = nil, hardness: Grid? = nil) {
+    public init(rain: Grid? = nil, drainage: Grid? = nil, hardness: Grid? = nil, canopy: ColourMap? = nil) {
         self.rain = rain
         self.drainage = drainage
         self.hardness = hardness
+        self.canopy = canopy
     }
 }
 
