@@ -10,7 +10,7 @@ func usage() -> Never {
     print("""
     usage: islandgen --score HEIGHT.r32 --cell METRES [--width N] [--sea-level M]
              score an existing float32 heightfield (square unless --width; pits are filled first) and print realism metrics
-           islandgen --import HEIGHT.r32 --cell METRES --bundle DIR [--sea-level M]
+           islandgen --import HEIGHT.r32 --cell METRES --bundle DIR [--sea-level M] [--refine N] [--fine FILE] [refine options]
              write a square float32 heightfield, such as the real Oahu DEM, as an island bundle (height and rain; heights kept as they are)
            islandgen [--seed N] [--size N] [--steps N] [--domain METRES] [--deposition G] [--slope-exponent N] [--reference-slope S] [--critical-slope S] [--knickpoint-slope S] [--waterfall-retreat R] [--headwall-retreat R] [--waterfall-min-q Q] [--land-exponent P] [--coast-slope A] [--rift-descent D] [--saddle-fill M] [--pond-time F] [--pond-hardness H] [--pond-share S] [--wave-retreat R] [--leeward-waves S] [--uplift U] [--flexure M] [--flexure-distance M] [--refine N] [--bundle DIR] [--profile] [--out DIR]
       --seed    random seed (default 1)
@@ -36,6 +36,15 @@ func usage() -> Never {
       --uplift             uplift in m/yr, negative for subsidence (default 0)
       --flexure            flexural uplift in metres after erosion, growing inland from the coast (default 20)
       --refine             also refine the height N times finer (8 takes 1024² at 78 m to 8192² at 10 m) with detail and pit filling
+    refine options (with --refine, here or with --import; --fine FILE also writes the refined height):
+      --detail             RMS flute amplitude in metres on coarse ground of --detail-slope and steeper (default 13)
+      --detail-slope       coarse slope (rise/run) where flutes reach full amplitude (default 0.2)
+      --detail-exponent    below it flute amplitude grows as (slope/detail-slope)^E (default 1.5)
+      --flute-across       longest flute wavelength across the slope, metres (default 100)
+      --flute-along        longest flute wavelength down the slope, metres (default 600)
+      --roughness          amplitude ratio between successive flute octaves (default 0.65)
+      --channel-start      drainage area in m² where flutes start fading into a channel bed (default 1e5)
+      --channel-full       drainage area in m² where the channel bed is smooth (default 1e7)
       --bundle             write the island bundle (tiled, mip-mapped maps for the runtime) to DIR
       --flexure-distance   distance inland in metres at which flexure reaches its full height (default 1500)
       --headwall-retreat   retreat of every face steeper than 0.6, m/yr at 3 m/yr rain; 0 disables (default 0)
@@ -53,6 +62,26 @@ func parsed<T>(_ value: T?) -> T {
 var params = Island.Params()
 var outDir = "out"
 var refineFactor = 0
+var refineParams = Refine.Params()
+var finePath: String? = nil
+
+/// Refinement flags shared by the generator and import modes; false if `flag` isn't one.
+func parseRefine(_ flag: String, _ value: String) -> Bool {
+    switch flag {
+    case "--refine": refineFactor = parsed(Int(value))
+    case "--fine": finePath = value
+    case "--detail": refineParams.detail = parsed(Double(value))
+    case "--detail-slope": refineParams.detailSlope = parsed(Double(value))
+    case "--detail-exponent": refineParams.detailExponent = parsed(Double(value))
+    case "--flute-across": refineParams.acrossWavelength = parsed(Double(value))
+    case "--flute-along": refineParams.alongWavelength = parsed(Double(value))
+    case "--roughness": refineParams.roughness = parsed(Double(value))
+    case "--channel-start": refineParams.channelStart = parsed(Double(value))
+    case "--channel-full": refineParams.channelFull = parsed(Double(value))
+    default: return false
+    }
+    return true
+}
 var bundleDir: String? = nil
 var timer: PhaseTimer?
 var args = CommandLine.arguments.dropFirst()
@@ -98,7 +127,7 @@ if args.first == "--import" {
         case "--cell": cellSize = parsed(Double(value))
         case "--bundle": bundleDir = value
         case "--sea-level": seaLevel = parsed(Float(value))
-        default: usage()
+        default: if !parseRefine(flag, value) { usage() }
         }
     }
     guard let path, let cellSize, let bundleDir, let data = FileManager.default.contents(atPath: path) else { usage() }
@@ -112,7 +141,19 @@ if args.first == "--import" {
     // moisture-driven materials compare like for like.
     let start = Date()
     let rain = Climate.precipitation(height: grid, seaLevel: seaLevel, params: params.climate)
-    let bundle = try IslandBundle.write([("height", grid), ("rain", rain)], seaLevel: Double(seaLevel),
+    var height = grid
+    if refineFactor > 1 {
+        // Refining a coarse copy of a real DEM is how the refinement is calibrated: the
+        // result is scored against the DEM at full resolution.
+        var filled = grid
+        PriorityFlood.fill(&filled, seaLevel: seaLevel)
+        refineParams.factor = refineFactor
+        height = Refine.refine(filled, drainageArea: Realism.drainageArea(filled, seaLevel: seaLevel),
+                               seaLevel: seaLevel, params: refineParams)
+        print(String(format: "refined to %d² at %.2f m in %.1f s", height.width, height.cellSize, Date().timeIntervalSince(start)))
+        if let finePath { try Preview.writeRaw(height, to: URL(fileURLWithPath: finePath)) }
+    }
+    let bundle = try IslandBundle.write([("height", height), ("rain", rain)], seaLevel: Double(seaLevel),
                                         to: URL(fileURLWithPath: bundleDir, isDirectory: true))
     let h = try bundle.channel("height")
     print(String(format: "wrote bundle %@: height %d² at %.2f m in %d levels, in %.1f s", bundleDir, h.size, h.cellMetres, h.levels, Date().timeIntervalSince(start)))
@@ -149,10 +190,9 @@ while let flag = args.popFirst() {
     case "--uplift": params.erosion.uplift = parsed(Double(value))
     case "--flexure": params.flexure = parsed(Double(value))
     case "--flexure-distance": params.flexureDistance = parsed(Double(value))
-    case "--refine": refineFactor = parsed(Int(value))
     case "--bundle": bundleDir = value
     case "--out": outDir = value
-    default: usage()
+    default: if !parseRefine(flag, value) { usage() }
     }
 }
 
@@ -288,7 +328,6 @@ try json.write(to: out.appendingPathComponent("info.json"))
 // Final refinement to ~10 m (plan §3.8) and the island bundle for the runtime.
 var bundleHeight = island.height
 if refineFactor > 1 {
-    var refineParams = Refine.Params()
     refineParams.factor = refineFactor
     refineParams.seed = params.seed
     let refineStart = Date()

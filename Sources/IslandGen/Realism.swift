@@ -117,6 +117,33 @@ public struct Realism: Sendable {
                        hackExponent: hack, pits: pits, landAreaKm2: landKm2, reliefMetres: relief)
     }
 
+    /// Plain drainage area (m²) of every land cell by steepest descent, as `measure` counts
+    /// it, for heightfields that weren't eroded here (an imported DEM). Sea cells get 0.
+    public static func drainageArea(_ h: Grid, seaLevel: Float = 0) -> Grid {
+        let w = h.width, n = h.count
+        var area = Grid(width: w, height: h.height, cellSize: h.cellSize)
+        var receiver = [Int](0..<n)
+        var land = [Int]()
+        for i in 0..<n where h.values[i] > seaLevel {
+            land.append(i)
+            area.values[i] = Float(h.cellArea)
+            let x = i % w, y = i / w
+            var best = 0.0
+            for k in 0..<8 {
+                let nx = x + D8.dx[k], ny = y + D8.dy[k]
+                guard h.contains(nx, ny) else { continue }
+                let j = ny * w + nx
+                let drop = Double(h.values[i] - h.values[j]) / D8.distance[k]
+                if drop > best { best = drop; receiver[i] = j }
+            }
+        }
+        land.sort { h.values[$0] > h.values[$1] }
+        for i in land where receiver[i] != i && h.values[receiver[i]] > seaLevel {
+            area.values[receiver[i]] += area.values[i]
+        }
+        return area
+    }
+
     /// JSON-ready dictionary, rounded for reading.
     public var json: [String: Any] {
         func r(_ v: Double, _ places: Double = 1000) -> Double { (v * places).rounded() / places }
