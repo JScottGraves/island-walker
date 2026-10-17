@@ -105,6 +105,8 @@ public final class TerrainRenderer {
     let terrainAccel: MTLAccelerationStructure?
     /// Generated ground below the data's 10 m grid, near the camera.
     let detail: TerrainDetail
+    /// Plant-community ground colour (rgb) with alpha 1, or one texel of alpha 0 without one.
+    let canopy: MTLTexture
     let seaLevel: Float
     let maxHeight: Float
     /// What the last frame drew and how much is still loading, for the debug overlay.
@@ -241,6 +243,7 @@ public final class TerrainRenderer {
         let detailLods = fineDetail ? TerrainDetail.levelCount(cellMetres: terrain.cellMetres) : 0
         detail = try TerrainDetail(device: device, library: library, levels: detailLods, cellMetres: terrain.cellMetres,
                                    seaLevel: terrain.seaLevel, seed: TerrainDetail.seed(of: overview), maps: detailMaps)
+        canopy = try TerrainRenderer.canopyTexture(device: device, map: detailMaps?.canopy)
         // Rings two node sizes wide: three drew 40% more triangles, mostly a few pixels across
         // far away (shading 3 ms slower at 1440p), with no relief visible in the difference.
         let tree = TerrainQuadtree(quads: TerrainRenderer.nodeQuads, cellMetres: terrain.cellMetres / Double(1 << detailLods),
@@ -799,6 +802,7 @@ public final class TerrainRenderer {
         shade.setVertexBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 1)
         bindTerrain(shade, frame: frameTerrain)
         if let sun = targets.sun { shade.setFragmentTexture(sun, index: 5) }
+        shade.setFragmentTexture(canopy, index: 6)
         drawTerrain(shade, frame: frameTerrain)
         shade.endEncoding()
 
@@ -807,6 +811,29 @@ public final class TerrainRenderer {
         frameNumber += 1
         previousViewProjection = viewProjection
         previousCamera = u.cameraPosition
+    }
+}
+
+extension TerrainRenderer {
+    static func canopyTexture(device: MTLDevice, map: ColourMap?) throws -> MTLTexture {
+        let w = map?.width ?? 1, h = map?.height ?? 1
+        let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba32Float, width: w, height: h, mipmapped: false)
+        d.usage = [.shaderRead]
+        d.storageMode = .shared
+        guard let tex = device.makeTexture(descriptor: d) else { throw RendererError.setup("canopy map") }
+        var texels = [Float](repeating: 0, count: w * h * 4)
+        if let map {
+            for i in 0..<(w * h) {
+                texels[4 * i] = map.rgb[3 * i]
+                texels[4 * i + 1] = map.rgb[3 * i + 1]
+                texels[4 * i + 2] = map.rgb[3 * i + 2]
+                texels[4 * i + 3] = 1
+            }
+        }
+        texels.withUnsafeBytes { raw in
+            tex.replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0, withBytes: raw.baseAddress!, bytesPerRow: w * 16)
+        }
+        return tex
     }
 }
 

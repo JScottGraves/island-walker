@@ -54,7 +54,11 @@ enum IslandSource {
             while level < c.levels - 1 && IslandBundle.levelSize(c.size, level: level) > 1024 { level += 1 }
             return try? bundle.grid(name, level: level)
         }
-        return DetailMaps(rain: map("rain"), drainage: map("drainage"), hardness: map("hardness"))
+        var weights = [String: Grid]()
+        for (channel, _) in Look.communities { weights[channel] = map(channel) }
+        let domain = (try? bundle.channel("height")).map { Double($0.size) * $0.cellMetres } ?? 0
+        let canopy = domain > 0 ? Look.canopyMap(weights: weights, domain: domain) : nil
+        return DetailMaps(rain: map("rain"), drainage: map("drainage"), hardness: map("hardness"), canopy: canopy)
     }
 
     /// Standing trade-wind cloud coverage: islandgen's clouds-trades.r32 next to the

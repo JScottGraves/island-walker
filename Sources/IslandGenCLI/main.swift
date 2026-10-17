@@ -251,12 +251,17 @@ let vegetation = timer?.measure("vegetation") { Vegetation.bake(height: island.h
     ?? Vegetation.bake(height: island.height, rain: island.rain, clouds: clouds, seaLevel: sea, params: vegetationParams)
 try Preview.write(Preview.biomes(vegetation, height: island.height, seaLevel: sea), to: out.appendingPathComponent("biomes.png"))
 
+// Ground colour from the plant communities, for the ground views.
+var communityWeights = [String: Grid]()
+for c in Vegetation.Community.allCases { communityWeights[c.channel] = vegetation.weight(c) }
+let canopy = Look.canopyMap(weights: communityWeights, domain: params.domainSize)
+
 // Ground-level pictures from a walker's eye height, rendered on the CPU.
 let lighting = timer?.measure("lighting") { TerrainLighting.bake(height: island.height, seaLevel: sea) }
     ?? TerrainLighting.bake(height: island.height, seaLevel: sea)
 if let timer { print("time by phase (\(ProcessInfo.processInfo.activeProcessorCount) cores):\n" + timer.report) }
 for view in Viewpoints.automatic(height: island.height, drainageArea: island.drainageArea, seaLevel: sea, scarp: island.scarp) {
-    let image = GroundView.render(island.height, camera: view.camera, seaLevel: sea, lighting: lighting)
+    let image = GroundView.render(island.height, camera: view.camera, seaLevel: sea, lighting: lighting, canopy: canopy)
     try Preview.write(image, to: out.appendingPathComponent("view-\(view.name).png"))
 }
 

@@ -252,7 +252,8 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
                                 texture2d<float> clouds [[texture(2)]],
                                 texture2d<float> cloudDistance [[texture(3)]],
                                 texture2d<float> cloudShadows [[texture(4)]],
-                                texture2d<float, access::read> tracedSun [[texture(5), function_constant(kRayTraced)]]) {
+                                texture2d<float, access::read> tracedSun [[texture(5), function_constant(kRayTraced)]],
+                                texture2d<float> canopyMap [[texture(6)]]) {
     float3 n = normalize(in.normal);
     float slope = 1.0 - n.z;
     float h = in.world.z - u.seaLevel;
@@ -265,7 +266,9 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
         n = float3(0.0, 0.0, 1.0);
         surface.z = u.seaLevel; // shadows fall on the water, not the sea floor
     } else {
-        albedo = terrainAlbedo(in.world.xy, h, slope, u.maxHeight);
+        constexpr sampler linear(filter::linear, address::clamp_to_edge);
+        float4 canopy = canopyMap.sample(linear, in.world.xy / u.cloudLayer.w);
+        albedo = terrainAlbedo(in.world.xy, h, slope, u.maxHeight, canopy);
     }
 
     float skyVisibility = saturate(in.light.x);
