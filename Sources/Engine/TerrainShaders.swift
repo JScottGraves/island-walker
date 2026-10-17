@@ -531,6 +531,13 @@ Corners blockCorners(uint2 g, uint step, uint2 size) {
 // Sun-ray passes, coarse to fine.
 constant uint kTreeCoarse = 3u, kTreeFine = 2u;
 
+// Trees' cover written where it was never looked for (the terrain hides the sun, or no
+// proxies apply): clear plus trunk can't both be 1, so neighbours can tell it from "clear"
+// and trace rather than take it, or a lit pixel by a terrain shadow edge would lose its
+// tree shadow.
+constant float2 kCoverUnknown = float2(1.0, 1.0);
+bool coverKnown(float2 cover) { return cover.x + cover.y < 1.5; }
+
 // Four passes over the prepass surface.
 //  - Trees, coarse (with tree shadows): one pixel per 8×8 block traces the trees' proxies.
 //  - Trees, fine: one per 4×4 block takes the coarse pixels' answer where they agree on the
@@ -569,8 +576,8 @@ kernel void sunShadow(constant Uniforms &u [[buffer(0)]],
     bool proxied = kTreeShadows && !s.sky && !s.impostor && distance < treeRange;
     float visibility = sunWithoutRays(u, s, crown, l, horizons, cloudShadows);
     bool traceTrees = proxied && visibility != 0.0;
-    float2 cover = float2(1.0, 0.0);
-    bool covered = !traceTrees;  // cover known
+    float2 cover = kCoverUnknown;
+    bool covered = !traceTrees;  // nothing more to look for
 
     // The traced pixels around this one, at `corners` spacing. Their trees' cover where they
     // show the same surface and agree on it, so shadow edges are traced at least per 2×2
@@ -584,24 +591,29 @@ kernel void sunShadow(constant Uniforms &u [[buffer(0)]],
         // Pass 1 needing only the trees' cover takes the mean of its neighbours' without
         // checking their surfaces: across a silhouette it bleeds by a pixel at most. Pass 0
         // traced shadow edges per 2×2 block, so this softens them over two pixels.
+        // A neighbour that never looked (in the terrain's shadow) has it traced instead.
         Corners k = blockCorners(g, 2u, size);
-        cover = 0.25 * (out.read(k.c[0]).gb + out.read(k.c[1]).gb + out.read(k.c[2]).gb + out.read(k.c[3]).gb);
-        covered = true;
+        float2 c0 = out.read(k.c[0]).gb, c1 = out.read(k.c[1]).gb, c2 = out.read(k.c[2]).gb, c3 = out.read(k.c[3]).gb;
+        if (coverKnown(c0) && coverKnown(c1) && coverKnown(c2) && coverKnown(c3)) {
+            cover = 0.25 * (c0 + c1 + c2 + c3);
+            covered = true;
+        }
     } else if (pass != kTreeCoarse && !own && (traceTrees || wantTerrain)) {
         Corners k = blockCorners(g, corners, size);
         float3 sum = 0.0, low = 1.0, high = 0.0;
-        bool same = true, foliage = s.tree && !s.sky;
+        bool same = true, foliage = s.tree && !s.sky, known = true;
         for (int i = 0; i < 4; i++) {
             SunSurface t = sunSurface(surface, depth, k.c[i]);
             same = same && !t.sky && length(t.p - s.p) < 0.02 * distance + 2.0;
             foliage = foliage && t.tree && !t.sky;
             float3 v = out.read(k.c[i]).rgb;
+            known = known && coverKnown(v.yz);
             low = min(low, v);
             high = max(high, v);
             sum += v;
         }
         bool agree = all(high.yz - low.yz < 0.01);
-        if (traceTrees && (foliage || (same && (agree || pass == 1u)))) {
+        if (traceTrees && known && (foliage || (same && (agree || pass == 1u)))) {
             cover = 0.25 * sum.yz;
             covered = true;
         }
@@ -612,7 +624,7 @@ kernel void sunShadow(constant Uniforms &u [[buffer(0)]],
     }
     if (own && traceTrees) {
         cover = out.read(g).gb;
-        covered = true;
+        covered = coverKnown(cover);
     }
     bool treePass = pass == kTreeCoarse || pass == kTreeFine;
     if (visibility < 0.0 && !treePass) {
@@ -628,8 +640,9 @@ kernel void sunShadow(constant Uniforms &u [[buffer(0)]],
     if (kTreeShadows && !covered && (visibility != 0.0 || treePass)) {
         cover = proxyHit(s.p + (s.tree ? l : s.n) * 0.05, l, trees);
     }
+    // Still unknown here only where the terrain shadow came from the rays: sun is then 0 anyway.
     float sun = 1.0;
-    if (traceTrees && !treePass) sun = treeSun(cover, s.p, l, smoothstep(treeRange - kTreeShadowFade, treeRange, distance));
+    if (traceTrees && !treePass && coverKnown(cover)) sun = treeSun(cover, s.p, l, smoothstep(treeRange - kTreeShadowFade, treeRange, distance));
     out.write(float4(max(visibility, 0.0), cover, sun), g);
 }
 
