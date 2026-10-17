@@ -147,6 +147,7 @@ dl.gloss { display: grid; grid-template-columns: minmax(8rem, 13rem) minmax(0, 1
 dl.gloss dt { font-weight: 600; }
 dl.gloss dd { margin: 0; color: var(--ink-soft); }
 @media (max-width: 560px) { dl.gloss { grid-template-columns: minmax(0, 1fr); gap: 0.1rem; } dl.gloss dd { margin-bottom: 0.6rem; } }
+.sub h4.minor { font-family: var(--font-display); font-size: var(--step-1); font-weight: 650; margin: 2.2rem 0 0.6rem; }
 footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--rule); font-size: var(--step--1); color: var(--ink-soft); }
 </style>
 
@@ -178,6 +179,7 @@ footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--rule);
         <li><a href="#light">Sun, sky, shading</a></li>
         <li><a href="#shadows">Shadows</a></li>
         <li><a href="#clouds">Clouds</a></li>
+        <li><a href="#ragged">Ragged edges</a></li>
         <li><a href="#walker">Walker</a></li>
       </ol>
     </li>
@@ -194,7 +196,7 @@ footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--rule);
   <div class="eyebrow">Island Walker · architecture explainer</div>
   <h1>How the island walker works</h1>
   <p class="lede">A seed goes into a geology simulator that runs offline for about twenty seconds. What comes out is a tiled map of one volcanic island. A Metal app streams that map in around you as you walk, and lights it with a moving sun, a physical sky and trade-wind clouds.</p>
-  <div class="meta"><span>Repo: JScottGraves/island-walker</span><span>Written against main @ 61ba5a4 (PR #22)</span><span>2026-10-16</span><span>Swift + Metal · macOS 14 · Apple Silicon</span></div>
+  <div class="meta"><span>Repo: JScottGraves/island-walker</span><span>Written against main @ 28403ff (PR #26)</span><span>2026-10-16</span><span>Swift + Metal · macOS 14 · Apple Silicon</span></div>
   <div class="facts" role="list">
     <div role="listitem"><b>80 km</b><span>square domain, island in the middle</span></div>
     <div role="listitem"><b>78 m</b><span>erosion grid (1024²)</span></div>
@@ -362,14 +364,14 @@ footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--rule);
         <tr><td><code>GroundView.swift</code></td><td class="num">299</td><td>CPU first-person renders and automatic viewpoints</td><td>both</td></tr>
         <tr><td><code>Preview.swift</code>, <code>PNG.swift</code></td><td class="num">187</td><td>Hillshade, flow and grey previews; a dependency-free PNG encoder</td><td>both</td></tr>
         <tr><td colspan="4"><b>Engine</b>, <b>Walker</b>, <b>IslandApp</b> · runtime</td></tr>
-        <tr><td><code>TerrainRenderer.swift</code></td><td class="num">730</td><td>Pipelines, targets, per-frame encoding, snapshots, the shadow acceleration structure</td><td>lighting</td></tr>
-        <tr><td><code>TerrainShaders.swift</code></td><td class="num">359</td><td>Metal source: CDLOD vertex shader, terrain and sky fragments, shadows</td><td>lighting</td></tr>
+        <tr><td><code>TerrainRenderer.swift</code></td><td class="num">816</td><td>Pipelines, targets, per-frame encoding, snapshots, the shadow acceleration structure</td><td>lighting</td></tr>
+        <tr><td><code>TerrainShaders.swift</code></td><td class="num">459</td><td>Metal source: CDLOD vertex shader, prepass surface, <code>sunShadow</code> ray kernel, terrain and sky fragments</td><td>lighting</td></tr>
         <tr><td><code>TerrainDetail.swift</code></td><td class="num">254</td><td>Fine-detail clipmap: levels, which rows to refill as the camera moves, CPU height for the walker</td><td>detail</td></tr>
         <tr><td><code>DetailShaders.swift</code></td><td class="num">308</td><td>Metal source: the detail recipe (rock, soil, rills, boulders) and the chain that hands each LOD its surface</td><td>detail</td></tr>
-        <tr><td><code>CloudShaders.swift</code></td><td class="num">397</td><td>Metal source: cloud density, march, resolve, composite, shadow map</td><td>lighting</td></tr>
+        <tr><td><code>CloudShaders.swift</code></td><td class="num">538</td><td>Metal source: noise bakes, cloud density, march, resolve, composite, shadow map</td><td>lighting</td></tr>
         <tr><td><code>TerrainStreamer.swift</code></td><td class="num">173</td><td>GPU tile cache and page table</td><td>lighting</td></tr>
         <tr><td><code>Walker.swift</code></td><td class="num">43</td><td>First-person walking with a slope limit</td><td>lighting</td></tr>
-        <tr><td><code>IslandApp.swift</code>, <code>IslandSource.swift</code>, <code>Snapshots.swift</code></td><td class="num">398</td><td>Window and input, choosing the island source, headless <code>--snapshot</code> renders</td><td>lighting</td></tr>
+        <tr><td><code>IslandApp.swift</code>, <code>IslandSource.swift</code>, <code>Snapshots.swift</code></td><td class="num">414</td><td>Window and input, choosing the island source, headless <code>--snapshot</code> renders</td><td>lighting</td></tr>
       </tbody>
     </table>
   </div>
@@ -707,13 +709,14 @@ tile name: &lt;level&gt;/&lt;ty&gt;_&lt;tx&gt;.lz4, row 0 south</code></pre>
             <rect x="498" y="28" width="110" height="36" rx="3" style="fill: var(--sheet); stroke: var(--ink-soft)"/><text x="553" y="50" text-anchor="middle" font-weight="600">encode</text>
 
             <rect x="250" y="190" width="300" height="36" rx="3" style="fill: var(--soil-soft); stroke: var(--soil)"/><text x="400" y="212" text-anchor="middle">load + LZ4-decode missing tiles</text>
-            <path d="M417 64 L 417 188" style="stroke: var(--ink-soft)" stroke-dasharray="3 3" marker-end="url(#ar)"/>
+            <path d="M330 64 L 330 188" style="stroke: var(--ink-soft)" stroke-dasharray="3 3" marker-end="url(#ar)"/>
 
-            <rect x="446" y="115" width="104" height="44" rx="3" style="fill: var(--leaf-soft); stroke: var(--leaf)"/><text x="498" y="133" text-anchor="middle" font-weight="600">detail</text><text x="498" y="149" text-anchor="middle" font-size="10" class="soft">refill moved rows</text>
-            <rect x="560" y="115" width="80" height="44" rx="3" style="fill: var(--sky-soft); stroke: var(--sky)"/><text x="600" y="135" text-anchor="middle" font-weight="600">depth</text><text x="600" y="150" text-anchor="middle" font-size="10" class="soft">prepass</text>
-            <rect x="646" y="115" width="130" height="44" rx="3" style="fill: var(--sky-soft); stroke: var(--sky)"/><text x="711" y="133" text-anchor="middle" font-weight="600">clouds (compute)</text><text x="711" y="149" text-anchor="middle" font-size="10" class="soft">shadow map · march · resolve</text>
+            <rect x="370" y="115" width="94" height="44" rx="3" style="fill: var(--leaf-soft); stroke: var(--leaf)"/><text x="417" y="133" text-anchor="middle" font-weight="600">detail</text><text x="417" y="149" text-anchor="middle" font-size="10" class="soft">refill moved rows</text>
+            <rect x="470" y="115" width="80" height="44" rx="3" style="fill: var(--sky-soft); stroke: var(--sky)"/><text x="510" y="133" text-anchor="middle" font-weight="600">depth</text><text x="510" y="149" text-anchor="middle" font-size="10" class="soft">+ surface</text>
+            <rect x="556" y="115" width="130" height="44" rx="3" style="fill: var(--sky-soft); stroke: var(--sky)"/><text x="621" y="133" text-anchor="middle" font-weight="600">clouds (compute)</text><text x="621" y="149" text-anchor="middle" font-size="10" class="soft">shadows · march · resolve</text>
+            <rect x="692" y="115" width="84" height="44" rx="3" style="fill: var(--sky-soft); stroke: var(--sky)"/><text x="734" y="133" text-anchor="middle" font-weight="600">sun rays</text><text x="734" y="149" text-anchor="middle" font-size="10" class="soft">compute</text>
             <rect x="782" y="115" width="108" height="44" rx="3" style="fill: var(--sky-soft); stroke: var(--sky)"/><text x="836" y="133" text-anchor="middle" font-weight="600">shade</text><text x="836" y="149" text-anchor="middle" font-size="10" class="soft">sky, then terrain</text>
-            <path d="M553 64 L 510 113" style="stroke: var(--ink-soft)" marker-end="url(#ar)"/>
+            <path d="M553 64 L 430 113" style="stroke: var(--ink-soft)" marker-end="url(#ar)"/>
           </g>
           <line x1="60" y1="88" x2="890" y2="88" style="stroke: var(--rule)"/>
           <line x1="60" y1="175" x2="890" y2="175" style="stroke: var(--rule)"/>
@@ -723,10 +726,11 @@ tile name: &lt;level&gt;/&lt;ty&gt;_&lt;tx&gt;.lz4, row 0 south</code></pre>
     </figure>
     <ol class="rail">
       <li><div><b>Fine detail, in compute.</b> Refills only the rows and columns of the detail clipmap that the camera has moved into (<a href="#detail">§5.4</a>). Usually nothing, at walking pace a few hundred samples.</div></li>
-      <li><div><b>Depth prepass.</b> Terrain depth only, no colour. The cloud march needs it to stop at the ground, and it means the expensive terrain shader later runs once per pixel instead of once per overlapping triangle. Both passes use <code>invariant</code> positions so their depths match exactly.</div></li>
+      <li><div><b>Depth prepass.</b> Terrain depth, plus (with ray tracing) each pixel's surface position and normal for the sun rays. The cloud march needs it to stop at the ground, and it means the expensive terrain shader later runs once per pixel instead of once per overlapping triangle. Both passes use <code>invariant</code> positions so their depths match exactly.</div></li>
       <li><div><b>Clouds, in compute.</b> A 512² cloud shadow map over the island (~160 m texels); the cloud march at reduced resolution (at most 360 rows: half per axis at 720p, a quarter at 1440p) up to the terrain depth; a resolve that blends 10 % of the new frame into a reprojected history.</div></li>
+      <li><div><b>Sun rays, in compute</b> (PR #25). From the surface the prepass recorded, trace sun shadows where the horizon map can't decide (<a href="#shadows">§5.6</a>).</div></li>
       <li><div><b>Sky.</b> One full-screen triangle at the far plane, shaded only where no terrain covers it: sky-view LUT, sun disc, open sea beyond the heightfield, clouds composited.</div></li>
-      <li><div><b>Terrain.</b> The same nodes again with the full fragment shader: albedo, sun, sky, bounce, shadows, cloud shadows, water, haze, clouds, tone mapping.</div></li>
+      <li><div><b>Terrain.</b> The same nodes again with the full fragment shader: albedo, sun, sky, bounce, traced shadows read back, cloud shadows, water, haze, clouds, tone mapping.</div></li>
     </ol>
   </div>
 
@@ -798,7 +802,7 @@ tile name: &lt;level&gt;/&lt;ty&gt;_&lt;tx&gt;.lz4, row 0 south</code></pre>
         <figcaption><span class="fig-n">Fig 14</span><b>Nested rings.</b> Every node is the same 64×64-quad grid; only its spacing doubles per level. Near the camera nodes are small and dense.</figcaption>
       </figure>
       <div class="prose">
-        <p><code>TerrainQuadtree.select</code> walks a quadtree whose root covers the whole domain. A level-<i>k</i> node is 64 quads of <code>cellMetres × 2<sup>k</sup></code>, and it is drawn if it lies inside its own ring but outside the finer level's ring; otherwise its four children are visited. Rings reach 3 node sizes from the camera. With a 10 m bundle that is 13 levels: five generated detail levels (<a href="#detail">§5.4</a>), the finest reaching about 60 m at 31 cm spacing, then 8 data levels, the first reaching about 1.9 km at 10 m. Each ring out doubles in size and spacing.</p>
+        <p><code>TerrainQuadtree.select</code> walks a quadtree whose root covers the whole domain. A level-<i>k</i> node is 64 quads of <code>cellMetres × 2<sup>k</sup></code>, and it is drawn if it lies inside its own ring but outside the finer level's ring; otherwise its four children are visited. Rings reach 2 node sizes from the camera (3 until PR #25, which drew 40 % more triangles with no visible gain). With a 10 m bundle that is 13 levels: five generated detail levels (<a href="#detail">§5.4</a>), the finest reaching about 40 m at 31 cm spacing, then 8 data levels, the first reaching about 1.25 km at 10 m. Each ring out doubles in size and spacing.</p>
         <p>Culling uses a min/max height pyramid of the overview padded by 40 m, tested against the six frustum planes. Selected nodes go to the GPU as instances: one draw for full nodes, one for quarter nodes drawn at their parent's level when only some children are inside their ring.</p>
         <p><b>Morphing</b> hides the seams. From 70 % of the way across a ring, each vertex slides its odd rows and columns onto the next level's grid and blends its height to the next level's surface (detail or data). A fully morphed vertex matches the coarser neighbour exactly, so nothing pops or cracks. Normals come from central differences on that same morphed surface.</p>
         <p>Positions are subtracted from the camera before projection, so there is no vertex jitter 40 km from the origin.</p>
@@ -922,14 +926,15 @@ tile name: &lt;level&gt;/&lt;ty&gt;_&lt;tx&gt;.lz4, row 0 south</code></pre>
       <div class="prose">
         <p>Two methods share the work.</p>
         <p><b>Horizon map.</b> At start-up <code>TerrainLighting.bake</code> marches 16 compass sectors out to 25 km from every overview cell (three marches per sector, keeping the highest) and stores each sector's horizon angle as a byte. Any sun position can then be tested by comparing its elevation with the horizon at its azimuth.</p>
-        <p><b>Ray tracing.</b> A Metal acceleration structure is built over a mesh of the same overview. Where the horizon map puts the sun more than ~3° clear of both neighbouring sectors, or ~3° below both, the pixel is decided without rays. Only the uncertain band traces: two rays across the sun's 0.53° disc, and two more only where they disagree, softened over about a degree. Beyond 4 km two rays are enough.</p>
+        <p><b>Ray tracing.</b> A Metal acceleration structure is built over a mesh of the same overview. Where the horizon map puts the sun more than ~3° clear of both neighbouring sectors, or ~3° below both, the pixel is decided without rays. Only the uncertain band traces: two rays across the sun's 0.53° disc, and two more only where they disagree, softened over about a degree. Beyond 4 km two rays are enough. A ray stops once it has climbed above the highest peak.</p>
+        <p><b>In its own pass (PR #25).</b> Rays used to be traced in the terrain fragment shader. Far away, triangles cover only a few pixels, so most lanes of each 2×2 quad were helper lanes tracing rays for nothing. Now the depth prepass also writes each pixel's surface position and normal, and a <code>sunShadow</code> compute pass traces from those into a one-byte sun-visibility target that the shading pass just reads. It traces one pixel per 2×2 block first; the other three copy that answer where the surrounding traced pixels agree and lie on the same surface, and trace their own rays only at shadow edges. Shadows come out the same (mean difference ≤ 0.11/255), and the slowest low-sun views went from 16.2–17.9 ms to 14.1 ms.</p>
         <p>The shadow mesh is coarser than the drawn terrain, so a valley floor can sit under it. Rays ignore faces seen from below, which lets them out.</p>
       </div>
       <figure>
         <div class="canvas">
           <svg viewBox="0 0 360 260" width="360" height="260" role="img" aria-label="Decision tree for terrain shadows per pixel">
             <g font-size="12">
-              <rect x="110" y="10" width="140" height="34" rx="4" style="fill: var(--sheet); stroke: var(--ink-soft)"/><text x="180" y="32" text-anchor="middle">n·l &gt; 0, sun up, not under thick cloud?</text>
+              <rect x="70" y="10" width="220" height="34" rx="4" style="fill: var(--sheet); stroke: var(--ink-soft)"/><text x="180" y="32" text-anchor="middle">n·l &gt; 0, sun up, not under thick cloud?</text>
               <rect x="110" y="80" width="140" height="34" rx="4" style="fill: var(--sheet); stroke: var(--ink-soft)"/><text x="180" y="102" text-anchor="middle">horizon map margin</text>
               <rect x="10" y="160" width="100" height="40" rx="4" style="fill: var(--leaf-soft); stroke: var(--leaf)"/><text x="60" y="178" text-anchor="middle" font-weight="600">lit</text><text x="60" y="193" text-anchor="middle" font-size="10" class="soft">&gt; +3° both sides</text>
               <rect x="130" y="160" width="100" height="40" rx="4" style="fill: var(--sky-soft); stroke: var(--sky)"/><text x="180" y="178" text-anchor="middle" font-weight="600">trace 2–4 rays</text><text x="180" y="193" text-anchor="middle" font-size="10" class="soft">in between</text>
@@ -944,9 +949,51 @@ tile name: &lt;level&gt;/&lt;ty&gt;_&lt;tx&gt;.lz4, row 0 south</code></pre>
             </g>
           </svg>
         </div>
-        <figcaption><span class="fig-n">Fig 19</span><b>Per-pixel shadow decision.</b> The horizon map skips rays for most pixels (PR #20).</figcaption>
+        <figcaption><span class="fig-n">Fig 19</span><b>Per-pixel shadow decision.</b> The horizon map skips rays for most pixels (PR #20); since PR #25 the "in between" pixels are traced in the <code>sunShadow</code> compute pass, a quarter of them first (Fig 20).</figcaption>
       </figure>
     </div>
+    <figure>
+      <div class="canvas">
+        <svg viewBox="0 0 640 190" width="640" height="190" role="img" aria-label="Two passes of the sun ray compute kernel over 2 by 2 pixel blocks">
+          <g font-size="12">
+            <text x="10" y="20" font-weight="600">pass 0: one ray per 2×2 block</text>
+            <text x="340" y="20" font-weight="600">pass 1: the other three pixels</text>
+          </g>
+          <g style="stroke: var(--rule); fill: var(--sheet)">
+            <rect x="20" y="34" width="140" height="140"/><rect x="350" y="34" width="140" height="140"/>
+          </g>
+          <g id="grid0" style="stroke: var(--rule); fill: none">
+            <path d="M55 34 V174 M90 34 V174 M125 34 V174 M20 69 H160 M20 104 H160 M20 139 H160"/>
+            <path d="M385 34 V174 M420 34 V174 M455 34 V174 M350 69 H490 M350 104 H490 M350 139 H490"/>
+          </g>
+          <g style="stroke: var(--ink-soft)" stroke-width="2" fill="none"><path d="M90 34 V174 M20 104 H160 M420 34 V174 M350 104 H490"/></g>
+          <g>
+            <rect x="21" y="35" width="33" height="33" style="fill: var(--leaf-soft)"/><rect x="91" y="35" width="33" height="33" style="fill: var(--leaf-soft)"/>
+            <rect x="21" y="105" width="33" height="33" style="fill: var(--soil-soft)"/><rect x="91" y="105" width="33" height="33" style="fill: var(--soil-soft)"/>
+            <text x="37" y="56" text-anchor="middle" font-size="11">ray</text><text x="107" y="56" text-anchor="middle" font-size="11">ray</text>
+            <text x="37" y="126" text-anchor="middle" font-size="11">ray</text><text x="107" y="126" text-anchor="middle" font-size="11">ray</text>
+          </g>
+          <g>
+            <rect x="351" y="35" width="33" height="33" style="fill: var(--leaf-soft)"/><rect x="386" y="35" width="33" height="33" style="fill: var(--leaf-soft)"/><rect x="421" y="35" width="33" height="33" style="fill: var(--leaf-soft)"/><rect x="456" y="35" width="33" height="33" style="fill: var(--leaf-soft)"/>
+            <rect x="351" y="70" width="33" height="33" style="fill: var(--leaf-soft)"/><rect x="386" y="70" width="33" height="33" style="fill: var(--leaf-soft)"/>
+            <rect x="421" y="70" width="33" height="33" style="fill: var(--sky-soft)"/><rect x="456" y="70" width="33" height="33" style="fill: var(--sky-soft)"/>
+            <rect x="351" y="105" width="33" height="33" style="fill: var(--soil-soft)"/><rect x="421" y="105" width="33" height="33" style="fill: var(--soil-soft)"/>
+            <rect x="386" y="105" width="33" height="33" style="fill: var(--sky-soft)"/><rect x="456" y="105" width="33" height="33" style="fill: var(--sky-soft)"/>
+            <rect x="351" y="140" width="33" height="33" style="fill: var(--soil-soft)"/><rect x="386" y="140" width="33" height="33" style="fill: var(--soil-soft)"/><rect x="421" y="140" width="33" height="33" style="fill: var(--soil-soft)"/><rect x="456" y="140" width="33" height="33" style="fill: var(--soil-soft)"/>
+            <text x="437" y="91" text-anchor="middle" font-size="11">ray</text><text x="472" y="91" text-anchor="middle" font-size="11">ray</text>
+            <text x="402" y="126" text-anchor="middle" font-size="11">ray</text><text x="472" y="126" text-anchor="middle" font-size="11">ray</text>
+          </g>
+          <g font-size="11">
+            <rect x="510" y="44" width="14" height="14" style="fill: var(--leaf-soft); stroke: var(--leaf)"/><text x="530" y="55">lit</text>
+            <rect x="510" y="68" width="14" height="14" style="fill: var(--soil-soft); stroke: var(--soil)"/><text x="530" y="79">shadow</text>
+            <rect x="510" y="92" width="14" height="14" style="fill: var(--sky-soft); stroke: var(--sky)"/><text x="530" y="103">traced again:</text>
+            <text x="530" y="117" class="soft">neighbours disagree</text>
+            <text x="530" y="131" class="soft">or a different surface</text>
+          </g>
+        </svg>
+      </div>
+      <figcaption><span class="fig-n">Fig 20</span><b>Tracing a quarter of the pixels first.</b> Where a shadow edge crosses a block, its pixels trace their own rays; everywhere else they copy their neighbours. Pixels the horizon map or thick cloud already decides never trace at all.</figcaption>
+    </figure>
   </div>
 
   <!-- 5.7 -->
@@ -954,8 +1001,8 @@ tile name: &lt;level&gt;/&lt;ty&gt;_&lt;tx&gt;.lz4, row 0 south</code></pre>
     <h3>5.7 Trade-wind clouds</h3>
     <div class="ways">
       <div class="way plain"><h4>In plain words</h4><p>A layer of cumulus between a few hundred metres and 2 km. It sits where the bake said clouds stand, plus drifting puffs off the ocean. Walking on the crest of the range, you're inside it.</p></div>
-      <div class="way mech"><h4>Mechanism</h4><p>A 2.5D ray-marched layer in the Horizon Zero Dawn / Frostbite style: coverage from a map, a height profile, fBm noise advected by the wind, Beer–Lambert light with dual-lobe phase and multi-scattering octaves, temporal accumulation.</p></div>
-      <div class="way code"><h4>Where</h4><p><code>CloudShaders.swift</code>: <code>cloudDensity</code>, <code>marchClouds</code>, kernels <code>cloudMarch</code>, <code>cloudResolve</code>, <code>cloudShadowMap</code>, and <code>compositeClouds</code> used by both fragment shaders.</p></div>
+      <div class="way mech"><h4>Mechanism</h4><p>A 2.5D ray-marched layer in the Horizon Zero Dawn / Frostbite style: coverage from a map, a height profile, tiling Perlin–Worley and Worley noise textures advected by the wind, Beer–Lambert light with dual-lobe phase and multi-scattering octaves, temporal accumulation.</p></div>
+      <div class="way code"><h4>Where</h4><p><code>CloudShaders.swift</code>: <code>cloudDensity</code>, <code>marchClouds</code>, noise bakes <code>cloudShapeNoise</code> and <code>cloudDetailNoise</code>, kernels <code>cloudMarch</code>, <code>cloudResolve</code>, <code>cloudShadowMap</code>, and <code>compositeClouds</code> used by both fragment shaders.</p></div>
     </div>
     <figure>
       <div class="canvas">
@@ -977,18 +1024,111 @@ tile name: &lt;level&gt;/&lt;ty&gt;_&lt;tx&gt;.lz4, row 0 south</code></pre>
           <circle cx="360" cy="91" r="4" style="fill: var(--soil)"/><text x="370" y="88" font-size="10">walker on the crest: in fog</text>
         </svg>
       </div>
-      <figcaption><span class="fig-n">Fig 20</span><b>The cloud layer in section.</b> Coverage at a point is the larger of the baked orographic map (times a gain thickest at dawn) and a drifting 6 km noise field, capped at 0.88 so even the cap has breaks. Heavier cover reaches higher toward the inversion.</figcaption>
+      <figcaption><span class="fig-n">Fig 21</span><b>The cloud layer in section.</b> Coverage at a point is the larger of the baked orographic map (times a gain thickest at dawn) and a drifting 6 km noise field, capped at 0.88 so even the cap has breaks. Heavier cover reaches higher toward the inversion.</figcaption>
     </figure>
     <ol class="rail">
-      <li><div><b>Shadow map.</b> For each of 512² texels over the island, march 6 samples up through the layer toward the sun. Terrain reads it instead of marching per pixel.</div></li>
-      <li><div><b>March</b> at reduced resolution: 24 steps to the terrain (32 for sky), quadratically spaced so steps are short near the camera; per-pixel jitter that shifts every frame; a 3-sample light march toward the sun (~550 m); noise detail dropped on long steps where it would only alias.</div></li>
+      <li><div><b>Shadow map.</b> For each of 512² texels over the island, march 6 samples up through the layer toward the sun, on the bulk shape without rim erosion. Terrain reads it instead of marching per pixel.</div></li>
+      <li><div><b>March</b> at reduced resolution, adaptively: steps of about 1.25 % of the distance (15–300 m), skipping empty air two at a time and backing up on the first hit (Fig 24). Per-pixel jitter shifts every frame; a 3-sample light march toward the sun (~550 m) with jittered spacing; noise detail chosen by pixel footprint.</div></li>
       <li><div><b>Resolve.</b> Reproject the history through the cloud's own distance, keep it only where the same surface lay behind, clamp it to this frame's 3×3 neighbourhood, blend 10 % new.</div></li>
       <li><div><b>Composite</b> at full resolution with a depth-aware upsample, so cloud doesn't bleed across a ridge silhouette.</div></li>
     </ol>
     <figure>
       <img src="img/clouds-pali-sheet.jpg" alt="Fifteen renders of the pali view at 07:00, 10:00, 13:00, 16:00 and 17:30, without clouds and with two rounds of the cloud layer." width="1800" height="1700">
-      <figcaption><span class="fig-n">Fig 21</span><b>The pali at five times of day</b>, without clouds (left) and with the cloud layer (middle and right, two tuning rounds of PR #12). Measured on the M3 at 720p after PR #14: coast 5 ms, pali 6, summit 11, ridge 14. The target is 60 fps at 1440p.</figcaption>
+      <figcaption><span class="fig-n">Fig 22</span><b>The pali at five times of day</b>, without clouds (left) and with the cloud layer (middle and right, two tuning rounds of PR #12). These renders predate the ragged edges below.</figcaption>
     </figure>
+    <h4 class="minor" id="ragged">Ragged edges (PR #23)</h4>
+    <p>Scott's note was that the edges looked airbrushed while real clouds are ragged. Measured cloud outlines are fractal from 1 km to 1000 km (perimeter dimension about 1.35, Lovejoy 1982), and the raggedness comes from dry air mixing in at the rim while the core stays solid (Heus &amp; Jonker 2008). So detail now <b>eats into the thin rim, not the whole cloud</b>, at every distance. The background is in <code>research/clouds.md</code> §13.</p>
+    <figure>
+      <div class="canvas">
+        <svg viewBox="0 0 900 200" width="900" height="200" role="img" aria-label="Five steps that turn a coverage value into cloud density">
+          <g font-size="12">
+            <rect x="10" y="40" width="156" height="92" rx="4" style="fill: var(--sheet); stroke: var(--ink-soft)"/>
+            <text x="88" y="62" text-anchor="middle" font-weight="600">1 · coverage</text>
+            <text x="88" y="82" text-anchor="middle" font-size="11" class="soft">baked map × daily gain,</text>
+            <text x="88" y="97" text-anchor="middle" font-size="11" class="soft">or drifting 6 km noise</text>
+            <text x="88" y="118" text-anchor="middle" font-size="10" class="mono soft">2D map</text>
+
+            <rect x="188" y="40" width="156" height="92" rx="4" style="fill: var(--sky-soft); stroke: var(--sky)"/>
+            <text x="266" y="62" text-anchor="middle" font-weight="600">2 · shape</text>
+            <text x="266" y="82" text-anchor="middle" font-size="11" class="soft">Perlin–Worley: billowy</text>
+            <text x="266" y="97" text-anchor="middle" font-size="11" class="soft">but connected lobes</text>
+            <text x="266" y="118" text-anchor="middle" font-size="10" class="mono soft">128³ tile, 4 km</text>
+
+            <rect x="366" y="40" width="156" height="92" rx="4" style="fill: var(--sky-soft); stroke: var(--sky)"/>
+            <text x="444" y="62" text-anchor="middle" font-weight="600">3 · bank swing</text>
+            <text x="444" y="82" text-anchor="middle" font-size="11" class="soft">cut coverage up to 100 %</text>
+            <text x="444" y="97" text-anchor="middle" font-size="11" class="soft">in 0.8–3 km Worley cells</text>
+            <text x="444" y="118" text-anchor="middle" font-size="10" class="mono soft">64³ tile, 6.3 km</text>
+
+            <rect x="544" y="40" width="156" height="92" rx="4" style="fill: var(--soil-soft); stroke: var(--soil)"/>
+            <text x="622" y="62" text-anchor="middle" font-weight="600">4 · rim erosion</text>
+            <text x="622" y="82" text-anchor="middle" font-size="11" class="soft">warped Worley; wisps low,</text>
+            <text x="622" y="97" text-anchor="middle" font-size="11" class="soft">billows high; core untouched</text>
+            <text x="622" y="118" text-anchor="middle" font-size="10" class="mono soft">64³ tile, 700 m</text>
+
+            <rect x="722" y="40" width="168" height="92" rx="4" style="fill: var(--soil-soft); stroke: var(--soil)"/>
+            <text x="806" y="62" text-anchor="middle" font-weight="600">5 · sharpen</text>
+            <text x="806" y="82" text-anchor="middle" font-size="11" class="soft">density d → d<tspan dy="-4" font-size="9">0.4</tspan><tspan dy="4"> beyond</tspan></text>
+            <text x="806" y="97" text-anchor="middle" font-size="11" class="soft">~300 m: clear to solid fast</text>
+            <text x="806" y="118" text-anchor="middle" font-size="10" class="mono soft">no texture</text>
+          </g>
+          <g style="stroke: var(--ink-soft)" stroke-width="1.4">
+            <line x1="166" y1="86" x2="186" y2="86" marker-end="url(#ar)"/>
+            <line x1="344" y1="86" x2="364" y2="86" marker-end="url(#ar)"/>
+            <line x1="522" y1="86" x2="542" y2="86" marker-end="url(#ar)"/>
+            <line x1="700" y1="86" x2="720" y2="86" marker-end="url(#ar)"/>
+          </g>
+          <path d="M188 150 L 522 150" style="stroke: var(--sky)" stroke-width="2"/>
+          <text x="355" y="170" text-anchor="middle" font-size="11" style="fill: var(--sky)">bulk shape: the light march and the shadow map see these too</text>
+          <path d="M544 150 L 890 150" style="stroke: var(--soil)" stroke-width="2"/>
+          <text x="717" y="170" text-anchor="middle" font-size="11" style="fill: var(--soil)">seen from the camera only</text>
+          <text x="10" y="22" font-size="12" class="soft">density at a point in <tspan class="mono">cloudDensity</tspan>, top to bottom of the function</text>
+        </svg>
+      </div>
+      <figcaption><span class="fig-n">Fig 23</span><b>From coverage to density.</b> Both noise textures tile, have mips, and are baked on the GPU once at start (<code>cloudShapeNoise</code>, <code>cloudDetailNoise</code>). The shape is remapped to the spread of the old value noise, so a coverage of 0.4 still fills about 40 % of the sky.</figcaption>
+    </figure>
+    <div class="two">
+      <div class="prose">
+        <p><b>Detail picked by pixel footprint.</b> Each sample is told the smallest feature worth drawing there: a cloud texel's footprint, distance × 0.003 rad. That picks the noise mip, and the rim erosion fades out only once a texel spans its finest Worley cells (about 90 m, so roughly 30 km out). Before, erosion ran only on march steps under 250 m, within a few hundred metres of the camera, so every distant edge was smooth.</p>
+        <p><b>Wisps and billows.</b> Low in the layer the erosion uses inverted Worley, which tears the rim into wisps; higher up it uses plain Worley, which leaves rounded billows. A second noise channel warps the erosion coordinates (a cheap stand-in for curl noise) so edges swirl.</p>
+        <p><b>Abrupt edges.</b> Real cumulus goes from clear to cloud within metres. Beyond ~300 m thin density is raised to the power 0.4, so an edge isn't a few hundred metres of haze. Near the camera it isn't, so a walker inside the cloud can still see through its thin parts.</p>
+      </div>
+      <figure>
+        <div class="canvas">
+          <svg viewBox="0 0 380 250" width="380" height="250" role="img" aria-label="Old fixed march steps against the new adaptive march along one view ray through two clouds">
+            <text x="10" y="20" font-size="12" font-weight="600">before: 24–32 fixed steps</text>
+            <text x="10" y="135" font-size="12" font-weight="600">after: adaptive</text>
+            <g style="fill: var(--cloud); opacity: 0.5">
+              <ellipse cx="140" cy="60" rx="40" ry="22"/><ellipse cx="290" cy="60" rx="55" ry="26"/>
+              <ellipse cx="140" cy="180" rx="40" ry="22"/><ellipse cx="290" cy="180" rx="55" ry="26"/>
+            </g>
+            <line x1="20" y1="60" x2="370" y2="60" style="stroke: var(--ink-soft)"/>
+            <line x1="20" y1="180" x2="370" y2="180" style="stroke: var(--ink-soft)"/>
+            <g style="fill: var(--ink)">
+              <circle cx="24" cy="60" r="3"/><circle cx="34" cy="60" r="3"/><circle cx="52" cy="60" r="3"/><circle cx="78" cy="60" r="3"/><circle cx="112" cy="60" r="3"/><circle cx="154" cy="60" r="3"/><circle cx="204" cy="60" r="3"/><circle cx="262" cy="60" r="3"/><circle cx="328" cy="60" r="3"/>
+            </g>
+            <text x="190" y="102" text-anchor="middle" font-size="10.5" class="soft">long far steps slice distant banks into ridges</text>
+            <g style="fill: var(--ink-soft)">
+              <circle cx="24" cy="180" r="2.5"/><circle cx="44" cy="180" r="2.5"/><circle cx="68" cy="180" r="2.5"/><circle cx="96" cy="180" r="2.5"/>
+            </g>
+            <g style="fill: var(--soil)">
+              <circle cx="104" cy="180" r="3"/><circle cx="112" cy="180" r="3"/><circle cx="120" cy="180" r="3"/><circle cx="128" cy="180" r="3"/><circle cx="136" cy="180" r="3"/><circle cx="144" cy="180" r="3"/><circle cx="152" cy="180" r="3"/><circle cx="160" cy="180" r="3"/><circle cx="168" cy="180" r="3"/><circle cx="176" cy="180" r="3"/><circle cx="184" cy="180" r="3"/>
+            </g>
+            <g style="fill: var(--ink-soft)">
+              <circle cx="206" cy="180" r="2.5"/><circle cx="230" cy="180" r="2.5"/>
+            </g>
+            <g style="fill: var(--soil)">
+              <circle cx="236" cy="180" r="3"/><circle cx="246" cy="180" r="3"/><circle cx="256" cy="180" r="3"/><circle cx="266" cy="180" r="3"/><circle cx="276" cy="180" r="3"/><circle cx="286" cy="180" r="3"/><circle cx="296" cy="180" r="3"/><circle cx="306" cy="180" r="3"/><circle cx="316" cy="180" r="3"/><circle cx="326" cy="180" r="3"/><circle cx="336" cy="180" r="3"/><circle cx="346" cy="180" r="3"/>
+            </g>
+            <path d="M96 172 C 100 160, 108 160, 104 171" style="fill: none; stroke: var(--soil)" marker-end="url(#ar)"/>
+            <text x="190" y="222" text-anchor="middle" font-size="10.5" class="soft">grey: empty air crossed 2 steps at a time; orange: in cloud,</text>
+            <text x="190" y="237" text-anchor="middle" font-size="10.5" class="soft">after backing up on the first hit (step ≈ 1.25 % of distance)</text>
+          </svg>
+        </div>
+        <figcaption><span class="fig-n">Fig 24</span><b>The march.</b> Steps are 15–300 m. A run of more than 8 empty samples drops back to skipping.</figcaption>
+      </figure>
+    </div>
+    <p>Known limits from PR #23: cumulus overhead, within ~2 km, still looks soft because the cloud buffer is a quarter of the screen resolution, and very dense banks (the Oʻahu pali at 13:00) stay mostly continuous. Cloud cost is now 1.3–5.3 ms at 1440p on the M3.</p>
   </div>
 
   <!-- 5.8 -->
@@ -996,7 +1136,7 @@ tile name: &lt;level&gt;/&lt;ty&gt;_&lt;tx&gt;.lz4, row 0 south</code></pre>
     <h3>5.8 Walker and controls</h3>
     <div class="two">
       <div class="prose">
-        <p><code>Walker</code> stores a position in Double metres, feet height, yaw and pitch. Walking is 1.4 m/s, running 4 m/s; a step is refused if it would climb steeper than 1:1. Its feet sit on the fine-detail surface where it exists (<a href="#detail">§5.4</a>). Eye height is 1.7 m. Fly mode (F) moves at 60 m/s, 400 with Shift, and never goes below 2 m over the ground. The app starts on the island's highest point.</p>
+        <p><code>Walker</code> stores a position in Double metres, feet height, yaw and pitch. Walking is 1.4 m/s, running 4 m/s; a step is refused if it would climb steeper than 1:1. Its feet sit on the fine-detail surface where it exists (<a href="#detail">§5.4</a>). Eye height is 1.7 m. Fly mode (F) moves at 60 m/s, 400 with Shift, and never goes below 2 m over the ground. The app starts on the island's highest point, or with <code>--view coast</code> (or summit, ridge, pali) at that snapshot viewpoint.</p>
         <p>The title bar is the debug overlay: time of day, GPU ms, nodes drawn, resident tiles and tiles still loading.</p>
       </div>
       <div class="tablewrap">
@@ -1025,7 +1165,7 @@ tile name: &lt;level&gt;/&lt;ty&gt;_&lt;tx&gt;.lz4, row 0 south</code></pre>
     <div class="canvas">
       <svg id="realismSvg" viewBox="0 0 760 300" width="760" height="300" role="img" aria-label="Bar chart comparing Oahu with seeds 42, 7 and 123 on flat land, land over 25 degrees, and cliffs"></svg>
     </div>
-    <figcaption><span class="fig-n">Fig 22</span><b>Generated islands against Oʻahu at 78 m</b>, from the final tuning sweep (<code>renders/inland/sweep-final.md</code>, coast slope 0.3, wave retreat 0.004, leeward 0.2; before flexure). The hypsometric integral already matches (0.176–0.179 vs 0.176), as do drainage density (0.67 vs 0.69) and Hack's exponent (0.48–0.49 vs 0.58, a little low). Flat land is the big miss.</figcaption>
+    <figcaption><span class="fig-n">Fig 25</span><b>Generated islands against Oʻahu at 78 m</b>, from the final tuning sweep (<code>renders/inland/sweep-final.md</code>, coast slope 0.3, wave retreat 0.004, leeward 0.2; before flexure). The hypsometric integral already matches (0.176–0.179 vs 0.176), as do drainage density (0.67 vs 0.69) and Hack's exponent (0.48–0.49 vs 0.58, a little low). Flat land is the big miss.</figcaption>
   </figure>
   <div class="callout"><b>The open realism gap.</b> Oʻahu is two knife-edged ranges on wide, nearly flat ground: 40 % of its land is under 5°. Our islands reach 17–29 %. Late sea-level fall, wave base, deltas, flexure and saddle lava ponding have all been tried; flat land stays near 23 %. The next idea on record is inland alluvial fill, and a saddle pond capped at its spill point on the eroded surface.</div>
 </section>
@@ -1087,7 +1227,7 @@ tile name: &lt;level&gt;/&lt;ty&gt;_&lt;tx&gt;.lz4, row 0 south</code></pre>
         <tr><td>4.4 Walker</td><td><span class="pill part">basic</span></td><td>Slope limit and fly mode; no capsule, step-up or sliding</td></tr>
         <tr><td>Debug overlay</td><td><span class="pill part">basic</span></td><td>Title bar: time, GPU ms, nodes, tiles</td></tr>
         <tr><td>Real DEM import</td><td><span class="pill ok">done</span></td><td>Oʻahu at 10 m as a bundle; scoring</td></tr>
-        <tr><td>60 fps at 1440p, bake &lt; 10 min</td><td><span class="pill part">in progress</span></td><td>Bake is well under; frame time depends on view, clouds and shadows are the cost</td></tr>
+        <tr><td>60 fps at 1440p, bake &lt; 10 min</td><td><span class="pill part">in progress</span></td><td>Bake is well under. With PR #25 every one of the 40 test views is under 16.7 ms (worst 14.1 ms); before it the low-sun views reached 17.9 ms.</td></tr>
       </tbody>
     </table>
   </div>
@@ -1096,7 +1236,8 @@ tile name: &lt;level&gt;/&lt;ty&gt;_&lt;tx&gt;.lz4, row 0 south</code></pre>
     <ul>
       <li>Flat land (§6) is the biggest terrain realism gap; refined cliffs at 10 m are the second.</li>
       <li>Ground up close now has relief, but reads flat because albedo is uniform and rocks cast no shadows; that is the next shading gap.</li>
-      <li>Shaded pali bowls can render too dark; sky ambient and bounce helped. A faint shelf line in the cloud bank on the pali view persists, and motion ghosting of the cloud history is unchecked.</li>
+      <li>Shaded pali bowls can render too dark; sky ambient and bounce helped. Cumulus overhead still look soft (quarter-resolution cloud buffer), and motion ghosting of the cloud history is unchecked.</li>
+      <li>A fine per-pixel speckle where the sun grazes a slope will shimmer in motion (noted in PR #25, not caused by it).</li>
       <li>The rain model is a stand-in; the research notes recommend a linear feedback precipitation model.</li>
     </ul>
   </div>
@@ -1106,7 +1247,7 @@ tile name: &lt;level&gt;/&lt;ty&gt;_&lt;tx&gt;.lz4, row 0 south</code></pre>
 <section id="history">
   <div class="eyebrow">9</div>
   <h2>How we got here</h2>
-  <p>All twenty-two pull requests merged on 2026-10-16, in order. Each one is a single idea, so this list doubles as a map of why the code looks the way it does.</p>
+  <p>All twenty-six pull requests merged on 2026-10-16, in order. Each one is a single idea, so this list doubles as a map of why the code looks the way it does.</p>
   <div class="tablewrap">
     <table>
       <thead><tr><th class="num">PR</th><th>Change</th><th>Area</th></tr></thead>
@@ -1133,6 +1274,10 @@ tile name: &lt;level&gt;/&lt;ty&gt;_&lt;tx&gt;.lz4, row 0 south</code></pre>
         <tr><td class="num">20</td><td>Trace sun rays only where the horizon map is in doubt</td><td>lighting</td></tr>
         <tr><td class="num">21</td><td>This explainer page</td><td>docs</td></tr>
         <tr><td class="num">22</td><td>Fine ground detail near the walker: GPU clipmap to 31 cm</td><td>detail</td></tr>
+        <tr><td class="num">23</td><td>Ragged cloud edges at every scale, adaptive march without step ridges</td><td>lighting</td></tr>
+        <tr><td class="num">24</td><td>Explainer: fine ground detail</td><td>docs</td></tr>
+        <tr><td class="num">25</td><td>Faster ground shading: sun rays in a compute pass, narrower LOD rings</td><td>lighting</td></tr>
+        <tr><td class="num">26</td><td>Explainer: ragged clouds and the sun-ray pass</td><td>docs</td></tr>
       </tbody>
     </table>
   </div>
@@ -1169,7 +1314,7 @@ tile name: &lt;level&gt;/&lt;ty&gt;_&lt;tx&gt;.lz4, row 0 south</code></pre>
 </section>
 
 <footer>
-  Written from the code on main at 61ba5a4 and the project's plan, research notes and renders, 2026-10-16. Numbers quoted from PR descriptions and project notes are measurements on Scott's M3 at the time. When the code changes, update the section it touches; the source lives at <code>docs/architecture/index.html</code> in the repo.
+  Written from the code on main at 28403ff and the project's plan, research notes and renders, 2026-10-16. Numbers quoted from PR descriptions and project notes are measurements on Scott's M3 at the time. When the code changes, update the section it touches; the source lives at <code>docs/architecture/index.html</code> in the repo.
 </footer>
 </main>
 </div>

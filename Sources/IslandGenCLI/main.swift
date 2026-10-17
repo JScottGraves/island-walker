@@ -10,8 +10,9 @@ func usage() -> Never {
     print("""
     usage: islandgen --score HEIGHT.r32 --cell METRES [--width N] [--sea-level M]
              score an existing float32 heightfield (square unless --width; pits are filled first) and print realism metrics
-           islandgen --import HEIGHT.r32 --cell METRES --bundle DIR [--sea-level M] [--refine N] [--fine FILE] [refine options]
-             write a square float32 heightfield, such as the real Oahu DEM, as an island bundle (height and rain; heights kept as they are)
+           islandgen --import HEIGHT.r32 --cell METRES --bundle DIR [--sea-level M] [--out DIR] [--refine N] [--fine FILE] [refine options]
+             write a square float32 heightfield, such as the real Oahu DEM, as an island bundle (height, rain and plant communities; heights kept as they are,
+             or refined N times finer with --refine), and with --out a biomes.png preview and biomes.json
            islandgen [--seed N] [--size N] [--steps N] [--domain METRES] [--deposition G] [--slope-exponent N] [--reference-slope S] [--critical-slope S] [--knickpoint-slope S] [--waterfall-retreat R] [--headwall-retreat R] [--waterfall-min-q Q] [--land-exponent P] [--coast-slope A] [--rift-descent D] [--saddle-fill M] [--pond-time F] [--pond-hardness H] [--pond-share S] [--wave-retreat R] [--leeward-waves S] [--uplift U] [--flexure M] [--flexure-distance M] [--refine N] [--bundle DIR] [--profile] [--out DIR]
       --seed    random seed (default 1)
       --size    grid samples per side (default 1024)
@@ -57,6 +58,21 @@ func usage() -> Never {
 func parsed<T>(_ value: T?) -> T {
     guard let value else { usage() }
     return value
+}
+
+/// Plant community weights plus moisture and exposure, as bundle channels.
+func vegetationChannels(_ v: Vegetation.Result) -> [(name: String, grid: Grid)] {
+    var channels: [(name: String, grid: Grid)] = Vegetation.Community.allCases.map { (name: $0.channel, grid: v.weight($0)) }
+    channels.append((name: "mai", grid: v.mai))
+    channels.append((name: "exposure", grid: v.exposure))
+    return channels
+}
+
+/// Share of land per plant community, rounded, for info.json.
+func biomeShares(_ v: Vegetation.Result, height: Grid, seaLevel: Float) -> [String: Double] {
+    var out = [String: Double]()
+    for (c, share) in v.landShares(height: height, seaLevel: seaLevel) { out[c.name] = (share * 1000).rounded() / 1000 }
+    return out
 }
 
 var params = Island.Params()
@@ -119,7 +135,7 @@ if args.first == "--score" {
 
 // Import mode: a real DEM as an island bundle, to walk next to the generated islands.
 if args.first == "--import" {
-    var path: String?, cellSize: Double?, seaLevel: Float = 0
+    var path: String?, cellSize: Double?, seaLevel: Float = 0, previewDir: String?
     while let flag = args.popFirst() {
         guard let value = args.popFirst() else { usage() }
         switch flag {
@@ -127,6 +143,7 @@ if args.first == "--import" {
         case "--cell": cellSize = parsed(Double(value))
         case "--bundle": bundleDir = value
         case "--sea-level": seaLevel = parsed(Float(value))
+        case "--out": previewDir = value
         default: if !parseRefine(flag, value) { usage() }
         }
     }
@@ -153,10 +170,30 @@ if args.first == "--import" {
         print(String(format: "refined to %d² at %.2f m in %.1f s", height.width, height.cellSize, Date().timeIntervalSince(start)))
         if let finePath { try Preview.writeRaw(height, to: URL(fileURLWithPath: finePath)) }
     }
-    let bundle = try IslandBundle.write([("height", height), ("rain", rain)], seaLevel: Double(seaLevel),
+    // Plant communities need no finer grid than a generated island's (~80 m), and the
+    // cloud and drainage passes are much cheaper there.
+    let coarse = Vegetation.downsample(grid, factor: Swift.max(1, Int((80 / cellSize).rounded())))
+    let coarseRain = Climate.precipitation(height: coarse, seaLevel: seaLevel, params: params.climate)
+    var cloudParams = Clouds.Params()
+    cloudParams.windDirection = params.climate.windDirection
+    let clouds = Clouds.coverage(height: coarse, seaLevel: seaLevel, params: cloudParams)
+    var vegetationParams = Vegetation.Params()
+    vegetationParams.windDirection = params.climate.windDirection
+    let vegetation = Vegetation.bake(height: coarse, rain: coarseRain, clouds: clouds, seaLevel: seaLevel, params: vegetationParams)
+    let channels: [(name: String, grid: Grid)] = [("height", height), ("rain", rain)] + vegetationChannels(vegetation)
+    let bundle = try IslandBundle.write(channels, seaLevel: Double(seaLevel),
                                         to: URL(fileURLWithPath: bundleDir, isDirectory: true))
     let h = try bundle.channel("height")
     print(String(format: "wrote bundle %@: height %d² at %.2f m in %d levels, in %.1f s", bundleDir, h.size, h.cellMetres, h.levels, Date().timeIntervalSince(start)))
+    let shares = biomeShares(vegetation, height: coarse, seaLevel: seaLevel)
+    if let previewDir {
+        let out = URL(fileURLWithPath: previewDir, isDirectory: true)
+        try FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
+        try Preview.write(Preview.biomes(vegetation, height: coarse, seaLevel: seaLevel), to: out.appendingPathComponent("biomes.png"))
+        try Preview.write(Preview.gray(coarseRain), to: out.appendingPathComponent("rain.png"))
+        try JSONSerialization.data(withJSONObject: shares, options: [.prettyPrinted, .sortedKeys]).write(to: out.appendingPathComponent("biomes.json"))
+    }
+    print(String(decoding: try JSONSerialization.data(withJSONObject: shares, options: [.sortedKeys]), as: UTF8.self))
     exit(0)
 }
 
@@ -246,6 +283,14 @@ let cloudInfo: [String: Any] = [
 try JSONSerialization.data(withJSONObject: cloudInfo, options: [.prettyPrinted, .sortedKeys]).write(to: out.appendingPathComponent("clouds.json"))
 let cloudStats = Clouds.stats(coverage: clouds, height: island.height, seaLevel: sea, windDirection: params.climate.windDirection)
 
+// Native plant communities (research/vegetation.md §5).
+var vegetationParams = Vegetation.Params()
+vegetationParams.windDirection = params.climate.windDirection
+vegetationParams.seed = params.seed
+let vegetation = timer?.measure("vegetation") { Vegetation.bake(height: island.height, rain: island.rain, clouds: clouds, seaLevel: sea, params: vegetationParams) }
+    ?? Vegetation.bake(height: island.height, rain: island.rain, clouds: clouds, seaLevel: sea, params: vegetationParams)
+try Preview.write(Preview.biomes(vegetation, height: island.height, seaLevel: sea), to: out.appendingPathComponent("biomes.png"))
+
 // Ground-level pictures from a walker's eye height, rendered on the CPU.
 let lighting = timer?.measure("lighting") { TerrainLighting.bake(height: island.height, seaLevel: sea) }
     ?? TerrainLighting.bake(height: island.height, seaLevel: sea)
@@ -321,6 +366,7 @@ let info: [String: Any] = [
     "cloudLand": rounded(cloudStats.land),
     "cloudWindward": rounded(cloudStats.windward),
     "cloudLeeward": rounded(cloudStats.leeward),
+    "biomes": biomeShares(vegetation, height: island.height, seaLevel: sea),
 ]
 let json = try JSONSerialization.data(withJSONObject: info, options: [.prettyPrinted, .sortedKeys])
 try json.write(to: out.appendingPathComponent("info.json"))
@@ -338,13 +384,14 @@ if refineFactor > 1 {
 }
 if let bundleDir {
     let bundleStart = Date()
-    let bundle = try IslandBundle.write([
+    let channels: [(name: String, grid: Grid)] = [
         ("height", bundleHeight),
         ("rain", island.rain),
         ("drainage", island.drainageArea),
         ("hardness", island.hardness),
         ("clouds-trades", clouds),
-    ], seaLevel: Double(sea), to: URL(fileURLWithPath: bundleDir, isDirectory: true))
+    ] + vegetationChannels(vegetation)
+    let bundle = try IslandBundle.write(channels, seaLevel: Double(sea), to: URL(fileURLWithPath: bundleDir, isDirectory: true))
     let h = try bundle.channel("height")
     print(String(format: "wrote bundle %@: height %d² in %d levels, in %.1f s", bundleDir, h.size, h.levels, Date().timeIntervalSince(bundleStart)))
 }
