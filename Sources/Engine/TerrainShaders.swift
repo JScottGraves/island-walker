@@ -531,11 +531,11 @@ constant uint kTreeCoarse = 3u, kTreeFine = 2u;
 //  - Trees, coarse (with tree shadows): one pixel per 8×8 block traces the trees' proxies.
 //  - Trees, fine: one per 4×4 block takes the coarse pixels' answer where they agree on the
 //    same surface (open ground, or deep under a stand), and traces otherwise.
-//  - Pass 0: one pixel per 2×2 block traces the terrain; the trees' cover is interpolated
-//    from the fine pixels around, or traced at surface edges.
+//  - Pass 0: one pixel per 2×2 block traces the terrain; the trees' cover comes from the
+//    fine pixels around where they agree on the same surface, and is traced otherwise.
 //  - Pass 1 fills in the other three pixels: where the traced ones around agree (all lit
 //    or all shadowed, on the same surface) it takes their answer, at shadow edges and
-//    penumbrae it traces its own rays; the trees' cover again interpolated or traced.
+//    penumbrae it traces its own rays; the trees' cover is its neighbours' mean.
 // Writes the terrain's visibility (r), the trees' cover (gb: see proxyHit) and the sun
 // the trees let through (a); shading multiplies r and a. Within the tree shadow range,
 // ground and tree pixels look for the proxies even where the horizon map has the terrain
@@ -568,16 +568,17 @@ kernel void sunShadow(constant Uniforms &u [[buffer(0)]],
     float2 cover = float2(1.0, 0.0);
     bool covered = !traceTrees;  // cover known
 
-    // The traced pixels around this one, at `corners` spacing. Their trees' cover, as the
-    // mean (bilinear at these offsets), where they show the same surface (crowns: any
-    // crown, whatever its depth, foliage being noisy anyway) and, if `agree`, the same cover.
-    // Their terrain answer where they show the same surface and agree on it (pass 1).
+    // The traced pixels around this one, at `corners` spacing. Their trees' cover where they
+    // show the same surface and agree on it, so shadow edges are traced at least per 2×2
+    // block; crowns take their mean whatever the depths, foliage being noisy anyway. Their terrain
+    // answer where they show the same surface and agree on it (pass 1).
     uint corners = pass == kTreeFine ? 8u : (pass == 0u ? 4u : 2u);
     bool own = pass == 0u && all((g & 3u) == 0u);  // pass 0 on a fine pixel: its own answer
     bool wantTerrain = pass == 1u && visibility < 0.0;
     if (pass == 1u && traceTrees && !wantTerrain) {
-        // Pass 1 needing only the trees' cover takes the mean of its neighbours without
-        // checking their surfaces: across a silhouette it bleeds by a pixel at most.
+        // Pass 1 needing only the trees' cover takes the mean of its neighbours' without
+        // checking their surfaces: across a silhouette it bleeds by a pixel at most. Pass 0
+        // traced shadow edges per 2×2 block, so this softens them over two pixels.
         Corners k = blockCorners(g, 2u, size);
         cover = 0.25 * (out.read(k.c[0]).gb + out.read(k.c[1]).gb + out.read(k.c[2]).gb + out.read(k.c[3]).gb);
         covered = true;
@@ -595,7 +596,7 @@ kernel void sunShadow(constant Uniforms &u [[buffer(0)]],
             sum += v;
         }
         bool agree = all(high.yz - low.yz < 0.01);
-        if (traceTrees && (same || crowns) && (agree || pass != kTreeFine)) {
+        if (traceTrees && (crowns || (same && (agree || pass == 1u)))) {
             cover = 0.25 * sum.yz;
             covered = true;
         }
