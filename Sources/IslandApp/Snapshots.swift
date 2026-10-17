@@ -15,12 +15,38 @@ import IslandGen
 /// of ray-traced shadows. `--size 2560x1440` sets the resolution (default 1280x720).
 /// `--detail off` draws only the bundle's own grid, without the generated fine detail;
 /// `--pitch DEG` looks that far below the horizon from every viewpoint (ground close-ups).
+/// `--flora off` draws no trees (for A/B timing). `--camera X,Y,YAW,PITCH` (metres,
+/// degrees; yaw clockwise from north, pitch up) adds a view named camN, or NAME=X,Y,YAW,PITCH
+/// one named NAME; repeat it for more. `--views a,b` renders only the views named.
 /// Each view's GPU frame time is printed and written to timings.csv.
 enum Snapshots {
     static func option(_ name: String) -> String? {
         let args = CommandLine.arguments
         guard let i = args.firstIndex(of: name), i + 1 < args.count else { return nil }
         return args[i + 1]
+    }
+
+    /// Every value given for an option that may repeat.
+    static func options(_ name: String) -> [String] {
+        let args = CommandLine.arguments
+        return args.indices.filter { args[$0] == name && $0 + 1 < args.count }.map { args[$0 + 1] }
+    }
+
+    /// Views given with `--camera [NAME=]X,Y,YAW,PITCH`.
+    static func cameras() -> [(name: String, camera: GroundView.Camera)] {
+        options("--camera").enumerated().compactMap { k, value in
+            var name = "cam\(k + 1)", spec = Substring(value)
+            if let eq = value.firstIndex(of: "=") {
+                name = String(value[..<eq])
+                spec = value[value.index(after: eq)...]
+            }
+            let v = spec.split(separator: ",").compactMap { Double($0) }
+            guard v.count == 4 else {
+                print("ignoring --camera \(value): expected X,Y,YAW,PITCH")
+                return nil
+            }
+            return (name, GroundView.Camera(x: v[0], y: v[1], z: 0, yaw: v[2] * .pi / 180, pitch: v[3] * .pi / 180))
+        }
     }
 
     /// The automatic viewpoints (summit, ridge, coast, pali…) picked on `height`.
@@ -58,16 +84,19 @@ enum Snapshots {
                                                depthFormat: .depth32Float, terrain: tiles,
                                                shadows: requested, clouds: clouds,
                                                detailMaps: IslandSource.detailMaps(),
-                                               fineDetail: option("--detail") != "off")
+                                               fineDetail: option("--detail") != "off",
+                                               flora: IslandSource.floraMaps())
             print("shadows: \(renderer.shadows.rawValue)")
             // Viewpoints are picked on the overview; the camera then stands on the full-detail ground.
             let height = try tiles.grid(level: tiles.overviewLevel())
             let dims = option("--size")?.split(separator: "x").compactMap { Int($0) } ?? []
             let (width, rows) = dims.count == 2 ? (dims[0], dims[1]) : (1280, 720)
-            var timings = "view,time,gpu_ms,depth_ms,clouds_ms,shade_ms,nodes,tiles\n"
+            var timings = "view,time,gpu_ms,depth_ms,clouds_ms,shade_ms,nodes,tiles,trees,tree_tris\n"
             let day = option("--day").flatMap { Int($0) } ?? SunPath.defaultDay
             let hours = option("--time")?.split(separator: ",").compactMap { Double($0) } ?? []
-            for view in viewpoints(height) {
+            let only = option("--views")?.split(separator: ",").map(String.init)
+            let views = viewpoints(height).map { (name: $0.name, camera: $0.camera) } + cameras()
+            for view in views where only?.contains(view.name) ?? true {
                 var c = view.camera
                 renderer.prepareGround(x: c.x, y: c.y)
                 c.z = renderer.groundHeight(x: c.x, y: c.y) + 1.7
@@ -91,10 +120,12 @@ enum Snapshots {
                     try Data(PNG.encode(rgb: rgb, width: width, height: rows)).write(to: url)
                     let s = renderer.stats
                     let passes = s.passMilliseconds.count == 3 ? s.passMilliseconds : [0, 0, 0]
-                    print(String(format: "wrote %@ (GPU %.1f ms: depth %.1f, clouds %.1f, shading %.1f; %d nodes, %d tiles)",
-                                 url.path, s.gpuMilliseconds, passes[0], passes[1], passes[2], s.nodes, s.residentTiles))
-                    timings += String(format: "%@,%@,%.2f,%.2f,%.2f,%.2f,%d,%d\n", view.name, hour.map { String($0) } ?? "reference",
-                                      s.gpuMilliseconds, passes[0], passes[1], passes[2], s.nodes, s.residentTiles)
+                    print(String(format: "wrote %@ (GPU %.1f ms: depth %.1f, clouds %.1f, shading %.1f; %d nodes, %d tiles, %d trees, %.1fM tree tris)",
+                                 url.path, s.gpuMilliseconds, passes[0], passes[1], passes[2], s.nodes, s.residentTiles,
+                                 s.floraInstances, Double(s.floraTriangles) / 1e6))
+                    timings += String(format: "%@,%@,%.2f,%.2f,%.2f,%.2f,%d,%d,%d,%d\n", view.name, hour.map { String($0) } ?? "reference",
+                                      s.gpuMilliseconds, passes[0], passes[1], passes[2], s.nodes, s.residentTiles,
+                                      s.floraInstances, s.floraTriangles)
                 }
             }
             try timings.write(to: out.appendingPathComponent("timings.csv"), atomically: true, encoding: .utf8)

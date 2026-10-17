@@ -58,6 +58,19 @@ public struct Grid: Sendable, Equatable {
         return a + (b - a) * fy
     }
 
+    /// Height (metres) at a world position (metres) on the triangle mesh through the cell
+    /// centres that the sun's rays are traced against: each quad splits along its
+    /// (i, j)–(i+1, j+1) diagonal. Clamped to the outermost centres. `sunShadow` mirrors it.
+    public func meshHeight(x: Double, y: Double) -> Float {
+        let u = Swift.min(Swift.max(x / cellSize - 0.5, 0), Double(width - 1))
+        let v = Swift.min(Swift.max(y / cellSize - 0.5, 0), Double(height - 1))
+        let i = Swift.min(Int(u), Swift.max(width - 2, 0)), j = Swift.min(Int(v), Swift.max(height - 2, 0))
+        let fx = Float(u - Double(i)), fy = Float(v - Double(j))
+        let i1 = Swift.min(i + 1, width - 1), j1 = Swift.min(j + 1, height - 1)
+        let a = self[i, j], b = self[i1, j], c = self[i, j1], d = self[i1, j1]
+        return fx >= fy ? a + fx * (b - a) + fy * (d - b) : a + fy * (c - a) + fx * (d - c)
+    }
+
     /// Bicubic (Catmull-Rom) sample at continuous cell coordinates, clamped to the grid edge.
     /// Smooth first derivatives, so close-up terrain shows no bilinear creases.
     public func sampleCubic(x: Double, y: Double) -> Float {
