@@ -181,6 +181,7 @@ footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--rule);
         <li><a href="#clouds">Clouds</a></li>
         <li><a href="#ragged">Ragged edges</a></li>
         <li><a href="#walker">Walker</a></li>
+        <li><a href="#flora">Native trees</a></li>
       </ol>
     </li>
     <li><a href="#realism">6 · Measuring realism</a></li>
@@ -195,8 +196,8 @@ footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--rule);
 <header class="top">
   <div class="eyebrow">Island Walker · architecture explainer</div>
   <h1>How the island walker works</h1>
-  <p class="lede">A seed goes into a geology simulator that runs offline for about twenty seconds. What comes out is a tiled map of one volcanic island. A Metal app streams that map in around you as you walk, and lights it with a moving sun, a physical sky and trade-wind clouds.</p>
-  <div class="meta"><span>Repo: JScottGraves/island-walker</span><span>Written against main @ 28403ff (PR #26)</span><span>2026-10-16</span><span>Swift + Metal · macOS 14 · Apple Silicon</span></div>
+  <p class="lede">A seed goes into a geology simulator that runs offline for about twenty seconds. What comes out is a tiled map of one volcanic island. A Metal app streams that map in around you as you walk, grows native Hawaiian forest on it, and lights it with a moving sun, a physical sky and trade-wind clouds.</p>
+  <div class="meta"><span>Repo: JScottGraves/island-walker</span><span>Written against main @ 86077b0 (PR #34)</span><span>2026-10-17</span><span>Swift + Metal · macOS 14 · Apple Silicon</span></div>
   <div class="facts" role="list">
     <div role="listitem"><b>80 km</b><span>square domain, island in the middle</span></div>
     <div role="listitem"><b>78 m</b><span>erosion grid (1024²)</span></div>
@@ -360,14 +361,23 @@ footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--rule);
         <tr><td><code>StreamPower.swift</code></td><td class="num">454</td><td>One erosion step: routing, stack, area, incision, waterfalls, deposition, waves, diffusion</td><td>terrain</td></tr>
         <tr><td><code>Refine.swift</code></td><td class="num">88</td><td>Upsample to ~10 m with a slope-scaled residual</td><td>terrain</td></tr>
         <tr><td><code>Clouds.swift</code></td><td class="num">152</td><td>Standing orographic cloud coverage map</td><td>clouds</td></tr>
+        <tr><td><code>Vegetation.swift</code></td><td class="num">329</td><td>Moisture zones and the 11 native plant-community weights baked into the bundle</td><td>flora</td></tr>
         <tr><td><code>Realism.swift</code></td><td class="num">135</td><td>Hypsometry, slopes, drainage density, Hack's law, pits</td><td>terrain</td></tr>
         <tr><td><code>GroundView.swift</code></td><td class="num">299</td><td>CPU first-person renders and automatic viewpoints</td><td>both</td></tr>
         <tr><td><code>Preview.swift</code>, <code>PNG.swift</code></td><td class="num">187</td><td>Hillshade, flow and grey previews; a dependency-free PNG encoder</td><td>both</td></tr>
+        <tr><td colspan="4"><b>Flora</b>, <b>FloraGen</b> · plants (CPU, shared by the app and <code>floragen</code>)</td></tr>
+        <tr><td><code>Plants.swift</code>, <code>Builders.swift</code>, <code>PlantMesh.swift</code></td><td class="num">841</td><td>Six native species, procedural branch, palm, fern and shrub builders, LOD0/LOD1 meshes</td><td>flora</td></tr>
+        <tr><td><code>Communities.swift</code>, <code>Flora.swift</code></td><td class="num">141</td><td>Which species grow in each community and how densely; the species table the renderer loads</td><td>flora</td></tr>
+        <tr><td><code>ShadowProxy.swift</code></td><td class="num">177</td><td>Closed low-poly trunk-and-crown stand-ins that the sun rays hit</td><td>flora</td></tr>
+        <tr><td><code>FloraTextures.swift</code>, <code>Assets/</code></td><td class="num">129</td><td>Leaf, frond and bark textures cut from CC photos (<code>CREDITS.md</code>)</td><td>flora</td></tr>
+        <tr><td><code>FloraGen/main.swift</code></td><td class="num">178</td><td><code>floragen</code>: specimen sheets, OBJ export, <code>--sites</code> camera finder</td><td>flora</td></tr>
         <tr><td colspan="4"><b>Engine</b>, <b>Walker</b>, <b>IslandApp</b> · runtime</td></tr>
         <tr><td><code>TerrainRenderer.swift</code></td><td class="num">816</td><td>Pipelines, targets, per-frame encoding, snapshots, the shadow acceleration structure</td><td>lighting</td></tr>
         <tr><td><code>TerrainShaders.swift</code></td><td class="num">459</td><td>Metal source: CDLOD vertex shader, prepass surface, <code>sunShadow</code> ray kernel, terrain and sky fragments</td><td>lighting</td></tr>
         <tr><td><code>TerrainDetail.swift</code></td><td class="num">254</td><td>Fine-detail clipmap: levels, which rows to refill as the camera moves, CPU height for the walker</td><td>detail</td></tr>
         <tr><td><code>DetailShaders.swift</code></td><td class="num">308</td><td>Metal source: the detail recipe (rock, soil, rills, boulders) and the chain that hands each LOD its surface</td><td>detail</td></tr>
+        <tr><td><code>FloraRenderer.swift</code></td><td class="num">709</td><td>Tree scatter, indirect draws, impostor bake, the trees' shadow acceleration structure</td><td>flora</td></tr>
+        <tr><td><code>FloraShaders.swift</code></td><td class="num">631</td><td>Metal source: hash-grid scatter, tree prepass and shading, impostors, proxy instances</td><td>flora</td></tr>
         <tr><td><code>CloudShaders.swift</code></td><td class="num">538</td><td>Metal source: noise bakes, cloud density, march, resolve, composite, shadow map</td><td>lighting</td></tr>
         <tr><td><code>TerrainStreamer.swift</code></td><td class="num">173</td><td>GPU tile cache and page table</td><td>lighting</td></tr>
         <tr><td><code>Walker.swift</code></td><td class="num">43</td><td>First-person walking with a slope limit</td><td>lighting</td></tr>
@@ -375,7 +385,7 @@ footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--rule);
       </tbody>
     </table>
   </div>
-  <p>"Owned by" names the project thread that changes the file: <b>terrain</b> is "Terrain-first architecture plan", <b>lighting</b> is "Sun lighting implementation", <b>clouds</b> was the cloud bake thread, <b>detail</b> is "Fine ground detail near walker". The Metal shaders live as Swift strings so <code>swift build</code> needs no Xcode Metal toolchain step.</p>
+  <p>"Owned by" names the project thread that changes the file: <b>terrain</b> is "Terrain-first architecture plan", <b>lighting</b> is "Sun lighting implementation", <b>clouds</b> was the cloud bake thread, <b>detail</b> is "Fine ground detail near walker", <b>flora</b> is "Native vegetation and biomes". <code>sunShadow</code> in <code>TerrainShaders.swift</code> is shared: lighting owns the terrain rays, flora the tree rays. The Metal shaders live as Swift strings so <code>swift build</code> needs no Xcode Metal toolchain step.</p>
 </section>
 
 <!-- ============================================================ 3 -->
@@ -1154,6 +1164,19 @@ tile name: &lt;level&gt;/&lt;ty&gt;_&lt;tx&gt;.lz4, row 0 south</code></pre>
       </div>
     </div>
   </div>
+
+  <div class="sub" id="flora">
+    <h3>5.9 Native trees</h3>
+    <div class="prose">
+      <p>Only native and indigenous Hawaiian plants grow here, as Oʻahu was before people arrived: no canoe plants and nothing introduced. The research and the plan are <code>research/vegetation.md</code> in the project files; the design as built is <code>docs/flora.md</code>.</p>
+      <p><b>Where things grow</b> is decided in the bake. <code>Vegetation.swift</code> turns rainfall, height and distance from the sea into moisture zones fitted to the USGS zones for Oʻahu, and writes a blended weight for each of 11 plant communities (strand, rocky shore, marsh, dry, mesic and wet forest, riparian, cliff, ridge, summit, bog) into the bundle. The terrain shader colours bare ground from those weights (PR #27, #30).</p>
+      <p><b>What grows</b> comes from the <code>Flora</code> library: ʻōhiʻa (and its dwarf summit form), koa, loulu, hāpuʻu, naupaka and ʻaʻaliʻi, four seeded variants each. The shapes are procedural; leaf, frond and bark textures are cut from CC photos. The app builds the meshes at start-up in a fraction of a second.</p>
+      <p><b>Scatter.</b> A compute kernel walks a world-space hash grid (4.5 m cells for trees, 2.5 m for shrubs) around the camera. Each cell has at most one candidate, kept with a probability from the community weights and densities, so a tree is always in the same place whatever the camera does. It stands on the CDLOD triangles of its distance ring and writes indirect draw arguments per LOD.</p>
+      <p><b>Drawing.</b> LOD0 to about 30 m, LOD1 to 80 m, then a camera-facing impostor (each variant drawn once at start-up) to 600 m for trees and 120 m for shrubs, with dithered cross-fades. Trees go through the same depth prepass as the ground, alpha-tested there only, and are shaded once each by an <code>equal</code> depth test. They share the terrain's shading tail, so sky, haze and clouds treat them the same.</p>
+      <p><b>Shadows</b> (PR #34). Within 200 m, trees cast ray-traced sun shadows on the ground and on each other. Each variant has a closed proxy of at most 80 triangles: a trunk prism and three crown lobes at 70% of the leaves' spread, or a disc for the palms and tree ferns. The scatter writes one trunk and one crown instance per tree into an instance acceleration structure, rebuilt on the GPU every 10 m of travel. <code>sunShadow</code> sends a second ray into it from the true surface. It runs coarse to fine (8×8, 4×4, then 2×2 at shadow edges), and crowns let light through in metre-sized sunflecks. Pixels that never looked for trees (in terrain shadow, sky, impostors) say so, so their neighbours trace rather than copy them. Past 200 m, PR #33's canopy-cover stand-in darkens the forest floor instead, faded in over 50 m.</p>
+      <p><b>Cost</b> at 1440p on the M3: all test views stay under 16.7 ms, the worst at 14.4 ms (seed 42 pali at 07:00). At noon trees and their shadows add 1–3 ms; at low sun in dense forest, up to 5.7 ms.</p>
+    </div>
+  </div>
 </section>
 
 <!-- ============================================================ 6 -->
@@ -1226,6 +1249,7 @@ tile name: &lt;level&gt;/&lt;ty&gt;_&lt;tx&gt;.lz4, row 0 south</code></pre>
         <tr><td>Time of day, clouds (added)</td><td><span class="pill ok">done</span></td><td>Moving sun, trade-wind clouds with shadows</td></tr>
         <tr><td>4.4 Walker</td><td><span class="pill part">basic</span></td><td>Slope limit and fly mode; no capsule, step-up or sliding</td></tr>
         <tr><td>Debug overlay</td><td><span class="pill part">basic</span></td><td>Title bar: time, GPU ms, nodes, tiles</td></tr>
+        <tr><td>Native vegetation (added)</td><td><span class="pill part">trees done</span></td><td>Biome bake, six tree and shrub species, impostors, tree shadows (§5.9). Ground cover is next; impostors are single-view, not octahedral.</td></tr>
         <tr><td>Real DEM import</td><td><span class="pill ok">done</span></td><td>Oʻahu at 10 m as a bundle; scoring</td></tr>
         <tr><td>60 fps at 1440p, bake &lt; 10 min</td><td><span class="pill part">in progress</span></td><td>Bake is well under. With PR #25 every one of the 40 test views is under 16.7 ms (worst 14.1 ms); before it the low-sun views reached 17.9 ms.</td></tr>
       </tbody>
@@ -1239,6 +1263,7 @@ tile name: &lt;level&gt;/&lt;ty&gt;_&lt;tx&gt;.lz4, row 0 south</code></pre>
       <li>Shaded pali bowls can render too dark; sky ambient and bounce helped. Cumulus overhead still look soft (quarter-resolution cloud buffer), and motion ghosting of the cloud history is unchecked.</li>
       <li>A fine per-pixel speckle where the sun grazes a slope will shimmer in motion (noted in PR #25, not caused by it).</li>
       <li>The rain model is a stand-in; the research notes recommend a linear feedback precipitation model.</li>
+      <li>Trees are the costliest part of a low-sun frame in dense forest (up to +5.7 ms). Ground cover still has to fit in what is left.</li>
     </ul>
   </div>
 </section>
@@ -1247,7 +1272,7 @@ tile name: &lt;level&gt;/&lt;ty&gt;_&lt;tx&gt;.lz4, row 0 south</code></pre>
 <section id="history">
   <div class="eyebrow">9</div>
   <h2>How we got here</h2>
-  <p>All twenty-six pull requests merged on 2026-10-16, in order. Each one is a single idea, so this list doubles as a map of why the code looks the way it does.</p>
+  <p>Every merged pull request, in order: 1–26 on 2026-10-16, the rest on 2026-10-17. Each one is a single idea, so this list doubles as a map of why the code looks the way it does.</p>
   <div class="tablewrap">
     <table>
       <thead><tr><th class="num">PR</th><th>Change</th><th>Area</th></tr></thead>
@@ -1278,10 +1303,18 @@ tile name: &lt;level&gt;/&lt;ty&gt;_&lt;tx&gt;.lz4, row 0 south</code></pre>
         <tr><td class="num">24</td><td>Explainer: fine ground detail</td><td>docs</td></tr>
         <tr><td class="num">25</td><td>Faster ground shading: sun rays in a compute pass, narrower LOD rings</td><td>lighting</td></tr>
         <tr><td class="num">26</td><td>Explainer: ragged clouds and the sun-ray pass</td><td>docs</td></tr>
+        <tr><td class="num">27</td><td>Bake native plant communities in islandgen</td><td>flora</td></tr>
+        <tr><td class="num">28</td><td>Explainer: mark PR #25 as merged</td><td>docs</td></tr>
+        <tr><td class="num">29</td><td>Flute steep ground when refining to 10 m</td><td>terrain</td></tr>
+        <tr><td class="num">30</td><td>Colour land from the native plant communities</td><td>flora</td></tr>
+        <tr><td class="num">31</td><td>Refine: smooth foothills, crease flutes, scale them by coarse curvature</td><td>terrain</td></tr>
+        <tr><td class="num">32</td><td>Native trees: species, GPU scatter from biomes, impostors</td><td>flora</td></tr>
+        <tr><td class="num">33</td><td>Shade forest floors under trees; stop low-sun leaks on valley floors</td><td>lighting</td></tr>
+        <tr><td class="num">34</td><td>Trees cast ray-traced sun shadows within 200 m</td><td>flora</td></tr>
       </tbody>
     </table>
   </div>
-  <p>Background reading lives in the project files: <code>research/hawaiian-geology.md</code> (what shapes the islands), <code>research/terrain-papers.md</code> (erosion and routing literature), <code>research/global-illumination.md</code> (lighting plan) and <code>research/clouds.md</code> (cloud plan).</p>
+  <p>Background reading lives in the project files: <code>research/hawaiian-geology.md</code> (what shapes the islands), <code>research/terrain-papers.md</code> (erosion and routing literature), <code>research/global-illumination.md</code> (lighting plan), <code>research/clouds.md</code> (cloud plan) and <code>research/vegetation.md</code> (native plant communities).</p>
 </section>
 
 <!-- ============================================================ 10 -->
