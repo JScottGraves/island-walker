@@ -1,10 +1,62 @@
 import Foundation
+import Engine
 import IslandCore
 import IslandGen
 
-/// Where the app's island comes from: a baked `height.r32` passed on the command line,
-/// or a quick in-app bake when none is given.
+/// Where the app's island comes from: an island bundle (islandgen --bundle) or a baked
+/// `height.r32` passed on the command line, or a quick in-app bake when none is given.
 enum IslandSource {
+    /// The island bundle named on the command line, if the first argument is one.
+    static func bundle() -> IslandBundle? {
+        let args = CommandLine.arguments
+        guard args.count > 1, !args[1].hasPrefix("--") else { return nil }
+        let url = URL(fileURLWithPath: args[1], isDirectory: true)
+        guard FileManager.default.fileExists(atPath: url.appendingPathComponent(IslandBundle.manifestName).path) else { return nil }
+        do { return try IslandBundle(url: url) } catch {
+            print("can't read the bundle at \(args[1]): \(error)")
+            return nil
+        }
+    }
+
+    /// The directory the island came from (for scarp.json and other side files).
+    static var inputDirectory: URL? {
+        let args = CommandLine.arguments
+        guard args.count > 1, !args[1].hasPrefix("--") else { return nil }
+        return URL(fileURLWithPath: args[1]).deletingLastPathComponent()
+    }
+
+    /// The terrain to render and its standing cloud coverage.
+    static func terrain() -> (tiles: TerrainTiles, clouds: Grid) {
+        if let bundle = bundle(), let tiles = try? BundleTerrain(bundle: bundle) {
+            let size = tiles.size
+            print("bundle: height \(size)² at \(tiles.cellMetres) m in \(tiles.levels) levels")
+            if let clouds = try? bundle.grid("clouds-trades") {
+                // Rescale the cell so the coverage spans the same domain as the heights.
+                var spanning = Grid(width: clouds.width, height: clouds.height,
+                                    cellSize: tiles.domainMetres / Double(clouds.width))
+                spanning.values = clouds.values
+                return (tiles, spanning)
+            }
+            let overview = (try? tiles.grid(level: tiles.overviewLevel())) ?? Grid(width: 1, height: 1, cellSize: tiles.domainMetres)
+            return (tiles, Clouds.coverage(height: overview, seaLevel: tiles.seaLevel))
+        }
+        let grid = load()
+        return (GridTerrain(height: grid, seaLevel: 0), clouds(for: grid))
+    }
+
+    /// The bake's rain, drainage and hardness maps, to shape the renderer's fine detail:
+    /// from the bundle (whichever channels it has), or none for a bare heightfield.
+    static func detailMaps() -> DetailMaps? {
+        guard let bundle = bundle() else { return nil }
+        func map(_ name: String) -> Grid? {
+            guard let c = try? bundle.channel(name) else { return nil }
+            var level = 0
+            while level < c.levels - 1 && IslandBundle.levelSize(c.size, level: level) > 1024 { level += 1 }
+            return try? bundle.grid(name, level: level)
+        }
+        return DetailMaps(rain: map("rain"), drainage: map("drainage"), hardness: map("hardness"))
+    }
+
     /// Standing trade-wind cloud coverage: islandgen's clouds-trades.r32 next to the
     /// height map, or baked here from the heightfield if there is none.
     static func clouds(for height: Grid) -> Grid {
