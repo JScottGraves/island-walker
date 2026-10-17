@@ -570,8 +570,9 @@ kernel void sunShadow(constant Uniforms &u [[buffer(0)]],
 
     // The traced pixels around this one, at `corners` spacing. Their trees' cover where they
     // show the same surface and agree on it, so shadow edges are traced at least per 2×2
-    // block; crowns take their mean whatever the depths, foliage being noisy anyway. Their terrain
-    // answer where they show the same surface and agree on it (pass 1).
+    // block; tree pixels among tree pixels take their mean whatever the depths, foliage being
+    // noisy anyway. Their terrain answer where they show the same surface and agree on it,
+    // and for crowns among tree pixels their mean (pass 1).
     uint corners = pass == kTreeFine ? 8u : (pass == 0u ? 4u : 2u);
     bool own = pass == 0u && all((g & 3u) == 0u);  // pass 0 on a fine pixel: its own answer
     bool wantTerrain = pass == 1u && visibility < 0.0;
@@ -585,23 +586,23 @@ kernel void sunShadow(constant Uniforms &u [[buffer(0)]],
     } else if (pass != kTreeCoarse && !own && (traceTrees || wantTerrain)) {
         Corners k = blockCorners(g, corners, size);
         float3 sum = 0.0, low = 1.0, high = 0.0;
-        bool same = true, crowns = crown;
+        bool same = true, foliage = s.tree && !s.sky;
         for (int i = 0; i < 4; i++) {
             SunSurface t = sunSurface(surface, depth, k.c[i]);
             same = same && !t.sky && length(t.p - s.p) < 0.02 * distance + 2.0;
-            crowns = crowns && t.tree && !t.sky;
+            foliage = foliage && t.tree && !t.sky;
             float3 v = out.read(k.c[i]).rgb;
             low = min(low, v);
             high = max(high, v);
             sum += v;
         }
         bool agree = all(high.yz - low.yz < 0.01);
-        if (traceTrees && (crowns || (same && (agree || pass == 1u)))) {
+        if (traceTrees && (foliage || (same && (agree || pass == 1u)))) {
             cover = 0.25 * sum.yz;
             covered = true;
         }
         if (wantTerrain) {
-            if (crowns) visibility = 0.25 * sum.x;
+            if (crown && foliage) visibility = 0.25 * sum.x;
             else if (same && (high.x <= 0.0 || low.x >= 1.0)) visibility = low.x;
         }
     }
