@@ -1,5 +1,4 @@
 #if canImport(MetalKit)
-import Foundation
 import Metal
 import simd
 import Flora
@@ -406,7 +405,6 @@ final class FloraRenderer {
                  viewProjection: simd_float4x4, terrainParams: TerrainRenderer.TerrainParams, detail: TerrainDetail,
                  pages: MTLBuffer, tiles: MTLTexture) {
         if specimens != nil { return }
-        if (ProcessInfo.processInfo.environment["FLORA_SKIP"] ?? "").contains("scatter") { return }  // DEBUG
         guard let blit = cmd.makeBlitCommandEncoder() else { return }
         blit.label = "flora clear"
         blit.fill(buffer: counts, range: 0..<counts.length, value: 0)
@@ -476,15 +474,10 @@ final class FloraRenderer {
         enc.setVertexBuffer(vertices, offset: 0, index: 2)
         enc.setVertexBuffer(instances, offset: 0, index: 3)
         enc.setFragmentTexture(cards, index: 6)
-        let skip = ProcessInfo.processInfo.environment["FLORA_SKIP"] ?? ""  // DEBUG
         for b in 0..<FloraRenderer.buckets where b == FloraRenderer.plantBuckets || b % FloraRenderer.lodBuckets < Flora.lods {
-            if skip.contains("lod0") && b % FloraRenderer.lodBuckets == 0 { continue }
-            if skip.contains("lod1") && b % FloraRenderer.lodBuckets == 1 { continue }
-            if skip.contains("draw") { continue }
             enc.drawIndexedPrimitives(type: .triangle, indexType: .uint32, indexBuffer: indices, indexBufferOffset: 0,
                                       indirectBuffer: arguments, indirectBufferOffset: b * 20)
         }
-        if skip.contains("lod2") || skip.contains("draw") { return }
         enc.setRenderPipelineState(impostors)
         var capacity = UInt32(FloraRenderer.capacity)
         enc.setVertexBuffer(impostorExtents, offset: 0, index: 4)

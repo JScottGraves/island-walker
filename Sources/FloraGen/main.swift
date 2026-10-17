@@ -11,6 +11,10 @@ import IslandGen
 //
 //   swift run -c release floragen --out DIR [--size 1280x720] [--time 13] [--plants ohia,koa]
 //                                  [--lod 0|1|both] [--obj DIR]
+//   swift run -c release floragen --sites BUNDLE
+//
+// `--sites` prints a forest close-up camera (X,Y,YAW,PITCH for IslandApp --camera) in the
+// purest gentle stand of each tree community in a bundle.
 //
 // Writes DIR/flora-PLANT-lodN.png and DIR/flora-stats.csv (triangles per variant and LOD).
 // `--obj DIR` also exports every mesh as Wavefront OBJ for inspection.
@@ -40,7 +44,51 @@ func writeOBJ(_ mesh: PlantMesh, to url: URL) throws {
     try s.write(to: url, atomically: true, encoding: .utf8)
 }
 
+/// The cell of each community's purest stand on gentle ground (weight × gentleness, from the
+/// 1024² biome mips), with a camera there looking across the slope.
+func printSites(_ path: String) throws {
+    let bundle = try IslandBundle(url: URL(fileURLWithPath: path, isDirectory: true))
+    func map(_ name: String) throws -> Grid {
+        let c = try bundle.channel(name)
+        var level = 0
+        while level < c.levels - 1 && IslandBundle.levelSize(c.size, level: level) > 1024 { level += 1 }
+        return try bundle.grid(name, level: level)
+    }
+    let height = try map("height")
+    for name in ["biome-wet-forest", "biome-riparian", "biome-mesic-forest", "biome-dry-forest", "biome-strand", "biome-montane"] {
+        guard let w = try? map(name) else { continue }
+        let scale = height.width / w.width
+        var best = (score: -1.0, i: 0, j: 0, gx: 0.0, gy: 0.0)
+        for j in 2..<(w.height - 2) {
+            for i in 2..<(w.width - 2) {
+                let hi = i * scale, hj = j * scale
+                guard hi + scale < height.width, hj + scale < height.height, hi >= scale, hj >= scale else { continue }
+                let gx = Double(height[hi + scale, hj] - height[hi - scale, hj]) / (2 * height.cellSize * Double(scale))
+                let gy = Double(height[hi, hj + scale] - height[hi, hj - scale]) / (2 * height.cellSize * Double(scale))
+                let slope = (gx * gx + gy * gy).squareRoot()
+                // Purity over a block (5×5, or 1 cell for the narrow strand and stream bands),
+                // on ground a person could stand on.
+                let r = name == "biome-strand" || name == "biome-riparian" ? 0 : 2
+                var purity = 1.0
+                for dj in -r...r { for di in -r...r { purity = Swift.min(purity, Double(w[i + di, j + dj])) } }
+                let score = purity * (1 - Swift.min(1, slope / 0.35))
+                if score > best.score { best = (score, i, j, gx, gy) }
+            }
+        }
+        guard best.score > 0 else { continue }
+        let x = (Double(best.i) + 0.5) * w.cellSize, y = (Double(best.j) + 0.5) * w.cellSize
+        // Look along the contour (yaw clockwise from north, degrees).
+        let yaw = atan2(-best.gy, best.gx) * 180 / .pi
+        print(String(format: "%@ purity×gentle %.2f: --camera %@=%.0f,%.0f,%.0f,-4", name, best.score,
+                     String(name.dropFirst("biome-".count)), x, y, yaw))
+    }
+}
+
 do {
+    if let sites = option("--sites") {
+        try printSites(sites)
+        exit(0)
+    }
     guard let outPath = option("--out") else {
         print("usage: floragen --out DIR [--size WxH] [--time H] [--plants a,b] [--lod 0|1|both] [--obj DIR]")
         exit(2)

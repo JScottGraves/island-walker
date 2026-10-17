@@ -34,7 +34,7 @@ public enum Flora {
                 bark: .ohiaBark, sides: [5, 4, 3, 3], sides1: [3, 3, 3], lod1Order: 1, barkRepeat: 0.4).build(seed: seed, lod: lod)
         case .koa:
             return BranchingTree(
-                height: h, stems: 1...2, stemLean: 0.3, trunkRadius: 0.55, forkHeight: 0.18...0.3,
+                height: h, stems: 1...2, stemLean: 0.3, trunkRadius: 0.42, forkHeight: 0.18...0.3,
                 children: 2...3, branchAngle: 0.6...1.05, reach: 0.45...0.65, orders: 4, segments: 5,
                 crooked: 0.2, upward: 0.03, crownCentre: 0.68, crownRadii: SIMD3(0.55, 0.55, 0.24),
                 card: 0.75, cardsPerTip: 6...9, leaves: .koaPhyllodes, bark: .koaBark,

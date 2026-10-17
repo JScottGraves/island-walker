@@ -46,11 +46,11 @@ TARGETS = {
     'ohia-leaves': (48, 74, 40),      # dark glossy green; the voucher is dried olive
     'ohia-flowers': None,             # live photo: kept as shot
     'koa-phyllodes': (82, 98, 64),    # grey-green
-    'naupaka-leaves': (96, 140, 62),  # bright, glossy yellow-green
+    'naupaka-leaves': (84, 122, 56),  # bright, glossy yellow-green
     'aalii-leaves': (66, 92, 44),
     'hapuu-frond': (88, 132, 52),     # light green
-    'ohia-bark': (118, 108, 96),      # grey-brown, flaky
-    'koa-bark': (104, 96, 88),        # rough grey-brown
+    'ohia-bark': (112, 100, 86),      # grey-brown, flaky
+    'koa-bark': (124, 110, 94),        # rough grey-brown
     'loulu-bark': (128, 124, 114),    # smooth grey with ring scars
     'aalii-bark': (86, 70, 58),       # stringy dark brown
 }
@@ -372,7 +372,7 @@ def bark(photos, name):
     rgb = decode(np.asarray(im) / 255.0)
     rgb = make_tileable(rgb)
     # Recolour with the full alpha (every texel counts).
-    return recolour(rgb, np.ones(rgb.shape[:2]), TARGETS[name], keep=0.55, contrast=0.65)
+    return recolour(rgb, np.ones(rgb.shape[:2]), TARGETS[name], keep=0.2, contrast=0.6)
 
 
 def periodic_noise(shape, scale_u, scale_v, seed):

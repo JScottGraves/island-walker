@@ -160,6 +160,12 @@ struct MeshBuilder {
             }
             let depth = crown.depth(p)
             var ao = aoFloor + (1 - aoFloor) * smoothstep(0.15, 1.05, depth)
+            // Below the crown, the canopy overhead hides much of the sky.
+            let below = crown.centre.z - crown.radii.z
+            if p.z < below {
+                let under = 1 - smoothstep(0.6, 1.2, simd_length(SIMD2(p.x, p.y) / SIMD2(crown.radii.x, crown.radii.y)))
+                ao *= 1 - 0.35 * under * (1 - 0.5 * smoothstep(0, below, p.z))
+            }
             // Ground contact: the lowest metre of trunk sees less sky.
             ao *= 0.65 + 0.35 * smoothstep(-0.2, Swift.min(1.5, 0.3 * h), p.z)
             v.ao = ao

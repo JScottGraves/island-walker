@@ -125,7 +125,7 @@ public struct FloraMaterial: Sendable {
         FloraMaterial("loulu trunk", card: false, layer: 2),
         FloraMaterial("hapuu trunk", card: false, layer: 3),
         // Golden pulu wool on the hāpuʻu crown and fiddleheads.
-        FloraMaterial("pulu", card: false, layer: 3, tint: RGB(3.2, 2.2, 1.0)),
+        FloraMaterial("pulu", card: false, layer: 3, tint: RGB(2.6, 2.0, 1.2)),
         FloraMaterial("aalii bark", card: false, layer: 4),
         // Young naupaka stems are pale green.
         FloraMaterial("naupaka stem", card: false, layer: 1, tint: RGB(0.9, 1.25, 0.8)),

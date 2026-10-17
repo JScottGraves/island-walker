@@ -128,3 +128,33 @@ photos. Keep the table in one place (`Flora.Communities`) so it is easy to chang
 - `IslandApp BUNDLE --snapshot DIR --size 2560x1440 --time 13 --flora on|off` over the
   standard views, plus forest close-ups, on seed 42 and real Oʻahu. `--camera X,Y,YAW,PITCH`
   (metres, degrees) adds a view. Report the GPU delta per view.
+
+## 7. As built (first version)
+
+What changed from the plan above while building it:
+
+- **Assets** live in `Sources/Flora/Assets/` (SwiftPM resources must sit inside the
+  target), cut by `tools/flora_textures.py` from the photos credited in `CREDITS.md`.
+  Drawn procedurally: the loulu fan (colour sampled from a *P. martii* photo), the hāpuʻu
+  trunk and the ʻaʻaliʻi capsules.
+- **Grid**: canopy cells are 4.5 m (one candidate per cell caps a layer at 10⁴/cell²
+  stems/ha, so 5 m cells could not reach wet forest's 450). Dwarf ʻōhiʻa grow on the
+  2.5 m shrub grid.
+- **Ground**: the scatter puts each trunk on the CDLOD level its distance falls in, on
+  that level's triangles (blended into the next as it morphs), and trunks reach 0.6 m
+  below their base.
+- **LODs**: LOD0 to 35 m, LOD1 to 110 m (both scaled by √(height/12 m)), then an
+  impostor (LOD2) to 600 m for the canopy and 160 m for shrubs, with dithered
+  cross-fades. Each impostor is the variant's LOD0 drawn once at start-up from the side
+  into albedo and normal/AO arrays (coverage-preserving mips), shown as a camera-facing
+  quad and lit with the same tail as the meshes. Without it the trees were
+  geometry-bound (2.6M triangles twice a frame, +5–11 ms); the octahedral impostors of §5
+  remain the follow-up.
+- **Shading pass**: depth `equal` against the prepass with `[[early_fragment_tests]]` and
+  no discard. Only the fragment that wrote a pixel's depth matches it, so the prepass's
+  alpha test is the only one and each tree pixel is shaded once.
+- **Sun rays**: tree pixels set the lowest bit of the surface buffer's packed normal.
+  `sunShadow` then skips the ground-horizon "shadowed" early-out and the n·l early-out
+  for them, and offsets their rays along the sun direction.
+- `floragen --sites BUNDLE` prints a close-up `--camera` in each community's purest
+  gentle stand; `IslandApp --views a,b` renders only the named views.

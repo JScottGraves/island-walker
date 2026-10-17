@@ -337,7 +337,7 @@ struct TreeFern {
         var b = MeshBuilder(height: height, crown: Crown(centre: SIMD3(0, 0, height * 0.75), radii: SIMD3(2.6, 2.6, 1.4)))
         let lean = rng.float(0.0, 0.12), azimuth = rng.float(0, 2 * .pi)
         let leanDir = SIMD3<Float>(cos(azimuth), sin(azimuth), 0)
-        let trunkTop = height * rng.float(0.38, 0.55)
+        let trunkTop = height * rng.float(0.28, 0.45)
         let steps = lod == 0 ? 8 : 3
         var rings: [Ring] = []
         var top = SIMD3<Float>(0, 0, 0)
@@ -350,19 +350,19 @@ struct TreeFern {
             rings.append(Ring(position: p, direction: simd_normalize(SIMD3(0, 0, 1) + leanDir * lean), side: SIMD3(1, 0, 0), radius: r))
             top = p
         }
-        b.tube(rings, sides: lod == 0 ? 8 : 5, material: .hapuuTrunk, repeatLength: 1.2)
+        b.tube(rings, sides: lod == 0 ? 11 : 5, material: .hapuuTrunk, repeatLength: 1.2)
         // Pulu: a golden woolly cap with the frond bases.
         let up = SIMD3<Float>(0, 0, 1)
-        b.tube([Ring(position: top - up * 0.15, direction: up, side: SIMD3(1, 0, 0), radius: trunkRadius * 1.02),
-                Ring(position: top + up * 0.2, direction: up, side: SIMD3(1, 0, 0), radius: trunkRadius * 1.2),
-                Ring(position: top + up * 0.38, direction: up, side: SIMD3(1, 0, 0), radius: trunkRadius * 0.5)],
-               sides: lod == 0 ? 8 : 5, material: .pulu, repeatLength: 0.6)
+        b.tube([Ring(position: top - up * 0.05, direction: up, side: SIMD3(1, 0, 0), radius: trunkRadius * 1.0),
+                Ring(position: top + up * 0.15, direction: up, side: SIMD3(1, 0, 0), radius: trunkRadius * 1.15),
+                Ring(position: top + up * 0.32, direction: up, side: SIMD3(1, 0, 0), radius: trunkRadius * 0.45)],
+               sides: lod == 0 ? 11 : 5, material: .pulu, repeatLength: 0.6)
 
         let hub = top + up * 0.25
         let count = lod == 0 ? rng.int(fronds) : 8
         for k in 0..<count {
             let az = Float(k) * 2.39996 + rng.float(-0.25, 0.25)
-            let rise = rng.float(0.3, 0.75)   // radians from vertical at the base
+            let rise = rng.float(0.2, 0.6)   // radians from vertical at the base
             let length = rng.float(frondLength.lowerBound, frondLength.upperBound) * (lod == 0 ? 1 : 1.05)
             frond(&b, from: hub, azimuth: az, rise: rise, length: length, lod: lod)
         }
@@ -399,7 +399,7 @@ struct TreeFern {
         for k in 0...steps {
             let t = Float(k) / Float(steps)
             // Arch: starts at `rise` from vertical and bends over past horizontal.
-            let angle = rise + t * t * 1.5
+            let angle = rise + t * t * 2.1
             let d = simd_normalize(SIMD3(0, 0, cos(angle)) + out * sin(angle))
             if k > 0 { p += d * (length / Float(steps)) }
             let width: Float = 0.62 * (0.35 + 0.65 * smoothstep(0.0, 0.3, t)) * (1 - 0.5 * smoothstep(0.5, 1.0, t))
@@ -429,9 +429,9 @@ struct Shrub {
     var height: Float
     var width: Float
     var stems: ClosedRange<Int> = 7...11
-    var shellCards = 70
-    var innerCards = 20
-    var card: Float = 0.32
+    var shellCards = 150
+    var innerCards = 30
+    var card: Float = 0.2
 
     func build(seed: UInt64, lod: Int) -> PlantMesh {
         var rng = SplitMix64(seed: seed)
@@ -451,8 +451,8 @@ struct Shrub {
             }
         }
         // Rosette cards on the dome (Fibonacci spiral over the upper hemisphere) and inside it.
-        let shell = lod == 0 ? shellCards : shellCards / 5
-        let scale: Float = lod == 0 ? 1 : 2.1
+        let shell = lod == 0 ? shellCards : shellCards / 8
+        let scale: Float = lod == 0 ? 1 : 2.6
         let golden: Float = 2.39996
         for k in 0..<shell {
             let z = 1 - (Float(k) + 0.5) / Float(shell) * 0.95
