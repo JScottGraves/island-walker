@@ -92,6 +92,13 @@ final class FloraRenderer {
     /// Frames scattered so far, and when the last one was, for the fades' progress. Snapshots
     /// set `fixedFrameTime`, since they encode frames far faster than they are shown.
     var scatterFrame = 0
+    /// Last frame's depth as a pyramid of farthest depths (half the render size at level 0),
+    /// one view per level, and the camera it was drawn from (floraOccluded).
+    var hzb: MTLTexture?
+    var hzbLevels: [MTLTexture] = []
+    let hzbFirst: MTLComputePipelineState
+    let hzbDown: MTLComputePipelineState
+    var hzbInfo: (viewProjection: simd_float4x4, eye: SIMD3<Double>, forward: SIMD3<Float>, scaleY: Float)?
     var lastScatter: Double?
     var fixedFrameTime: Double?
     var canopyRange: Float = 600
@@ -179,6 +186,10 @@ final class FloraRenderer {
         self.seed = seed
         self.seaLevel = seaLevel
         self.domainSize = domainSize
+        guard let first = library.makeFunction(name: "floraHzbFirst"), let down = library.makeFunction(name: "floraHzbDown")
+        else { throw RendererError.setup("hzb kernels") }
+        hzbFirst = try device.makeComputePipelineState(function: first)
+        hzbDown = try device.makeComputePipelineState(function: down)
         guard let scatter = library.makeFunction(name: "floraScatter"),
               let args = library.makeFunction(name: "floraArguments") else { throw RendererError.setup("flora kernels") }
         scatterPipeline = try device.makeComputePipelineState(function: scatter)
@@ -503,8 +514,8 @@ final class FloraRenderer {
         for e in Communities.table { out += cumulative(e.canopyShares) }
         for e in Communities.table { out += cumulative(e.shrubShares) }
         for plant in Plant.allCases {
-            // Canopy trees on slopes to ~40°, shrubs and ferns to ~55°.
-            let steepest: Float = plant == .ohia || plant == .koa || plant == .loulu ? 0.84 : 1.43
+            // Canopy trees on slopes to ~50°, shrubs and ferns to ~70°: pali walls carry them.
+            let steepest: Float = plant == .ohia || plant == .koa || plant == .loulu ? 1.19 : 2.75
             out.append(SIMD4(Float(plant.heightRange.lowerBound), Float(plant.heightRange.upperBound),
                              Float(plant.referenceHeight), steepest))
         }
@@ -516,8 +527,43 @@ final class FloraRenderer {
 
     /// Builds this frame's instances: clears the bucket counts, scatters both layers and
     /// writes the indirect draw arguments. Specimen sheets write theirs once instead.
+    /// Builds the pyramid from this frame's depth prepass, for next frame's scatter.
+    func buildHzb(_ cmd: MTLCommandBuffer, depth: MTLTexture, viewProjection: simd_float4x4, eye: SIMD3<Double>,
+                  forward: SIMD3<Float>) {
+        guard specimens == nil else { return }
+        let w = Swift.max(1, (depth.width + 1) / 2), h = Swift.max(1, (depth.height + 1) / 2)
+        if hzb?.width != w || hzb?.height != h {
+            let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r32Float, width: w, height: h, mipmapped: true)
+            d.usage = [.shaderRead, .shaderWrite]
+            d.storageMode = .private
+            hzb = device.makeTexture(descriptor: d)
+            hzbLevels = hzb.map { t in
+                (0..<t.mipmapLevelCount).compactMap { t.makeTextureView(pixelFormat: .r32Float, textureType: .type2D,
+                                                                         levels: $0..<($0 + 1), slices: 0..<1) }
+            } ?? []
+            hzbInfo = nil
+        }
+        guard let hzb, hzbLevels.count == hzb.mipmapLevelCount, let enc = cmd.makeComputeCommandEncoder() else { return }
+        enc.label = "tree occlusion pyramid"
+        let group = MTLSize(width: 8, height: 8, depth: 1)
+        enc.setComputePipelineState(hzbFirst)
+        enc.setTexture(depth, index: 0)
+        enc.setTexture(hzbLevels[0], index: 1)
+        enc.dispatchThreads(MTLSize(width: w, height: h, depth: 1), threadsPerThreadgroup: group)
+        enc.setComputePipelineState(hzbDown)
+        for level in 1..<hzbLevels.count {
+            enc.setTexture(hzbLevels[level - 1], index: 0)
+            enc.setTexture(hzbLevels[level], index: 1)
+            let t = hzbLevels[level]
+            enc.dispatchThreads(MTLSize(width: t.width, height: t.height, depth: 1), threadsPerThreadgroup: group)
+        }
+        enc.endEncoding()
+        // The lens's y scale (TerrainRenderer's 60° field of view), for sizing plants on screen.
+        hzbInfo = (viewProjection, eye, forward, Float(1 / tan(Double.pi / 6)))
+    }
+
     func scatter(_ cmd: MTLCommandBuffer, uniforms: inout TerrainRenderer.Uniforms, eye: SIMD3<Double>,
-                 viewProjection: simd_float4x4, terrainParams: TerrainRenderer.TerrainParams, detail: TerrainDetail,
+                 forward: SIMD3<Float>, viewProjection: simd_float4x4, terrainParams: TerrainRenderer.TerrainParams, detail: TerrainDetail,
                  pages: MTLBuffer, tiles: MTLTexture) {
         if specimens != nil { return }
         let now = CACurrentMediaTime()
@@ -544,6 +590,19 @@ final class FloraRenderer {
         enc.setBuffer(instances, offset: 0, index: 6)
         enc.setBuffer(lodKeys, offset: 0, index: 10)
         enc.setBuffer(lodValues, offset: 0, index: 11)
+        // Last frame's pyramid, unless the camera has moved 2 m or turned 3° since.
+        var info = [SIMD4<Float>](repeating: .zero, count: 6)
+        if let h = hzbInfo, let hzb, simd_distance(h.eye, eye) < 2,
+           simd_dot(simd_normalize(h.forward), simd_normalize(forward)) > 0.9986 {
+            info[0] = h.viewProjection.columns.0
+            info[1] = h.viewProjection.columns.1
+            info[2] = h.viewProjection.columns.2
+            info[3] = h.viewProjection.columns.3
+            info[4] = SIMD4(Float(h.eye.x), Float(h.eye.y), Float(h.eye.z), 1)
+            info[5] = SIMD4(Float(hzb.width), Float(hzb.height), Float(hzb.mipmapLevelCount), h.scaleY)
+        }
+        enc.setBytes(&info, length: info.count * 16, index: 12)
+        enc.setTexture(hzb ?? biomes[0], index: 5)
         enc.setTexture(tiles, index: 0)
         enc.setTexture(detail.texture, index: 1)
         enc.setTextures(biomes, range: 2..<5)

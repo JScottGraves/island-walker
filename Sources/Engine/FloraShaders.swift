@@ -205,6 +205,66 @@ int floraLodSlot(device atomic_uint *keys, device uint *values, uint key, uint f
     return -1;
 }
 
+// ---- Occlusion culling ----
+// Last frame's depth prepass (terrain and trees) as a pyramid of farthest depths
+// (FloraRenderer.buildHzb), with the camera it was drawn from. A plant whose nearest point
+// lies behind everything in its screen rectangle there is hidden. Plants outside that view
+// count as visible, and the pyramid isn't used once the camera has moved or turned much.
+struct FloraHzb {
+    float4x4 viewProjection;    // camera-relative world → clip, as drawn
+    float4 eye;                 // camera position (xyz), 1 if the pyramid may be used (w)
+    float4 size;                // level 0 width, height (texels), levels, projection y scale
+};
+
+kernel void floraHzbFirst(depth2d<float, access::read> depth [[texture(0)]],
+                          texture2d<float, access::write> out [[texture(1)]],
+                          uint2 gid [[thread_position_in_grid]]) {
+    if (any(gid >= uint2(out.get_width(), out.get_height()))) return;
+    uint2 size = uint2(depth.get_width(), depth.get_height());
+    uint2 p = gid * 2u;
+    float d = 0.0;
+    for (uint k = 0u; k < 4u; k++) d = max(d, depth.read(min(p + uint2(k & 1u, k >> 1u), size - 1u)));
+    out.write(float4(d), gid);
+}
+
+kernel void floraHzbDown(texture2d<float, access::read> in [[texture(0)]],
+                         texture2d<float, access::write> out [[texture(1)]],
+                         uint2 gid [[thread_position_in_grid]]) {
+    if (any(gid >= uint2(out.get_width(), out.get_height()))) return;
+    uint2 size = uint2(in.get_width(), in.get_height());
+    uint2 p = gid * 2u;
+    float d = 0.0;
+    for (uint k = 0u; k < 4u; k++) d = max(d, in.read(min(p + uint2(k & 1u, k >> 1u), size - 1u)).r);
+    // An odd-sized level's last row and column cover one more texel of the level above.
+    if ((size.x & 1u) != 0u && gid.x == out.get_width() - 1u) {
+        for (uint y = 0u; y < 2u; y++) d = max(d, in.read(min(uint2(size.x - 1u, p.y + y), size - 1u)).r);
+    }
+    if ((size.y & 1u) != 0u && gid.y == out.get_height() - 1u) {
+        for (uint x = 0u; x < 2u; x++) d = max(d, in.read(min(uint2(p.x + x, size.y - 1u), size - 1u)).r);
+    }
+    out.write(float4(d), gid);
+}
+
+bool floraOccluded(constant FloraHzb &h, texture2d<float> hzb, float3 centre, float radius) {
+    if (h.eye.w == 0.0) return false;
+    float3 rel = centre - h.eye.xyz;
+    float4 clip = h.viewProjection * float4(rel, 1.0);
+    if (clip.w < radius * 2.0 + 1.0) return false;  // around the camera
+    float2 ndc = clip.xy / clip.w;
+    float r = radius * h.size.w / clip.w;  // in NDC (y scale; x is narrower)
+    if (any(abs(ndc) + r > 1.0)) return false;  // not wholly in last frame's view
+    float2 lo = float2(ndc.x - r, -ndc.y - r) * 0.5 + 0.5, hi = float2(ndc.x + r, -ndc.y + r) * 0.5 + 0.5;
+    float extent = max(hi.x - lo.x, hi.y - lo.y) * max(h.size.x, h.size.y);
+    int level = clamp(int(ceil(log2(max(extent, 1.0)))), 0, int(h.size.z) - 1);
+    uint2 n = uint2(max(uint(h.size.x) >> uint(level), 1u), max(uint(h.size.y) >> uint(level), 1u));
+    uint2 a = min(uint2(lo * float2(n)), n - 1u), b = min(uint2(hi * float2(n)), n - 1u);
+    float farthest = max(max(hzb.read(a, level).r, hzb.read(uint2(b.x, a.y), level).r),
+                         max(hzb.read(uint2(a.x, b.y), level).r, hzb.read(b, level).r));
+    float3 nearPoint = rel - normalize(rel) * radius;
+    float4 c = h.viewProjection * float4(nearPoint, 1.0);
+    return c.z / c.w > farthest;
+}
+
 // One candidate per hash-grid cell around the camera, culled to the view and sorted into
 // its (plant, variant, LOD) bucket.
 kernel void floraScatter(constant Uniforms &u [[buffer(0)]],
@@ -217,6 +277,8 @@ kernel void floraScatter(constant Uniforms &u [[buffer(0)]],
                          constant uint &layer [[buffer(7)]],
                          device atomic_uint *lodKeys [[buffer(10)]],
                          device uint *lodValues [[buffer(11)]],
+                         constant FloraHzb &hzbInfo [[buffer(12)]],
+                         texture2d<float> hzb [[texture(5)]],
                          texture2d_array<ushort, access::read> tiles [[texture(0)]],
                          texture2d_array<float, access::read> detail [[texture(1)]],
                          texture2d<float> biome0 [[texture(2)]],
@@ -243,6 +305,8 @@ kernel void floraScatter(constant Uniforms &u [[buffer(0)]],
     for (int i = 0; i < 6; i++) {
         if (dot(f.planes[i].xyz, centre) + f.planes[i].w < -radius) return;
     }
+    // Hidden behind nearer trees or terrain last frame: like out of view.
+    if (floraOccluded(hzbInfo, hzb, centre + u.cameraPosition, radius)) return;
     // LOD boundaries by distance, pushed out for big plants (screen-size bias).
     float dist = length(centre);
     float bias = sqrt(clamp(height / 12.0, 0.4, 2.0));

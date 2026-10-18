@@ -1,4 +1,5 @@
 import IslandCore
+import Flora
 
 /// Metal source for the first terrain pass, compiled at runtime so `swift build` needs no
 /// Xcode-only Metal toolchain step. Moves to .metal files once the app has an Xcode target.
@@ -397,6 +398,127 @@ float3 groundTexture(texture2d_array<float> albedo, texture2d_array<float> norma
     return colour;
 }
 
+// ---- Far forest (docs/flora.md §11) ----
+// Beyond the trees drawn one by one the ground shows its plant cover as a canopy seen from
+// above, not as paint. Up to a couple of kilometres, where crowns are still a few pixels
+// across, a procedural pattern of domed crowns on a jittered grid (spacing from the
+// community's stems per hectare, size from its cover) lit with their own normals, the
+// ground showing dark between them. Further out, where a pixel spans crowns, their
+// average (Bruneton & Neyret 2012's idea, in a much simpler form): the crowns' mean colour
+// and the share of them in shadow, which grows as the sun drops and vanishes when the sun
+// is behind the viewer (the hotspot). Steep slopes the far albedo shows green (pali walls)
+// carry a dense low mat of fern and shrubs the same way.
+
+// Per community, in the bundle's channel order: canopy and shrub-layer stems per hectare.
+constant float2 kCommunityStems[11] = { \(Communities.table.map { "float2(\($0.canopy), \($0.shrubs))" }.joined(separator: ", ")) };
+// Crowns' area (m²), as canopyCoverTexture takes them, and the pali mat's clumps.
+constant float kTreeCrown = 25.0, kShrubCrown = 6.0, kMatSpacing = 2.0;
+
+struct ForestCover {
+    float cover;            // share of the ground under crowns
+    float spacing;          // metres between crowns
+    float mat;              // the pali mat's share of that cover
+};
+
+// Stands aren't even: denser clumps and gaps tens of metres across, which is what a forest
+// shows from kilometres away once its crowns are too small to see.
+ForestCover forestCover(float4 w0, float4 w1, float4 w2, float2 p, float slope, float vegetated) {
+    float w[11] = { w0.x, w0.y, w0.z, w0.w, w1.x, w1.y, w1.z, w1.w, w2.x, w2.y, w2.z };
+    float open = 0.0, stems = 0.0, total = 0.0;
+    for (int i = 0; i < 11; i++) {
+        float2 s = kCommunityStems[i];
+        // Crowns placed at random leave exp(−stems × area) of the ground open.
+        open += w[i] * exp(-(s.x * kTreeCrown + s.y * kShrubCrown) * 1e-4);
+        stems += w[i] * (s.x + s.y);
+        total += w[i];
+    }
+    float trees = total > 1e-3 ? 1.0 - open / total : 0.0;
+    float mat = 0.9 * vegetated * smoothstep(0.15, 0.35, slope);
+    float clump = 0.65 * groundNoise(p / 37.0 + 3.7) + 0.35 * groundNoise(p / 13.0 + 9.1);
+    ForestCover f;
+    f.cover = saturate(max(trees, mat) * (0.55 + 0.9 * clump));
+    f.mat = mat / max(trees + mat, 1e-3);
+    float treeSpacing = 100.0 / sqrt(max(stems / max(total, 1e-3), 30.0));
+    f.spacing = mix(kMatSpacing, treeSpacing, trees / max(trees + mat, 1e-3));
+    return f;
+}
+
+struct CanopyTexel {
+    float3 albedo;          // multiplier on the far albedo
+    float3 normal;
+    float sun;              // share of the sun reaching it past other crowns
+    float occlusion;        // sky and bounce
+};
+
+float forestHash(float2 c, float k) {
+    uint h = uint(int(c.x)) * 0x8da6b343u ^ uint(int(c.y)) * 0xd8163841u ^ uint(k * 977.0) * 0xcb1ab31fu;
+    h ^= h >> 15; h *= 0x2c1b3c6du; h ^= h >> 12;
+    return float(h & 0xffffu) / 65535.0;
+}
+
+// The crown or gap at p: the highest dome over it among the jittered crowns of the cells
+// around (radii varying ±25%, sized so their cover is `cover`).
+CanopyTexel canopyCrowns(float2 p, ForestCover f, float3 n, float3 l) {
+    float2 q = p / f.spacing;
+    float2 c0 = floor(q);
+    float radius = sqrt(-log(max(1.0 - f.cover, 0.03)) / M_PI_F);
+    float best = -1.0;
+    float2 offset = 0.0;
+    float r = 1.0, shade = 1.0;
+    for (int j = -1; j <= 1; j++) {
+        for (int i = -1; i <= 1; i++) {
+            float2 c = c0 + float2(float(i), float(j));
+            float2 centre = c + float2(forestHash(c, 1.0), forestHash(c, 2.0));
+            float ri = radius * (0.6 + 0.8 * forestHash(c, 3.0));
+            float2 d = q - centre;
+            float e = 1.0 - dot(d, d) / (ri * ri);
+            if (e <= 0.0) continue;
+            float top = sqrt(e) * ri + 0.3 * forestHash(c, 4.0);
+            if (top > best) {
+                best = top;
+                offset = d;
+                r = ri;
+                shade = 0.85 + 0.3 * forestHash(c, 5.0);
+            }
+        }
+    }
+    CanopyTexel t;
+    float3 tx = normalize(float3(1.0, 0.0, 0.0) - n * n.x);
+    float3 ty = cross(n, tx);
+    if (best < 0.0) {
+        // A gap: ground in the crowns' shade unless the sun is high and the stand open.
+        t.albedo = float3(0.55);
+        t.normal = n;
+        t.sun = saturate((l.z - 0.7) * 3.0) * (1.0 - f.cover);
+        t.occlusion = 0.45;
+        return t;
+    }
+    float2 dome = offset / r;
+    float height = sqrt(saturate(1.0 - dot(dome, dome)));
+    t.albedo = float3(1.15 * shade);
+    t.normal = normalize(tx * dome.x + ty * dome.y + n * max(height, 0.2));
+    // A crown's lower flanks sit in its neighbours' shade when the sun is low.
+    t.sun = saturate(height * 1.4 + l.z - 0.25);
+    t.occlusion = 0.6 + 0.4 * height;
+    return t;
+}
+
+// The same canopy averaged over a pixel many crowns wide: mean colour, the share of what is
+// seen that the sun reaches (less at low sun, all of it looking down the sun's path), and
+// mean occlusion. Matched by eye to canopyCrowns' average where the two meet.
+CanopyTexel canopyAverage(ForestCover f, float3 n, float3 l, float3 toEye) {
+    CanopyTexel t;
+    float crownSun = saturate(0.95 + l.z - 0.25);
+    float gapSun = saturate((l.z - 0.7) * 3.0) * (1.0 - f.cover);
+    float hot = smoothstep(0.9, 1.0, dot(toEye, l));
+    float c = f.cover;
+    t.albedo = float3(mix(0.55, 1.15, c));
+    t.normal = n;
+    t.sun = mix(mix(gapSun, crownSun * 0.8, c), 1.0, hot);
+    t.occlusion = mix(0.45, 0.85, c);
+    return t;
+}
+
 // Mirrors Look.lit and GroundView.shade; constants come from Look.metalPrelude, the sun
 // and sky from SunLight through the uniforms.
 fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buffer(1)]],
@@ -427,6 +549,9 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
     // it the cover stands in for them, fading in where those fade out. Further out the
     // terrain colour is the canopy itself, seen from above.
     float underCanopy = 0.0, sunCover = 0.0;
+    // Far forest: how much of it shows (0 near the camera), its crowns and its average.
+    float forest = 0.0, crownDetail = 0.0, clumpDetail = 0.0, matGreen = 0.0;
+    CanopyTexel crowns, clumps, average;
     if (h < 0.0) {
         albedo = waterAlbedo(-h);
         n = float3(0.0, 0.0, 1.0);
@@ -448,6 +573,59 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
                                           in.world.xy, 1.0 / u.cloudLayer.w, h, slope, textured);
             albedo = mix(albedo, ground, near);
             n = normalize(mix(n, textured, near));
+        }
+        if (communities && d > kGroundNear) {
+            float2 uv = in.world.xy / u.cloudLayer.w;
+            // The share of the far albedo that is plants: terrainAlbedo's soil and rock aren't.
+            // Ferns and shrubs grow over most of the soil streaks on a pali wall, and over half
+            // of what the far albedo shows as rock: the Koʻolau's walls are green to the crest.
+            float bare = exposure(in.world.xy);
+            float soil = smoothstep(0.15, 0.35, slope) * (0.12 + 0.65 * bare);
+            float rock = smoothstep(0.4, 0.7, slope) * (0.2 + 0.6 * (1.0 - bare));
+            ForestCover f = forestCover(groundWeights0.sample(linear, uv), groundWeights1.sample(linear, uv),
+                                        groundWeights2.sample(linear, uv), in.world.xy, slope,
+                                        (1.0 - 0.6 * soil) * (1.0 - 0.5 * rock));
+            // Under the trees drawn one by one (to floraRange.x) the canopy is theirs; the
+            // pali mat has no meshes past the ground textures.
+            float treesEnd = floraRange.x > 0.0 ? smoothstep(floraRange.x - 100.0, floraRange.x, d) : 1.0;
+            forest = f.cover * mix(treesEnd, smoothstep(kGroundNear, kGroundFar, d), f.mat);
+            // The mat is the pali's fern green, whatever soil the far albedo shows beneath.
+            matGreen = f.mat;
+            if (forest > 0.0) {
+                float3 toEyeDir = normalize(u.cameraPosition - in.world);
+                // Crowns while they span a few pixels, their average once a pixel spans them.
+                float footprint = d * 1.1547 / u.frame.y;
+                crownDetail = 1.0 - smoothstep(0.1, 0.3, footprint / f.spacing);
+                if (crownDetail > 0.0) crowns = canopyCrowns(in.world.xy, f, n, l);
+                // Groups of crowns four times as far apart, domed and shaded the same way,
+                // carry the canopy's relief out to where single crowns are long gone.
+                ForestCover g = f;
+                g.spacing = 4.0 * f.spacing;
+                g.cover = 0.7;
+                clumpDetail = 1.0 - smoothstep(0.1, 0.3, footprint / g.spacing);
+                if (clumpDetail > 0.0) clumps = canopyCrowns(in.world.xy + 17.0, g, n, l);
+                average = canopyAverage(f, n, l, toEyeDir);
+                // Stands and gaps ~100 m across (sixteen crowns), which still show as a
+                // velvety mottle on a wall many kilometres off.
+                ForestCover st = f;
+                st.spacing = 16.0 * f.spacing;
+                st.cover = 0.75;
+                float standDetail = 1.0 - smoothstep(0.1, 0.3, footprint / st.spacing);
+                if (standDetail > 0.0) {
+                    CanopyTexel stands = canopyCrowns(in.world.xy + 53.0, st, n, l);
+                    float k = 0.5 * standDetail;
+                    average.normal = normalize(mix(average.normal, stands.normal, k));
+                    average.sun *= mix(1.0, stands.sun, k);
+                    average.albedo *= mix(1.0, stands.albedo.x / 1.15, k);
+                }
+                if (clumpDetail > 0.0) {
+                    float k = 0.6 * clumpDetail;
+                    average.normal = normalize(mix(average.normal, clumps.normal, k));
+                    average.sun *= mix(1.0, clumps.sun, k);
+                    average.albedo *= mix(1.0, clumps.albedo.x / 1.15, k);
+                    average.occlusion *= mix(1.0, clumps.occlusion, k);
+                }
+            }
         }
         float nearby = 1.0 - smoothstep(floraRange.x - 100.0, floraRange.x, d);
         if (nearby > 0.0) underCanopy = nearby * canopyCover.sample(linear, in.world.xy / u.cloudLayer.w).r;
@@ -471,6 +649,19 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
     // Sunflecks get through gaps in the crowns; the sky is half hidden by them.
     sunVisibility *= 1.0 - 0.85 * sunCover;
     float3 color = litSurface(u, albedo, n, nDotL, sunVisibility, skyVisibility, 1.0 - 0.5 * underCanopy, cloudSun);
+    if (forest > 0.0) {
+        float3 plants = mix(albedo, kCliffGreen, 0.85 * matGreen) * (0.9 + 0.2 * groundNoise(in.world.xy / 61.0 + 2.3));
+        // The canopy lit like the ground beneath, with its crowns' normals, colour, shade and
+        // occlusion; crowns and their average blended by how many fit in a pixel.
+        float3 canopy = litSurface(u, plants * average.albedo, average.normal, saturate(dot(average.normal, l)),
+                                   sunVisibility * average.sun, skyVisibility, average.occlusion, cloudSun);
+        if (crownDetail > 0.0) {
+            float3 detail = litSurface(u, plants * crowns.albedo, crowns.normal, saturate(dot(crowns.normal, l)),
+                                       sunVisibility * crowns.sun, skyVisibility, crowns.occlusion, cloudSun);
+            canopy = mix(canopy, detail, crownDetail);
+        }
+        color = mix(color, canopy, forest);
+    }
 
     float3 toEye = u.cameraPosition - in.world;
     float dist = length(toEye);

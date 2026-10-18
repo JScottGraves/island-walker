@@ -783,7 +783,7 @@ public final class TerrainRenderer {
         // 0. Fine detail for the ground the camera has moved over, then this frame's trees on it
         // and their shadow maps.
         detail.update(cmd, eye: eye, streamer: streamer, terrainParams: terrainParams, pages: frameTerrain.pages)
-        flora?.scatter(cmd, uniforms: &u, eye: eye, viewProjection: viewProjection, terrainParams: terrainParams,
+        flora?.scatter(cmd, uniforms: &u, eye: eye, forward: forward, viewProjection: viewProjection, terrainParams: terrainParams,
                        detail: detail, pages: frameTerrain.pages, tiles: streamer.tiles)
         flora?.renderShadows(cmd, uniforms: &u, eye: eye, forward: forward, sun: SIMD3(d.x, d.y, d.z),
                              aspect: Double(aspect), terrainParams: terrainParams, detail: detail,
@@ -810,6 +810,7 @@ public final class TerrainRenderer {
         drawTerrain(enc, frame: frameTerrain)
         flora?.drawPrepass(enc)
         enc.endEncoding()
+        flora?.buildHzb(cmd, depth: targets.depth, viewProjection: viewProjection, eye: eye, forward: forward)
 
         // 2. The cloud shadow map, then clouds at reduced resolution, marched up to that depth
         // and blended into the history.
