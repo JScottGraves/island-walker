@@ -374,11 +374,11 @@ footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--rule);
         <tr><td><code>FloraGen/main.swift</code></td><td class="num">178</td><td><code>floragen</code>: specimen sheets, OBJ export, <code>--sites</code> camera finder</td><td>flora</td></tr>
         <tr><td colspan="4"><b>Engine</b>, <b>Walker</b>, <b>IslandApp</b> · runtime</td></tr>
         <tr><td><code>TerrainRenderer.swift</code></td><td class="num">953</td><td>Pipelines, targets, per-frame encoding, snapshots, the terrain shadow acceleration structure</td><td>lighting</td></tr>
-        <tr><td><code>TerrainShaders.swift</code></td><td class="num">797</td><td>Metal source: CDLOD vertex shader, prepass surface, <code>sunShadow</code> kernel (terrain rays, tree cascade lookup), biome ground textures, terrain and sky fragments</td><td>lighting</td></tr>
+        <tr><td><code>TerrainShaders.swift</code></td><td class="num">1172</td><td>Metal source: CDLOD vertex shader, prepass surface, <code>sunShadow</code> kernel (terrain rays, tree cascade lookup), biome ground textures, far canopy and pali wall shading, terrain and sky fragments</td><td>lighting</td></tr>
         <tr><td><code>TerrainDetail.swift</code></td><td class="num">254</td><td>Fine-detail clipmap: levels, which rows to refill as the camera moves, CPU height for the walker</td><td>detail</td></tr>
         <tr><td><code>DetailShaders.swift</code></td><td class="num">308</td><td>Metal source: the detail recipe (rock, soil, rills, boulders) and the chain that hands each LOD its surface</td><td>detail</td></tr>
-        <tr><td><code>FloraRenderer.swift</code></td><td class="num">793</td><td>Tree scatter, LOD fade table, indirect draws, eight-view impostor bake, tree shadow cascades</td><td>flora</td></tr>
-        <tr><td><code>FloraShaders.swift</code></td><td class="num">788</td><td>Metal source: hash-grid scatter, LOD fades, tree prepass and shading, impostors, shadow casters</td><td>flora</td></tr>
+        <tr><td><code>FloraRenderer.swift</code></td><td class="num">1060</td><td>Tree scatter, LOD fade table, indirect draws, eight-view impostor and stand-patch bakes, occlusion pyramid, tree shadow cascades</td><td>flora</td></tr>
+        <tr><td><code>FloraShaders.swift</code></td><td class="num">1043</td><td>Metal source: hash-grid scatter, LOD fades, occlusion test, tree prepass and shading, impostors, stand patches, shadow casters</td><td>flora</td></tr>
         <tr><td><code>CloudShaders.swift</code></td><td class="num">538</td><td>Metal source: noise bakes, cloud density, march, resolve, composite, shadow map</td><td>lighting</td></tr>
         <tr><td><code>TerrainStreamer.swift</code></td><td class="num">173</td><td>GPU tile cache and page table</td><td>lighting</td></tr>
         <tr><td><code>Walker.swift</code></td><td class="num">43</td><td>First-person walking with a slope limit</td><td>lighting</td></tr>
@@ -1176,7 +1176,14 @@ tile name: &lt;level&gt;/&lt;ty&gt;_&lt;tx&gt;.lz4, row 0 south</code></pre>
       <p><b>Drawing</b> (PR #36). LOD0 to 80 m, LOD1 to 250 m (both scaled by √(height / 12 m)), then an impostor to 600 m for trees and 120 m for shrubs. Each variant's impostor is baked from 8 directions at start-up; each pixel blends the two views nearest the direction it is seen from, in the tree's own frame. A GPU table keyed by each tree's grid cell remembers its LOD from frame to frame, so a tree switches with 4% hysteresis and blends over 0.3 s, instead of the fixed screen-space dither bands that read as a screen door. Trees go through the same depth prepass as the ground, alpha-tested there only, and are shaded once each by an <code>equal</code> depth test. They share the terrain's shading tail, so sky, haze and clouds treat them the same.</p>
       <p><b>Shadows</b> (PR #36, replacing #34's ray-traced proxies, which read as octagons and straight lines). Trees cast sun shadows from three tree-only cascaded shadow maps, 1024² Depth32Float each, covering 0–25, 25–80 and 80–220 m. Each is fitted around its slice of the view and snapped to world texels (3.8, 12 and 33 cm). Casters are the real trees: the same scatter, wind and alpha test as the drawn ones, with LOD0 within 20 m, LOD1 within 60 m and sun-facing impostors beyond. The near map redraws every frame and the far two on alternate frames; all three redraw after a 2 m move, a 3° turn or a sun change. <code>sunShadow</code> reads them with percentage-closer soft shadows sized by the 0.53° sun disc (8 blocker taps, 16 rotated Poisson taps), blends cascades over their last fifth, and lets 15% through crowns (<code>kCrownLeak</code>, the forest-floor brightness knob). Over the last 40 m it fades to PR #33's canopy-cover stand-in.</p>
       <p><b>Ground</b> (PR #36). Instead of runtime ground cover, the ground near the walker uses a tileable CC0 texture per community (soil, litter, moss, sand, basalt), blended from the top two community weights with height and noise, rock on steep slopes, and two rotated tiling scales switched by noise so repeats don't show. It fades to the canopy colour 150–300 m out.</p>
-      <p><b>Cost</b> at 1440p on the M3, against the 25 ms (40 fps) budget Scott set on 2026-10-18: worst view 19.9 ms (Oʻahu ridge at 07:00). Views over forest from above pay 2.5–5 ms for the longer LOD ranges; views inside a stand or over open ground, 0.4–2 ms.</p>
+      <p><b>Far away</b> (PR #38, after <code>research/far-trees.md</code>). Past the single trees the forest is carried in three tiers, cheapest last:</p>
+      <ul>
+        <li><b>Stand patches, 600 m to 2.5 km.</b> Each community's stand is baked at start-up as a 12 m patch of two to six trees, in the impostors' eight views, and drawn as one camera-facing card per forested cell with the same view blend, timed fades and occlusion as the trees. They give ridgelines broken, tree-sized silhouettes.</li>
+        <li><b>Canopy shading on the terrain</b>, from 150 m out under the drawn trees. Crowns sized from each community's stems per hectare are shaded as domes with dark gaps while they span a pixel, then clumps, then stands about 100 m across, each tilting the normal; past all of them, an averaged canopy term with the down-sun hotspot (after Bruneton &amp; Neyret 2012). Every layer fades by pixel footprint, so there are no rings or aliasing.</li>
+        <li><b>Pali walls</b> are texture only: trees and patches stop at 40°, shrubs at 55°. Following Scott's photo of the windward Koʻolau, the wall is coloured by its shape: bright yellow-green uluhe and moss on convex ribs and less steep facets, dark wet blue-grey-green basalt on the steepest faces and in gullies (curvature from the 10 m heights over ±20 m), with fine streaks down the fall line. It starts 30 m from the camera, and the forest at the foot blends into it with no seam.</li>
+      </ul>
+      <p><b>Occlusion culling</b> (PR #38). Last frame's depth prepass becomes a pyramid of farthest depths; a tree or patch whose nearest point lies behind everything in its screen rectangle is not drawn. The pyramid is skipped for a frame after a 2 m move or 3° turn. Forest views draw a fifth to a half of their trees, which pays for the far tiers.</p>
+      <p><b>Cost</b> at 1440p on the M3, against the 25 ms (40 fps) budget Scott set on 2026-10-18: with PR #38 the heaviest views (Oʻahu ridge and seed 42 summit at 07:00) run 17–22.5 ms. Time with the app closed: an open app window shares the GPU and inflates snapshot timings.</p>
     </div>
   </div>
 </section>
@@ -1251,9 +1258,9 @@ tile name: &lt;level&gt;/&lt;ty&gt;_&lt;tx&gt;.lz4, row 0 south</code></pre>
         <tr><td>Time of day, clouds (added)</td><td><span class="pill ok">done</span></td><td>Moving sun, trade-wind clouds with shadows</td></tr>
         <tr><td>4.4 Walker</td><td><span class="pill part">basic</span></td><td>Slope limit and fly mode; no capsule, step-up or sliding</td></tr>
         <tr><td>Debug overlay</td><td><span class="pill part">basic</span></td><td>Title bar: time, GPU ms, nodes, tiles</td></tr>
-        <tr><td>Native vegetation (added)</td><td><span class="pill part">trees done</span></td><td>Biome bake, six tree and shrub species, eight-view impostors with timed LOD fades, shadow-mapped tree shadows, per-community ground textures (§5.9). Next gap: far palis read bare (no trees past 600 m or on slopes over ~40°); see <code>research/far-trees.md</code>.</td></tr>
+        <tr><td>Native vegetation (added)</td><td><span class="pill part">trees done</span></td><td>Biome bake, six tree and shrub species, eight-view impostors with timed LOD fades, shadow-mapped tree shadows, per-community ground textures (§5.9). Far forest to the horizon: stand patches to 2.5 km, canopy shading beyond, photo-guided pali walls, occlusion culling (PR #38).</td></tr>
         <tr><td>Real DEM import</td><td><span class="pill ok">done</span></td><td>Oʻahu at 10 m as a bundle; scoring</td></tr>
-        <tr><td>40 fps at 1440p, bake &lt; 10 min</td><td><span class="pill ok">met</span></td><td>Bake is well under. The frame budget is 25 ms since 2026-10-18 (was 16.7 ms for 60 fps); with trees out to 600 m the worst test view is 19.9 ms.</td></tr>
+        <tr><td>40 fps at 1440p, bake &lt; 10 min</td><td><span class="pill ok">met</span></td><td>Bake is well under. The frame budget is 25 ms since 2026-10-18 (was 16.7 ms for 60 fps); with far foliage the heaviest views run 17–22.5 ms.</td></tr>
       </tbody>
     </table>
   </div>
@@ -1315,6 +1322,8 @@ tile name: &lt;level&gt;/&lt;ty&gt;_&lt;tx&gt;.lz4, row 0 south</code></pre>
         <tr><td class="num">34</td><td>Trees cast ray-traced sun shadows within 200 m</td><td>flora</td></tr>
         <tr><td class="num">35</td><td>Explainer: native trees section</td><td>flora</td></tr>
         <tr><td class="num">36</td><td>Tree shadow maps, per-community ground textures, timed LOD fades</td><td>flora</td></tr>
+        <tr><td class="num">37</td><td>Explainer: tree shadow maps, ground textures, 25 ms budget</td><td>flora</td></tr>
+        <tr><td class="num">38</td><td>Far foliage: stand patches to 2.5 km, canopy shading, pali walls after Scott's photo, occlusion culling</td><td>flora</td></tr>
       </tbody>
     </table>
   </div>
