@@ -150,6 +150,13 @@ final class FloraRenderer {
     static let casterBuckets = cascadeCount * plantBuckets
     /// This frame's cascades as the shaders' TreeShadows (nil until drawn, or without them).
     var shadowParams: [SIMD4<Float>]?
+    /// Each shadow map's cascade as last drawn, and the camera and sun it was drawn for.
+    /// The near map is redrawn every frame, the other two on alternate frames (each
+    /// looked up through its cascade re-based to the current camera), unless the camera
+    /// has turned or jumped, or the sun moved, since.
+    var drawnCascades: [(cascade: ShadowCascades.Cascade, eye: SIMD3<Double>, forward: SIMD3<Double>, sun: SIMD3<Double>)?] =
+        Array(repeating: nil, count: cascadeCount)
+    var shadowFrame = 0
 
     init(device: MTLDevice, library: MTLLibrary, constants: MTLFunctionConstantValues, colorFormat: MTLPixelFormat,
          depthFormat: MTLPixelFormat, rayTraced: Bool, treeShadows: Bool, maps: FloraMaps?, seed: UInt32,
@@ -521,10 +528,22 @@ final class FloraRenderer {
                        forward: SIMD3<Float>, sun: SIMD3<Double>, aspect: Double,
                        terrainParams: TerrainRenderer.TerrainParams, detail: TerrainDetail, pages: MTLBuffer, tiles: MTLTexture) {
         guard let casters, specimens == nil else { return }
-        let cascades = ShadowCascades.fit(
-            eye: eye, forward: SIMD3(Double(forward.x), Double(forward.y), Double(forward.z)), sun: sun,
-            splits: cascadeSplits, tanHalfFovY: tan(Double.pi / 6), aspect: aspect,
-            resolutions: cascadeSizes, casterReach: casterReach(sun: sun))
+        let look = ShadowCascades.normalized(SIMD3(Double(forward.x), Double(forward.y), Double(forward.z)))
+        let fresh = ShadowCascades.fit(eye: eye, forward: look, sun: sun, splits: cascadeSplits, tanHalfFovY: tan(Double.pi / 6),
+                                       aspect: aspect, resolutions: cascadeSizes, casterReach: casterReach(sun: sun))
+        shadowFrame += 1
+        var redraw = [Bool](repeating: true, count: fresh.count)
+        var cascades = fresh
+        for c in 1..<fresh.count {
+            guard let drawn = drawnCascades[c] else { continue }
+            let still = simd_distance(drawn.eye, eye) < 2 && ShadowCascades.dot(drawn.forward, look) > 0.9986
+                && ShadowCascades.dot(drawn.sun, sun) > 0.999_999 * simd_length(drawn.sun) * simd_length(sun)
+            if still && shadowFrame % 2 != c % 2 {
+                redraw[c] = false
+                cascades[c] = drawn.cascade.rebased(from: drawn.eye, to: eye)
+            }
+        }
+        for c in 0..<fresh.count where redraw[c] { drawnCascades[c] = (fresh[c], eye, look, sun) }
         var shadow: [SIMD4<Float>] = []
         for c in cascades {
             let rows = c.clipRows.map { r in SIMD4(Float(r.x), Float(r.y), Float(r.z), Float(r.w)) }
@@ -554,7 +573,8 @@ final class FloraRenderer {
         }
         let oc = origin(canopyCell, canopyCells), os = origin(shrubCell, shrubCells)
         var sp: [SIMD4<Float>] = [SIMD4(oc.x, oc.y, os.x, os.y),
-                                  SIMD4(Float(canopyCells), Float(shrubCells), reach, shrubReach)]
+                                  SIMD4(Float(canopyCells), Float(shrubCells), reach, shrubReach),
+                                  SIMD4(redraw.map { $0 ? Float(1) : 0 } + [0])]
         enc.setComputePipelineState(casters.scatter)
         enc.setBytes(&uniforms, length: MemoryLayout<TerrainRenderer.Uniforms>.stride, index: 0)
         enc.setBytes(&p, length: p.count * 16, index: 1)
@@ -583,7 +603,7 @@ final class FloraRenderer {
         enc.endEncoding()
 
         let perCascade = FloraRenderer.plantBuckets
-        for (c, cascade) in cascades.enumerated() {
+        for (c, cascade) in cascades.enumerated() where redraw[c] {
             let pass = MTLRenderPassDescriptor()
             pass.depthAttachment.texture = casters.maps
             pass.depthAttachment.slice = c

@@ -28,6 +28,17 @@ public enum ShadowCascades {
              SIMD4(-toSun / depthRange, near / depthRange)]
         }
 
+        /// The same map seen from a camera moved from `old` to `new` (world positions): for a
+        /// map drawn on an earlier frame and looked up on this one.
+        public func rebased(from old: SIMD3<Double>, to new: SIMD3<Double>) -> Cascade {
+            let shift = old - new
+            var c = self
+            c.offset += SIMD2(ShadowCascades.dot(shift, right), ShadowCascades.dot(shift, up))
+            c.near += ShadowCascades.dot(shift, toSun)
+            c.far += ShadowCascades.dot(shift, toSun)
+            return c
+        }
+
         /// Texture coordinates (u, v) and depth (0 nearest the sun) of a camera-relative point.
         public func project(_ p: SIMD3<Double>) -> SIMD3<Double> {
             let r = clipRows

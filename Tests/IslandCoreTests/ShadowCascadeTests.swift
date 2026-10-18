@@ -74,4 +74,19 @@ final class ShadowCascadeTests: XCTestCase {
         // Depth is linear in metres along the sun: range gives the scale.
         XCTAssertEqual((c.project(p).z - c.project(p + sun * 5).z) * c.depthRange, 5, accuracy: 1e-9)
     }
+
+    /// A map drawn at one camera position still lands on the world when looked up from
+    /// another, once its cascade is re-based (maps not redrawn every frame).
+    func testRebasedCascadesKeepTheirWorldPlacement() {
+        let old = SIMD3(40_000.0, 30_000, 500), new = SIMD3(40_003.1, 29_996.4, 501.2)
+        let c = fit(eye: old, forward: SIMD3(0, 1, 0))
+        let world = SIMD3(40_012.0, 30_040.0, 497.0)
+        for i in 0..<3 {
+            let moved = c[i].rebased(from: old, to: new)
+            let a = c[i].project(world - old), b = moved.project(world - new)
+            XCTAssertEqual(a.x, b.x, accuracy: 1e-9)
+            XCTAssertEqual(a.y, b.y, accuracy: 1e-9)
+            XCTAssertEqual(a.z, b.z, accuracy: 1e-9)
+        }
+    }
 }

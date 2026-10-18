@@ -271,17 +271,20 @@ kernel void floraArguments(constant FloraParams &f [[buffer(1)]],
 // within kCasterLod0 in the nearest cascade, LOD1 within kCasterLod1 short of the far
 // cascade, impostors facing the sun beyond. A far tree casting into a near cascade (at low
 // sun, long shadows reach the camera from 100 m away) stands well above what it shades,
-// so its penumbra is wide and its mesh's detail would be lost anyway. Same placement as floraScatter
-// (the ground at its drawn LOD), so each tree meets its own shadow.
+// so its penumbra is wide and its mesh's detail would be lost anyway. The casters' cost is
+// in their vertices, not their fill: on Oʻahu's ridge at 07:00, LOD0 to 35 m and LOD1 to
+// 150 m took 2.4 and 1.6 ms for the near two maps, 20 and 60 m about half that. Same
+// placement as floraScatter (the ground at its drawn LOD), so each tree meets its shadow.
 
 // Where the caster scatter looks, laid out as FloraRenderer.renderShadows writes it.
 struct FloraCasterParams {
     float4 origins;         // first canopy cell (xy), first shrub cell (zw)
     float4 extent;          // canopy cells per side, shrub cells per side, canopy reach, shrub reach (m)
+    float4 redraw;          // per cascade: 1 if its map is drawn this frame
 };
 
 constant int kFloraPlantVariants = kFloraPlants * kFloraVariants;
-constant float kCasterLod0 = 35.0, kCasterLod1 = 150.0;
+constant float kCasterLod0 = 20.0, kCasterLod1 = 60.0;
 
 kernel void floraCasters(constant Uniforms &u [[buffer(0)]],
                          constant FloraParams &f [[buffer(1)]],
@@ -314,6 +317,7 @@ kernel void floraCasters(constant Uniforms &u [[buffer(0)]],
     int nearest = dist < kCasterLod0 ? 0 : (dist < kCasterLod1 ? 1 : 2);
     int bucket0 = (plant * kFloraVariants + variant) * kFloraLods;
     for (int c = 0; c < kTreeCascades; c++) {
+        if (s.redraw[c] == 0.0) continue;
         TreeCascade k = shadows.cascades[c];
         float across = radius / k.info.w;
         float x = dot(k.x.xyz, centre) + k.x.w, y = dot(k.y.xyz, centre) + k.y.w;
