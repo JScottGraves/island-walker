@@ -10,6 +10,8 @@ Scope rules carried over from step 1:
 - Hybrid assets: shapes are generated procedurally, and leaf, bark and frond textures come
   from CC-licensed photos (CC0 / CC BY / CC BY-SA). Credits go in `Assets/flora/CREDITS.md`.
 - Frame budget: at most **2.0 ms GPU at 2560×1440 on the M3** in the worst forest view.
+  (Since 2026-10-18 the whole frame's budget is **25 ms at 2560×1440, 40 fps**, with
+  ~21–22 ms as the working ceiling for the worst view; the trees' share is set by §10.)
   Time it with lighting and clouds on.
 
 ## 1. Pieces
@@ -144,7 +146,7 @@ What changed from the plan above while building it:
   below their base.
 - **LODs**: LOD0 to 30 m, LOD1 to 80 m (both scaled by √(height/12 m)), then an
   impostor (LOD2) to 600 m for the canopy and 120 m for shrubs, with dithered
-  cross-fades. Each impostor is the variant's LOD0 drawn once at start-up from the side
+  cross-fades. (§10 replaced the fades and moved the distances out.) Each impostor is the variant's LOD0 drawn once at start-up from the side
   into albedo and normal/AO arrays (coverage-preserving mips), shown as a camera-facing
   quad and lit with the same tail as the meshes. Without it the trees were
   geometry-bound (2.6M triangles twice a frame, +5–11 ms); the octahedral impostors of §5
@@ -220,6 +222,10 @@ replaces PR #34's ray-traced proxies, whose icosahedra and prisms (traced per 8�
     disc (0.53°) gives at that height. Trunk bases stay sharp; leaf shadows from a crown
     15 m up soften over ~15 cm, and long low-sun shadows blur as real ones do.
   - Cascades blend over the last fifth of each split.
+  - Deep in shadow (every blocker tap found leaves and the penumbra is narrower than the
+    search) the filter is skipped: most of a closed forest's floor.
+  - Crown pixels trace the terrain's rays at one per 4×4 block and take their neighbours'
+    mean, where everything else traces per 2×2 (§10).
   - Shadowed light floors at 15% (`kCrownLeak`): leaves pass some, and the LOD meshes'
     cluster cards close gaps a real crown has. Without it the floor of a closed stand was
     black.
@@ -317,8 +323,9 @@ replaces PR #34's ray-traced proxies, whose icosahedra and prisms (traced per 8�
 | seed 42 wet-forest | 13:00 | 10.54 | 10.26 | 10.98 | +0.72 | 11.35 | +0.37 |
 | seed 42 wet-forest | 16:00 | 10.96 | 10.91 | 11.24 | +0.33 | 11.41 | +0.17 |
 
-  - Every view stays under 16.7 ms. The worst is seed 42's pali at 07:00 at 15.39 ms
-    (origin/main's worst: 15.09).
+  - Every view stayed under the 16.7 ms budget of the time (now 25 ms). The worst is
+    seed 42's pali at 07:00 at 15.39 ms (origin/main's worst: 15.09). §10's timings are
+    for the build after it.
   - Against origin/main the shadow maps cost −1.3 to +1.3 ms, mostly +0.3–0.9. The
     shading pass is 0.5–1.3 ms cheaper without the tree rays; the casters cost 0.5–2 ms.
   - The 07:00 summit views' +2.1 / +2.6 for the shadow maps come from a few slow rounds
@@ -385,3 +392,131 @@ drawn; the ground under and between them now looks like ground.
   - one noise value spread over the communities by golden-ratio steps for the weight
     jitter, instead of 11 noise lookups;
   - sampling the second tiling scale only where the switch between them is under way.
+
+## 10. LOD fades and distances
+
+Scott, walking in the app: a screen door on the trees, and LOD switches too close and too
+obvious.
+
+- **The screen door** was the LOD cross-fade. Each plant inside a fade band (8 m wide
+  at every LOD boundary and at the end of the range) was drawn twice with complementary
+  screen-space dithers. With no TAA, a fixed dither reads as a stipple, on every plant in
+  the band at once. With the fades switched off, the same snapshot was clean. Alpha-test
+  mips and shadow filtering weren't involved.
+- **Fades in time, not distance** (`floraScatter`):
+  - Each plant's LOD is kept from frame to frame in a GPU table keyed by its grid cell
+    (`FloraRenderer.lodStates`, 2¹⁷ open-addressed slots). Each slot holds the current
+    LOD, the one it is fading from, the progress and the frame last seen.
+  - A plant changes LOD only once its distance is 4% past the boundary (hysteresis), then
+    dithers between the two over 0.3 s. So the dither is on the few plants crossing,
+    briefly, not on a band of plants.
+  - Leaving the range is a LOD too (not drawn): the scatter looks 8% past the range so
+    plants can fade out.
+  - Plants seen for the first time, or back in view after being culled, take their LOD
+    at once, so pops happen off screen.
+  - Snapshots step the fades 1/60 s per frame, as the app does at 60 fps.
+- **Impostors that match the mesh**:
+  - Each variant's LOD0 is baked from 8 sides (256² each, 224 layers).
+  - The impostor shows the two views nearest the direction it's seen from, in the
+    plant's own frame (its yaw included), blending colour, normal and coverage.
+  - Before, one side view was turned to face the camera and mirrored at random, so the
+    plant changed shape at the swap.
+  - The normals now point towards the viewer; the old basis had them facing away.
+  - Shadow-caster impostors use the view nearest the sun.
+  - Start-up bakes the views and builds their mips on all cores in about a second.
+- **Distances**: LOD0 to 80 m, LOD1 to 250 m (both × √(height/12 m), 0.63–1.41), then
+  impostors to 600 m. Measured at 2560×1440, 07:00, worst views:
+
+  | LOD0 / LOD1 | seed 42 ridge | seed 42 pali | Oʻahu ridge | Oʻahu mesic |
+  |---|---|---|---|---|
+  | 30 / 80 m | 12.1–12.5 | 15.1–15.2 | 14.0–14.1 | 12.3–12.5 |
+  | 80 / 250 m | 17.8–20.8 | 17.2–17.3 | 19.4–20.7 | 14.6–14.9 |
+  | 100 / 300 m | 18.6–23.8 | 18.8 | 20.3–32.0 | 16.2–16.4 |
+
+  At 100 / 300 m the ridge views came near or past the 25 ms budget; 80 / 250 m keeps
+  the worst near 21 ms. The ridge views are geometry-bound (2–2.5M tree triangles,
+  drawn in both the prepass and the shading pass). No bucket came near its 4096
+  instances (the largest held 1657).
+- **Made room along the way** (before the budget went to 25 ms; kept because they cost
+  no quality):
+  - the shadow lookup's deep-shadow early out (§8);
+  - crowns' terrain rays at one per 4×4 block: at low sun every crown pixel needs rays,
+    and LOD0 crowns cover much of a forest view.
+
+  Together about 0.8 ms on seed 42's pali at 07:00.
+
+- **Cost**: 2560×1440 GPU ms, median of 5, every automatic view plus the forest cameras.
+  "PR #36 before §10" is §9's build (shadow maps and ground textures).
+
+  | View | Hour | origin/main | PR #36 before §10 | §10 | Δ |
+  |---|---|---|---|---|---|
+  | Oʻahu coast | 07:00 | 9.46 | 10.05 | 10.62 | +0.57 |
+  | Oʻahu coast | 10:00 | 9.40 | 9.75 | 10.37 | +0.62 |
+  | Oʻahu coast | 13:00 | 9.81 | 9.97 | 10.53 | +0.56 |
+  | Oʻahu coast | 16:00 | 9.97 | 10.33 | 10.90 | +0.57 |
+  | Oʻahu dry-forest | 07:00 | 9.71 | 9.45 | 9.97 | +0.52 |
+  | Oʻahu dry-forest | 10:00 | 9.28 | 9.34 | 9.77 | +0.43 |
+  | Oʻahu dry-forest | 13:00 | 9.77 | 9.31 | 9.73 | +0.42 |
+  | Oʻahu dry-forest | 16:00 | 9.24 | 9.08 | 9.95 | +0.87 |
+  | Oʻahu mesic | 07:00 | 10.66 | 12.01 | 14.67 | +2.66 |
+  | Oʻahu mesic | 10:00 | 10.28 | 11.61 | 13.42 | +1.81 |
+  | Oʻahu mesic | 13:00 | 10.23 | 11.33 | 13.38 | +2.05 |
+  | Oʻahu mesic | 16:00 | 10.52 | 11.70 | 14.36 | +2.66 |
+  | Oʻahu pali | 07:00 | 14.52 | 13.50 | 14.56 | +1.06 |
+  | Oʻahu pali | 10:00 | 8.90 | 8.82 | 9.72 | +0.90 |
+  | Oʻahu pali | 13:00 | 8.88 | 8.86 | 9.73 | +0.87 |
+  | Oʻahu pali | 16:00 | 8.94 | 8.96 | 9.56 | +0.60 |
+  | Oʻahu ridge | 07:00 | 13.39 | 14.54 | 19.87 | +5.33 |
+  | Oʻahu ridge | 10:00 | 11.93 | 12.53 | 16.65 | +4.12 |
+  | Oʻahu ridge | 13:00 | 11.80 | 12.64 | 16.14 | +3.50 |
+  | Oʻahu ridge | 16:00 | 11.96 | 12.77 | 16.42 | +3.65 |
+  | Oʻahu riparian | 07:00 | 9.94 | 10.67 | 12.65 | +1.98 |
+  | Oʻahu riparian | 10:00 | 10.47 | 11.60 | 13.02 | +1.42 |
+  | Oʻahu riparian | 13:00 | 10.39 | 11.65 | 13.04 | +1.39 |
+  | Oʻahu riparian | 16:00 | 11.15 | 12.15 | 14.14 | +1.99 |
+  | Oʻahu summit | 07:00 | 10.47 | 10.46 | 14.68 | +4.22 |
+  | Oʻahu summit | 10:00 | 10.58 | 10.07 | 10.62 | +0.55 |
+  | Oʻahu summit | 13:00 | 9.90 | 9.47 | 10.01 | +0.54 |
+  | Oʻahu summit | 16:00 | 11.36 | 11.30 | 11.92 | +0.62 |
+  | Oʻahu wet-forest | 07:00 | 9.30 | 10.15 | 11.47 | +1.32 |
+  | Oʻahu wet-forest | 10:00 | 8.83 | 9.66 | 10.90 | +1.24 |
+  | Oʻahu wet-forest | 13:00 | 8.58 | 9.66 | 11.05 | +1.39 |
+  | Oʻahu wet-forest | 16:00 | 8.32 | 9.08 | 10.62 | +1.54 |
+  | seed 42 coast | 07:00 | 9.35 | 9.59 | 10.49 | +0.90 |
+  | seed 42 coast | 10:00 | 9.33 | 9.59 | 10.28 | +0.69 |
+  | seed 42 coast | 13:00 | 9.16 | 9.62 | 10.26 | +0.64 |
+  | seed 42 coast | 16:00 | 10.04 | 10.39 | 11.12 | +0.73 |
+  | seed 42 dry-forest | 07:00 | 10.94 | 11.11 | 12.12 | +1.01 |
+  | seed 42 dry-forest | 10:00 | 9.17 | 9.65 | 10.36 | +0.71 |
+  | seed 42 dry-forest | 13:00 | 9.02 | 9.33 | 9.99 | +0.66 |
+  | seed 42 dry-forest | 16:00 | 9.02 | 9.30 | 10.16 | +0.86 |
+  | seed 42 mesic | 07:00 | 10.82 | 11.49 | 13.92 | +2.43 |
+  | seed 42 mesic | 10:00 | 10.37 | 11.45 | 13.33 | +1.88 |
+  | seed 42 mesic | 13:00 | 10.36 | 11.29 | 12.94 | +1.65 |
+  | seed 42 mesic | 16:00 | 10.51 | 11.60 | 13.78 | +2.18 |
+  | seed 42 pali | 07:00 | 14.86 | 15.39 | 17.88 | +2.49 |
+  | seed 42 pali | 10:00 | 10.85 | 11.72 | 14.12 | +2.40 |
+  | seed 42 pali | 13:00 | 10.73 | 11.49 | 13.63 | +2.14 |
+  | seed 42 pali | 16:00 | 11.00 | 11.68 | 14.23 | +2.55 |
+  | seed 42 ridge | 07:00 | 11.26 | 12.03 | 16.04 | +4.01 |
+  | seed 42 ridge | 10:00 | 10.14 | 11.64 | 15.27 | +3.63 |
+  | seed 42 ridge | 13:00 | 10.13 | 11.43 | 14.72 | +3.29 |
+  | seed 42 ridge | 16:00 | 10.32 | 11.49 | 15.61 | +4.12 |
+  | seed 42 riparian | 07:00 | 13.84 | 12.99 | 14.81 | +1.82 |
+  | seed 42 riparian | 10:00 | 8.87 | 9.85 | 10.87 | +1.02 |
+  | seed 42 riparian | 13:00 | 8.73 | 9.75 | 10.83 | +1.08 |
+  | seed 42 riparian | 16:00 | 15.09 | 15.12 | 16.59 | +1.47 |
+  | seed 42 summit | 07:00 | 11.54 | 11.58 | 16.35 | +4.77 |
+  | seed 42 summit | 10:00 | 9.35 | 10.71 | 13.57 | +2.86 |
+  | seed 42 summit | 13:00 | 9.22 | 10.47 | 13.28 | +2.81 |
+  | seed 42 summit | 16:00 | 9.85 | 10.49 | 13.33 | +2.84 |
+  | seed 42 wet-forest | 07:00 | 10.99 | 11.51 | 16.17 | +4.66 |
+  | seed 42 wet-forest | 10:00 | 10.44 | 11.45 | 15.36 | +3.91 |
+  | seed 42 wet-forest | 13:00 | 10.26 | 11.35 | 14.94 | +3.59 |
+  | seed 42 wet-forest | 16:00 | 10.91 | 11.41 | 15.64 | +4.23 |
+
+  - The worst view is Oʻahu's ridge at 07:00 at 19.87 ms, under the 21–22 ms working
+    ceiling and the 25 ms budget.
+  - Views looking over forest from above (ridges, pali, summits, seed 42's wet forest)
+    pay 2.5–5 ms for the farther meshes. Views inside a stand or over open ground pay
+    0.4–2 ms.
