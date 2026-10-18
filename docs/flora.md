@@ -565,6 +565,16 @@ terrain far away. Built here in that order of value.
   - Same view blend, time fades (at both ends of the range) and occlusion as the trees.
   - They give ridgelines and pali edges a broken silhouette and continue the stands
     seamlessly where the single trees end.
+- **After Scott's first look** (red cliffs showing, canopy too low in contrast):
+  - On pali the mat now covers nearly all soil streaks and most of the far albedo's rock.
+    It stays near-continuous, and covers the ground wherever plants grow at all, since
+    the canopy shading draws its own gaps. Open woodland on gentle ground still shows its
+    soil, by crown cover.
+  - Contrast: gaps at 35% of the canopy colour with deep occlusion, crowns rounder than
+    hemispheres, and the clump and stand layers at nearly full strength.
+  - Cost: seed 42's pali at 07:00 went from ~16.7 to ~19.3 ms. Single runs of the
+    ridge and summit views at 07:00 ranged 14.7–23.6 ms: all within 25, but above the
+    21–22 ms working ceiling at times.
 - `floragen --sites` is unchanged.
 - Snapshots take `--eye H` to stand the camera over the canopy for distant views.
 
