@@ -591,6 +591,15 @@ terrain far away. Built here in that order of value.
     back to the averaged canopy before they alias.
   - Cost: single runs of the heaviest views at 07:00 reach ~24 ms (Oʻahu ridge, seed 42
     summit): within 25, above the 22 ms aim.
+- **After Scott's third look** (scaly cells and red earth on a wall up close, a dark seam):
+  - Pali walls no longer use crowns at all. The fern mat is its own soft texture
+    (`canopyMat`): three octaves of 3D value noise at 1.5, 6 and 30 m shading light and
+    shade, each faded out as a pixel spans it, at every distance. With no crown outlines
+    there's nothing to read as scales, and no switch between regimes to leave a seam.
+  - The mat is coloured fern green outright (hue drifting over tens of metres), not the
+    far albedo's soil, so no red returns.
+  - Crowns, clumps and stands remain for forest on gentler ground.
+  - Cost: single runs of the heaviest 07:00 views are 16–24 ms.
 - `floragen --sites` is unchanged.
 - Snapshots take `--eye H` to stand the camera over the canopy for distant views.
 

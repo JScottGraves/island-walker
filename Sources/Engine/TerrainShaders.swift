@@ -568,6 +568,44 @@ CanopyTexel canopyClumps(float2 p, ForestCover f, float3 n, float3 l) {
     return t;
 }
 
+// Value noise in 0…1 on a unit 3D lattice.
+float forestNoise3(float3 q) {
+    float3 i = floor(q), f = q - i;
+    f = f * f * (3.0 - 2.0 * f);
+    float v[8];
+    for (int k = 0; k < 8; k++) v[k] = forestHash3(i + float3(float(k & 1), float((k >> 1) & 1), float(k >> 2)), 7.0);
+    return mix(mix(mix(v[0], v[1], f.x), mix(v[2], v[3], f.x), f.y), mix(mix(v[4], v[5], f.x), mix(v[6], v[7], f.x), f.y), f.z);
+}
+
+// The fern and shrub mat on a pali wall: a continuous, soft cover (uluhe tangles over
+// everything), so no crowns and no outlines, just lumps of light and shade at a metre or
+// two, a few metres and tens of metres, each octave faded out as a pixel spans it. In 3D,
+// so it doesn't stretch down the wall.
+CanopyTexel canopyMat(float3 p, float3 n, float3 l, float footprint) {
+    float3 tx = normalize(cross(n, abs(n.z) < 0.9 ? float3(0.0, 0.0, 1.0) : float3(1.0, 0.0, 0.0)));
+    float3 ty = cross(n, tx);
+    float v = 0.0, weight = 0.0;
+    float2 slope = 0.0;
+    const float scales[3] = { 1.5, 6.0, 30.0 };
+    const float amps[3] = { 0.45, 0.35, 0.3 };
+    for (int o = 0; o < 3; o++) {
+        float k = amps[o] * (1.0 - smoothstep(0.15, 0.5, footprint / scales[o]));
+        if (k <= 0.0) continue;
+        float3 q = p / scales[o] + float(o) * 11.3;
+        float c = forestNoise3(q);
+        float e = 0.35;
+        slope += k * float2(forestNoise3(q + tx * e) - c, forestNoise3(q + ty * e) - c) / e;
+        v += k * (c - 0.5);
+        weight += k;
+    }
+    CanopyTexel t;
+    t.albedo = float3(1.0 + 1.1 * v);
+    t.normal = normalize(n - (tx * slope.x + ty * slope.y) * 0.9);
+    t.sun = saturate(0.75 + 1.5 * v + 0.3 * l.z);
+    t.occlusion = saturate(0.7 + 1.2 * v);
+    return t;
+}
+
 // The same canopy averaged over a pixel many crowns wide: mean colour, the share of what is
 // seen that the sun reaches (less at low sun, all of it looking down the sun's path), and
 // mean occlusion. Matched by eye to canopyCrowns' average where the two meet.
@@ -668,13 +706,17 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
                 // walls' crowns alias into marbled bands.
                 float footprint = d * 1.1547 / u.frame.y / max(abs(dot(n, toEyeDir)), 0.25);
                 crownDetail = 1.0 - smoothstep(0.1, 0.3, footprint / f.spacing);
-                if (crownDetail > 0.0) crowns = canopyCrowns(in.world, f, n, l);
+                if (f.mat > 0.5) {
+                    // A pali's mat: its own soft texture at every distance, filtered by octave.
+                    crowns = canopyMat(in.world, n, l, footprint);
+                    crownDetail = 1.0;
+                } else if (crownDetail > 0.0) crowns = canopyCrowns(in.world, f, n, l);
                 // Groups of crowns four times as far apart, domed and shaded the same way,
                 // carry the canopy's relief out to where single crowns are long gone.
                 ForestCover g = f;
                 g.spacing = 4.0 * f.spacing;
                 g.cover = 0.85;
-                clumpDetail = 1.0 - smoothstep(0.1, 0.3, footprint / g.spacing);
+                clumpDetail = f.mat > 0.5 ? 0.0 : 1.0 - smoothstep(0.1, 0.3, footprint / g.spacing);
                 if (clumpDetail > 0.0) clumps = canopyClumps(in.world.xy + 17.0, g, n, l);
                 average = canopyAverage(f, n, l, toEyeDir);
                 // Stands and gaps ~100 m across (sixteen crowns), which still show as a
@@ -682,7 +724,7 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
                 ForestCover st = f;
                 st.spacing = 16.0 * f.spacing;
                 st.cover = 0.85;
-                float standDetail = 1.0 - smoothstep(0.1, 0.3, footprint / st.spacing);
+                float standDetail = f.mat > 0.5 ? 0.0 : 1.0 - smoothstep(0.1, 0.3, footprint / st.spacing);
                 if (standDetail > 0.0) {
                     CanopyTexel stands = canopyClumps(in.world.xy + 53.0, st, n, l);
                     float k = 0.6 * standDetail;
@@ -722,7 +764,11 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
     sunVisibility *= 1.0 - 0.85 * sunCover;
     float3 color = litSurface(u, albedo, n, nDotL, sunVisibility, skyVisibility, 1.0 - 0.5 * underCanopy, cloudSun);
     if (forest > 0.0) {
-        float3 plants = mix(albedo, kCliffGreen, matGreen) * (0.9 + 0.2 * groundNoise(in.world.xy / 61.0 + 2.3));
+        // Foliage colour: the community's canopy, and on pali the fern green outright,
+        // whatever soil the far albedo shows beneath; hue drifting over tens of metres.
+        float drift = groundNoise(in.world.xy / 61.0 + 2.3);
+        float3 fern = kCliffGreen * float3(0.9 + 0.25 * drift, 1.0, 0.9 + 0.2 * (1.0 - drift));
+        float3 plants = mix(albedo, fern, saturate(2.0 * matGreen)) * (0.9 + 0.2 * drift);
         // The canopy lit like the ground beneath, with its crowns' normals, colour, shade and
         // occlusion; crowns and their average blended by how many fit in a pixel.
         float3 canopy = litSurface(u, plants * average.albedo, average.normal, saturate(dot(average.normal, l)),
