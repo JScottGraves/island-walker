@@ -15,12 +15,17 @@ public struct DetailMaps: Sendable {
     public var hardness: Grid?
     /// Ground colour from the native plant communities (`Look.canopyMap`).
     public var canopy: ColourMap?
+    /// The communities' weight maps in Look.communities order (all the same size), for the
+    /// ground textures; empty when the bundle has none.
+    public var communities: [Grid]
 
-    public init(rain: Grid? = nil, drainage: Grid? = nil, hardness: Grid? = nil, canopy: ColourMap? = nil) {
+    public init(rain: Grid? = nil, drainage: Grid? = nil, hardness: Grid? = nil, canopy: ColourMap? = nil,
+                communities: [Grid] = []) {
         self.rain = rain
         self.drainage = drainage
         self.hardness = hardness
         self.canopy = canopy
+        self.communities = communities
     }
 }
 

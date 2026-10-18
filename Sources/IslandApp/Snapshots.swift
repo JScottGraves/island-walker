@@ -120,9 +120,11 @@ enum Snapshots {
                     try Data(PNG.encode(rgb: rgb, width: width, height: rows)).write(to: url)
                     let s = renderer.stats
                     let passes = s.passMilliseconds.count == 3 ? s.passMilliseconds : [0, 0, 0]
-                    print(String(format: "wrote %@ (GPU %.1f ms: depth %.1f, clouds %.1f, shading %.1f; %d nodes, %d tiles, %d trees, %.1fM tree tris, %d shadow trees)",
+                    print(String(format: "wrote %@ (GPU %.1f ms: depth %.1f, clouds %.1f, shading %.1f; %d nodes, %d tiles, %d trees, %.1fM tree tris; shadow casters %@)",
                                  url.path, s.gpuMilliseconds, passes[0], passes[1], passes[2], s.nodes, s.residentTiles,
-                                 s.floraInstances, Double(s.floraTriangles) / 1e6, s.shadowTrees))
+                                 s.floraInstances, Double(s.floraTriangles) / 1e6,
+                                 s.shadowCasters.map { String(format: "%d/%.1fM", $0.instances, Double($0.triangles) / 1e6) }
+                                     .joined(separator: " ")))
                     timings += String(format: "%@,%@,%.2f,%.2f,%.2f,%.2f,%d,%d,%d,%d\n", view.name, hour.map { String($0) } ?? "reference",
                                       s.gpuMilliseconds, passes[0], passes[1], passes[2], s.nodes, s.residentTiles,
                                       s.floraInstances, s.floraTriangles)
