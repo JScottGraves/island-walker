@@ -1184,7 +1184,7 @@ tile name: &lt;level&gt;/&lt;ty&gt;_&lt;tx&gt;.lz4, row 0 south</code></pre>
         <li><b>Pali walls</b> are texture only: trees and patches stop at 40°, shrubs at 55°. Following Scott's photo of the windward Koʻolau, the wall is coloured by its shape: bright yellow-green uluhe and moss on convex ribs and less steep facets, dark wet blue-grey-green basalt on the steepest faces and in gullies (curvature from the 10 m heights over ±20 m), with fine streaks down the fall line. It starts 30 m from the camera, and the forest at the foot blends into it with no seam. Patches start 600 m from the camera in 3D, not across the map, so a high camera sees no treeless ring under it (PR #40).</li>
       </ul>
       <p><b>Occlusion culling</b> (PR #38). Last frame's depth prepass becomes a pyramid of farthest depths; a tree or patch whose nearest point lies behind everything in its screen rectangle is not drawn. The pyramid is skipped for a frame after a 2 m move or 3° turn. Forest views draw a fifth to a half of their trees, which pays for the far tiers.</p>
-      <p><b>Cost</b> at 1440p on the M3, against the 25 ms (40 fps) budget Scott set on 2026-10-18: with PR #41 the heaviest views (Oʻahu ridge and seed 42 summit at 07:00) run 17.7–24 ms. Time with the app closed: an open app window shares the GPU and inflates snapshot timings.</p>
+      <p><b>Cost</b> at 1440p on the M3, against the 25 ms (40 fps) budget Scott set on 2026-10-18: with PR #41 the heaviest view (seed 42 summit at 07:00) runs 24.0 ms and the Oʻahu pali 17.7 ms. Time with the app closed: an open app window shares the GPU and inflates snapshot timings.</p>
     </div>
   </div>
 </section>
@@ -1261,7 +1261,7 @@ tile name: &lt;level&gt;/&lt;ty&gt;_&lt;tx&gt;.lz4, row 0 south</code></pre>
         <tr><td>Debug overlay</td><td><span class="pill part">basic</span></td><td>Title bar: time, GPU ms, nodes, tiles</td></tr>
         <tr><td>Native vegetation (added)</td><td><span class="pill part">trees done</span></td><td>Biome bake, six tree and shrub species, eight-view impostors with timed LOD fades, shadow-mapped tree shadows, per-community ground textures (§5.9). Far forest to the horizon: stand patches to 2.5 km, canopy shading beyond, photo-guided pali walls, occlusion culling (PR #38).</td></tr>
         <tr><td>Real DEM import</td><td><span class="pill ok">done</span></td><td>Oʻahu at 10 m as a bundle; scoring</td></tr>
-        <tr><td>40 fps at 1440p, bake &lt; 10 min</td><td><span class="pill ok">met</span></td><td>Bake is well under. The frame budget is 25 ms since 2026-10-18 (was 16.7 ms for 60 fps); with far foliage and soft shadow edges the heaviest views run 17.7–24 ms.</td></tr>
+        <tr><td>40 fps at 1440p, bake &lt; 10 min</td><td><span class="pill ok">met</span></td><td>Bake is well under. The frame budget is 25 ms since 2026-10-18 (was 16.7 ms for 60 fps); with far foliage and soft shadow edges the heaviest view runs 24.0 ms.</td></tr>
       </tbody>
     </table>
   </div>
