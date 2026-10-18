@@ -707,3 +707,13 @@ terrain far away. Built here in that order of value.
   Also fixed: `floraCandidate` chose the trunk's CDLOD ground ring from the camera's
   height above the sea, not above the ground, which put trees on far rings' surfaces
   under a high camera.
+
+- **Comb along terrain-shadow edges at low sun** (2026-10-18): the terrain's sun rays trace
+  the overview mesh (78 m cells on Oʻahu). A ridge of it is a row of flat triangles, and at
+  low sun each one's edge cast a straight tooth. The penumbra (a 1° cone, two rays beyond
+  4 km) was far narrower than a cell at the occluder's distance, so the teeth stayed hard.
+  Now, where the first two rays disagree, eight rays sample a cone wide enough that the
+  penumbra spans at least one cell where the occluder stands (from the hit distance).
+  Pass 1 takes the mean of its traced 2×2 neighbours on the same surface instead of
+  tracing again, which keeps the cost flat (worst single run 24.0 ms, seed 42 summit 07:00).
+
