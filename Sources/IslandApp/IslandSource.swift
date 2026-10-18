@@ -45,8 +45,9 @@ enum IslandSource {
         return (GridTerrain(height: grid, seaLevel: 0), clouds(for: grid))
     }
 
-    /// The bake's rain, drainage and hardness maps, to shape the renderer's fine detail:
-    /// from the bundle (whichever channels it has), or none for a bare heightfield.
+    /// The bake's rain, drainage and hardness maps, to shape the renderer's fine detail, and
+    /// its plant-community maps, to colour the ground: from the bundle (whichever channels
+    /// it has), or none for a bare heightfield.
     static func detailMaps() -> DetailMaps? {
         guard let bundle = bundle() else { return nil }
         func map(_ name: String) -> Grid? {
@@ -59,7 +60,9 @@ enum IslandSource {
         for (channel, _) in Look.communities { weights[channel] = map(channel) }
         let domain = (try? bundle.channel("height")).map { Double($0.size) * $0.cellMetres } ?? 0
         let canopy = domain > 0 ? Look.canopyMap(weights: weights, domain: domain) : nil
-        return DetailMaps(rain: map("rain"), drainage: map("drainage"), hardness: map("hardness"), canopy: canopy)
+        let communities = Look.communities.compactMap { weights[$0.channel] }
+        return DetailMaps(rain: map("rain"), drainage: map("drainage"), hardness: map("hardness"), canopy: canopy,
+                          communities: communities.count == Look.communities.count ? communities : [])
     }
 
     /// The plant-community maps the native trees are scattered from, or nil with

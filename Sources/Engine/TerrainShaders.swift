@@ -286,6 +286,117 @@ float4 finishSurface(constant Uniforms &u, texture2d<float> skyView, texture2d<f
     return float4(pbrNeutral(color * u.exposure), 1.0);
 }
 
+// ---- Ground textures (GroundTextures; docs/flora.md §9) ----
+// Near the camera the ground shows its community's tileable texture (litter, soil, sand,
+// moss, rock) instead of the canopy colour seen from above, fading back to it between
+// kGroundNear and kGroundFar.
+constant float kGroundNear = 150.0, kGroundFar = 300.0;
+// Metres per repeat of the two scales the texture is laid at.
+constant float kGroundTile = 2.0, kGroundTileWide = 5.3;
+constant int kGroundLayers = 11;    // communities; bare rock follows
+constant int kGroundRock = 11;
+
+// Value noise in 0…1 on a unit lattice.
+float groundNoise(float2 q) {
+    float2 i = floor(q), f = q - i;
+    f = f * f * (3.0 - 2.0 * f);
+    float v[4];
+    for (int k = 0; k < 4; k++) {
+        float2 c = i + float2(float(k & 1), float(k >> 1));
+        uint h = uint(int(c.x)) * 0x8da6b343u ^ uint(int(c.y)) * 0xd8163841u;
+        h ^= h >> 15; h *= 0x2c1b3c6du; h ^= h >> 12;
+        v[k] = float(h & 0xffffu) / 65535.0;
+    }
+    return mix(mix(v[0], v[1], f.x), mix(v[2], v[3], f.x), f.y);
+}
+
+struct GroundTexel {
+    float4 albedo;          // rgb linear, a height 0…1
+    float3 normal;          // tangent space: x along world x, y along world y, z out
+};
+
+// One layer at two scales, the wider one turned, switched between by a noise field tens
+// of metres across, so neither repeat lines up into a grid.
+GroundTexel groundLayer(texture2d_array<float> albedo, texture2d_array<float> normal, int layer, float2 p, float wide) {
+    constexpr sampler s(filter::linear, mip_filter::linear, address::repeat, max_anisotropy(8));
+    float2 a = p / kGroundTile;
+    float2 b = float2(0.8 * p.x - 0.6 * p.y, 0.6 * p.x + 0.8 * p.y) / kGroundTileWide + 0.37;
+    // Normal maps: OpenGL x and y in red and green, height in blue.
+    // Only where the switch between them is under way does a pixel sample both.
+    float3 pa = 0.0, pb = 0.0, ca = 0.0, cb = 0.0;
+    if (wide < 0.99) {
+        pa = normal.sample(s, a, uint(layer)).xyz;
+        ca = albedo.sample(s, a, uint(layer)).rgb;
+    }
+    if (wide > 0.01) {
+        pb = normal.sample(s, b, uint(layer)).xyz;
+        cb = albedo.sample(s, b, uint(layer)).rgb;
+    }
+    float2 na = pa.xy * 2.0 - 1.0, nb = pb.xy * 2.0 - 1.0;
+    // The wider scale's normal turned back into world axes.
+    nb = float2(0.8 * nb.x + 0.6 * nb.y, -0.6 * nb.x + 0.8 * nb.y);
+    GroundTexel t;
+    t.albedo = float4(mix(ca, cb, wide), mix(pa.z, pb.z, wide));
+    // OpenGL normals: y up the image, and v runs down it, so world y is −y.
+    float2 n = mix(na, nb, wide);
+    t.normal = float3(n.x, -n.y, sqrt(saturate(1.0 - dot(n, n))));
+    return t;
+}
+
+// Blends b over a by `t` (0…1), letting the higher texels of each poke through the other
+// over a short height band, so borders break up along stones and litter, not smoothly. A
+// layer needs about a quarter share before its highest texels show through.
+GroundTexel heightBlend(GroundTexel a, GroundTexel b, float t) {
+    float ha = 0.5 * a.albedo.a + (1.0 - t), hb = 0.5 * b.albedo.a + t;
+    float top = max(ha, hb) - 0.15;
+    float wa = max(ha - top, 0.0), wb = max(hb - top, 0.0);
+    float k = wb / max(wa + wb, 1e-4);
+    GroundTexel o;
+    o.albedo = mix(a.albedo, b.albedo, k);
+    o.normal = mix(a.normal, b.normal, k);
+    return o;
+}
+
+// The textured ground at p: the two communities weighing most there (the weights carry the
+// ecotone noise already; a little more breaks the bilinear ramps between 80 m texels into
+// patches), slope-weighted rock as in terrainAlbedo, sand at the waterline. Writes the
+// shading normal through `n`.
+float3 groundTexture(texture2d_array<float> albedo, texture2d_array<float> normal, texture2d<float> w0,
+                     texture2d<float> w1, texture2d<float> w2, float2 p, float uvScale, float above, float slope,
+                     thread float3 &n) {
+    constexpr sampler linear(filter::linear, address::clamp_to_edge);
+    float2 uv = p * uvScale;
+    float4 a = w0.sample(linear, uv), b = w1.sample(linear, uv), c = w2.sample(linear, uv);
+    float w[kGroundLayers] = { a.x, a.y, a.z, a.w, b.x, b.y, b.z, b.w, c.x, c.y, c.z };
+    int first = 0, second = 1;
+    float wf = -1.0, ws = -1.0;
+    // One noise value, spread over the communities by golden-ratio steps.
+    float jitter = groundNoise(p / 9.0);
+    for (int i = 0; i < kGroundLayers; i++) {
+        float v = w[i] * (0.75 + 0.5 * fract(jitter + 0.618034 * float(i)));
+        if (v > wf) { second = first; ws = wf; first = i; wf = v; }
+        else if (v > ws) { second = i; ws = v; }
+    }
+    float wide = smoothstep(0.35, 0.65, groundNoise(p / 23.0 + 11.0));
+    GroundTexel t = groundLayer(albedo, normal, first, p, wide);
+    float share = ws / max(wf + ws, 1e-4);
+    if (share > 0.02) t = heightBlend(t, groundLayer(albedo, normal, second, p, wide), share);
+    // Sand where the far albedo has it, a band just above the waterline on gentle slopes,
+    // but only along the shore: dry forest on a low plain stands on its own soil.
+    float sand = (1.0 - max(smoothstep(1.0, 3.0, above), smoothstep(0.1, 0.25, slope))) * saturate(2.0 * (a.x + a.y));
+    if (sand > 0.01 && first != 0) t = heightBlend(t, groundLayer(albedo, normal, 0, p, wide), sand);
+    float rock = smoothstep(0.4, 0.7, slope) * (0.2 + 0.6 * (1.0 - exposure(p)));
+    if (rock > 0.01) t = heightBlend(t, groundLayer(albedo, normal, kGroundRock, p, wide), rock);
+    // Brightness drifting over a few metres, as wetness and litter do.
+    float3 colour = t.albedo.rgb * (0.88 + 0.24 * groundNoise(p / 3.7 + 5.0));
+    float3 tx = normalize(float3(1.0, 0.0, 0.0) - n * n.x);
+    float3 ty = cross(n, tx);
+    // The maps' relief at 60%: at full strength the deepest crevices turn from the sun
+    // into black specks.
+    n = normalize((tx * t.normal.x + ty * t.normal.y) * 0.6 + n * max(t.normal.z, 0.05));
+    return colour;
+}
+
 // Mirrors Look.lit and GroundView.shade; constants come from Look.metalPrelude, the sun
 // and sky from SunLight through the uniforms.
 fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buffer(1)]],
@@ -297,6 +408,11 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
                                 texture2d<float, access::read> tracedSun [[texture(5), function_constant(kRayTraced)]],
                                 texture2d<float> canopyMap [[texture(6)]],
                                 texture2d<float> canopyCover [[texture(7)]],
+                                texture2d_array<float> groundAlbedo [[texture(12)]],
+                                texture2d_array<float> groundNormal [[texture(13)]],
+                                texture2d<float> groundWeights0 [[texture(14)]],
+                                texture2d<float> groundWeights1 [[texture(15)]],
+                                texture2d<float> groundWeights2 [[texture(16)]],
                                 constant float2 &floraRange [[buffer(2)]]) {
     float3 n = normalize(in.normal);
     float slope = 1.0 - n.z;
@@ -318,8 +434,21 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
     } else {
         constexpr sampler linear(filter::linear, address::clamp_to_edge);
         float4 canopy = canopyMap.sample(linear, in.world.xy / u.cloudLayer.w);
-        albedo = terrainAlbedo(in.world.xy, h, slope, u.maxHeight, canopy);
+        // A 1×1 weight map: no communities in the bundle, so no ground textures.
+        bool communities = groundWeights0.get_width() > 1;
+        // The waterline's sand band only along the shore (strand and rocky shore weights),
+        // as groundTexture has it: dry forest on a low plain stands on its own soil.
+        float shore = communities ? saturate(2.0 * dot(groundWeights0.sample(linear, in.world.xy / u.cloudLayer.w).xy, float2(1.0))) : 1.0;
+        albedo = terrainAlbedo(in.world.xy, max(h, 3.0 * (1.0 - shore)), slope, u.maxHeight, canopy);
         float d = distance(u.cameraPosition, in.world);
+        float near = communities ? 1.0 - smoothstep(kGroundNear, kGroundFar, d) : 0.0;
+        if (near > 0.0) {
+            float3 textured = n;
+            float3 ground = groundTexture(groundAlbedo, groundNormal, groundWeights0, groundWeights1, groundWeights2,
+                                          in.world.xy, 1.0 / u.cloudLayer.w, h, slope, textured);
+            albedo = mix(albedo, ground, near);
+            n = normalize(mix(n, textured, near));
+        }
         float nearby = 1.0 - smoothstep(floraRange.x - 100.0, floraRange.x, d);
         if (nearby > 0.0) underCanopy = nearby * canopyCover.sample(linear, in.world.xy / u.cloudLayer.w).r;
         sunCover = underCanopy * smoothstep(floraRange.y - kTreeShadowFade, floraRange.y, d);

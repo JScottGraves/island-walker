@@ -383,11 +383,12 @@ final class FloraRenderer {
         return (albedo, normal)
     }
 
-    static func textureArray(device: MTLDevice, images: [FloraTextures.Image]) throws -> MTLTexture {
+    static func textureArray(device: MTLDevice, images: [FloraTextures.Image],
+                             format: MTLPixelFormat = .rgba8Unorm_srgb) throws -> MTLTexture {
         guard let size = images.first?.size else { throw RendererError.setup("flora textures") }
         let desc = MTLTextureDescriptor()
         desc.textureType = .type2DArray
-        desc.pixelFormat = .rgba8Unorm_srgb
+        desc.pixelFormat = format
         desc.width = size
         desc.height = size
         desc.arrayLength = images.count

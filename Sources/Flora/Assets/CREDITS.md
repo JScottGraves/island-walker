@@ -18,3 +18,5 @@ source licence; the CC BY-SA ones are shared alike under the same licence.
 | `loulu-bark.png` | [Starr-130411-3984-Pritchardia munroi-trunk-Pololei Haiku-Maui (25091753622).jpg](https://commons.wikimedia.org/wiki/File:Starr-130411-3984-Pritchardia_munroi-trunk-Pololei_Haiku-Maui_(25091753622).jpg) | Forest and Kim Starr | [CC BY 3.0 us](https://creativecommons.org/licenses/by/3.0/us/deed.en) | Crop, flattened, tileable. Trunk of P. munroi (the Oʻahu loulu trunks are alike). |
 | `aalii-bark.png` | [Dodonaea viscosa (5188013052).jpg](https://commons.wikimedia.org/wiki/File:Dodonaea_viscosa_(5188013052).jpg) | David  Eickhoff from Pearl City, Hawaii, USA | [CC BY 2.0](https://creativecommons.org/licenses/by/2.0) | Crop, flattened, tileable. |
 | `hapuu-bark.png` | — | — | — | **Drawn procedurally** (no photo of the fibrous trunk cut cleanly). |
+
+Ground textures (`ground/`) come from CC0 ambientCG materials: see `ground/CREDITS.md`.

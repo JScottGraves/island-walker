@@ -111,6 +111,12 @@ public final class TerrainRenderer {
     let detail: TerrainDetail
     /// Plant-community ground colour (rgb) with alpha 1, or one texel of alpha 0 without one.
     let canopy: MTLTexture
+    /// Tileable ground per plant community and bare rock (GroundTextures): colour with height
+    /// in alpha, and normals; and the community weights they are blended by, packed four to
+    /// a texture (all-zero without them, which leaves the plain community colours).
+    let groundAlbedo: MTLTexture
+    let groundNormal: MTLTexture
+    let groundWeights: [MTLTexture]
     /// Fraction of the ground the tree crowns cover (r32Float), for shading the floor under
     /// the drawn trees until they cast shadows (zero without trees).
     let canopyCover: MTLTexture
@@ -266,6 +272,12 @@ public final class TerrainRenderer {
                                    seaLevel: terrain.seaLevel, seed: TerrainDetail.seed(of: overview), maps: detailMaps)
         canopy = try TerrainRenderer.canopyTexture(device: device, map: detailMaps?.canopy)
         canopyCover = try TerrainRenderer.canopyCoverTexture(device: device, maps: floraMaps)
+        let ground = try GroundTextures.load()
+        groundAlbedo = try FloraRenderer.textureArray(device: device, images: ground.albedo)
+        groundNormal = try FloraRenderer.textureArray(device: device, images: ground.normal, format: .rgba8Unorm)
+        let communities = detailMaps?.communities ?? []
+        groundWeights = try FloraRenderer.biomeTextures(device: device,
+                                                        maps: communities.isEmpty ? nil : FloraMaps(weights: communities, site: nil))
         flora = floraMaps != nil || floraSpecimens
             ? try FloraRenderer(device: device, library: library, constants: constants, colorFormat: colorFormat,
                                 depthFormat: depthFormat, rayTraced: shadows == .rayTraced, treeShadows: treeShadows,
@@ -869,6 +881,7 @@ public final class TerrainRenderer {
         if let sun = targets.sun { shade.setFragmentTexture(sun, index: 5) }
         shade.setFragmentTexture(canopy, index: 6)
         shade.setFragmentTexture(canopyCover, index: 7)
+        shade.setFragmentTextures([groundAlbedo, groundNormal] + groundWeights, range: 12..<17)
         var floraRange = SIMD2<Float>(flora?.canopyRange ?? 0, flora?.casters != nil ? flora?.shadowRange ?? 0 : 0)
         shade.setFragmentBytes(&floraRange, length: 8, index: 2)
         drawTerrain(shade, frame: frameTerrain)
