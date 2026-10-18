@@ -40,9 +40,11 @@ public enum Communities {
               shrubs: 600, shrubShares: [(.ohiaDwarf, 1)]),
         Entry(channel: "biome-bog", canopy: 0, canopyShares: [],
               shrubs: 80, shrubShares: [(.ohiaDwarf, 1)]),
+        // Pali walls: a few ʻōhiʻa and loulu over a dense layer of shrubs and tree ferns, as
+        // the Koʻolau's are (with uluhe fern, which the far canopy shading stands in for).
         Entry(channel: "biome-cliff", canopy: 40,
               canopyShares: [(.ohia, 0.5), (.loulu, 0.3), (.aalii, 0.2)],
-              shrubs: 60, shrubShares: [(.aalii, 1)]),
+              shrubs: 500, shrubShares: [(.aalii, 0.45), (.ohiaDwarf, 0.35), (.hapuu, 0.2)]),
         Entry(channel: "biome-montane", canopy: 300,
               canopyShares: [(.koa, 0.55), (.ohia, 0.45)],
               shrubs: 0, shrubShares: []),

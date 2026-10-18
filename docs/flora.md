@@ -520,3 +520,181 @@ obvious.
   - Views looking over forest from above (ridges, pali, summits, seed 42's wet forest)
     pay 2.5–5 ms for the farther meshes. Views inside a stand or over open ground pay
     0.4–2 ms.
+
+## 11. Far foliage
+
+Scott wanted to see foliage on distant pali. Research notes (Crimson Desert, Nanite
+Foliage in the Witcher 4 demo, Ghost of Tsushima and Yōtei, Bruneton & Neyret 2012) are in
+`flora-out/far-foliage-research.md` on the Mac. The common shape is three tiers:
+individual trees near, aggregated stands in the middle distance, and forest folded into the
+terrain far away. Built here in that order of value.
+
+- **Canopy shading on far terrain** (`terrainFragment`, from the ground textures' 150 m
+  outwards, under the drawn trees once they end):
+  - Each community's crown cover and spacing come from its stems per hectare (as
+    `canopyCoverTexture` has them), varied by a clumping noise tens of metres across.
+  - Crowns while they span a pixel or more: domes on a jittered grid, each lit with its own
+    normal, its flanks in its neighbours' shade at low sun, the gaps dark.
+  - Then clumps of crowns, four spacings across, then stands about 100 m across. Each
+    tilts the normal and shades the averaged canopy, so relief carries out to where single
+    crowns are long gone.
+  - Past all of them the average: the crowns' mean colour, the share in sun (less at low
+    sun, all of it in the hotspot looking down-sun) and mean occlusion.
+- **Pali vegetation**:
+  - Canopy trees are now placed on slopes to ~50° and shrubs and ferns to ~70°.
+  - The cliff community has a dense layer of ʻaʻaliʻi, dwarf ʻōhiʻa and hāpuʻu.
+  - Further out, steep vegetated ground carries a fern-green mat (uluhe) over most of the
+    far albedo's soil streaks and half its rock, with the same crown shading. The
+    Koʻolau's walls read green to the crest, with red erosion still breaking through.
+- **Occlusion culling** (`floraOccluded`, `FloraRenderer.buildHzb`):
+  - Last frame's depth prepass becomes a pyramid of farthest depths.
+  - A tree (or patch) whose nearest point lies behind everything in its screen rectangle
+    there isn't drawn.
+  - Trees outside last frame's view count as visible. The pyramid isn't used after the
+    camera moves 2 m or turns 3°.
+  - Renders match unculled ones to ≤0.06% of pixels. A fifth to a half of the trees are
+    drawn in forest views, saving 0.5–2 ms there.
+- **Stand patches** (`floraPatches`, `FloraRenderer.bakePatches`), 600 m to 2.5 km:
+  - At start-up each community's stand is baked as a 24 m patch, from LOD0 trees at a
+    middling site, in the impostors' eight views.
+  - Shrubs are included only where they are the cover seen from afar (no canopy, cloud
+    shrubland, pali). Elsewhere single shrubs end at 120 m and a canopy hides them.
+  - Each forested 24 m cell is one camera-facing card of its community's patch: random
+    yaw, ±15% size, sunk 15% so slopes show no daylight beneath.
+  - Cells are kept by the patch's crown cover.
+  - Same view blend, time fades (at both ends of the range) and occlusion as the trees.
+  - They give ridgelines and pali edges a broken silhouette and continue the stands
+    seamlessly where the single trees end.
+- **After Scott's first look** (red cliffs showing, canopy too low in contrast):
+  - On pali the mat now covers nearly all soil streaks and most of the far albedo's rock.
+    It stays near-continuous, and covers the ground wherever plants grow at all, since
+    the canopy shading draws its own gaps. Open woodland on gentle ground still shows its
+    soil, by crown cover.
+  - Contrast: gaps at 35% of the canopy colour with deep occlusion, crowns rounder than
+    hemispheres, and the clump and stand layers at nearly full strength.
+  - Cost: seed 42's pali at 07:00 went from ~16.7 to ~19.3 ms. Single runs of the
+    ridge and summit views at 07:00 ranged 14.7–23.6 ms: all within 25, but above the
+    21–22 ms working ceiling at times.
+- **After Scott's second look** (ridge trees too big, slivers on the walls, marbled walls):
+  - Stand patches are 12 m (two to six trees) instead of 24 m, so ridgeline silhouettes are
+    tree-sized. None stand on slopes over 45°, where a card stood off the wall as a sliver;
+    the canopy shading covers those.
+  - The marbling was the crown spacing varying smoothly over the ground (the mat's share
+    follows the slope): a pattern whose scale drifts across a surface is squeezed into
+    rings. Spacing now comes in half-octave steps and is the mat's or the trees', never a
+    mix.
+  - Single crowns are laid out in 3D (a sphere round each cuts any surface into round
+    discs), so they don't stretch down steep walls. Clumps and stands stay on the map's
+    plane, which is cheaper, and their normals are gentle so they read as light and shade,
+    not bubbles.
+  - The crowns' footprint test counts the viewing angle, so walls seen at a slant fall
+    back to the averaged canopy before they alias.
+  - Cost: single runs of the heaviest views at 07:00 reach ~24 ms (Oʻahu ridge, seed 42
+    summit): within 25, above the 22 ms aim.
+- **After Scott's third look** (scaly cells and red earth on a wall up close, a dark seam):
+  - Pali walls no longer use crowns at all. The fern mat is its own soft texture
+    (`canopyMat`): three octaves of 3D value noise at 1.5, 6 and 30 m shading light and
+    shade, each faded out as a pixel spans it, at every distance. With no crown outlines
+    there's nothing to read as scales, and no switch between regimes to leave a seam.
+  - The mat is coloured fern green outright (hue drifting over tens of metres), not the
+    far albedo's soil, so no red returns.
+  - Crowns, clumps and stands remain for forest on gentler ground.
+  - Cost: single runs of the heaviest 07:00 views are 16–24 ms.
+- **Scott's photo of the windward Koʻolau** as the guide (2026-10-18):
+  - No accent trees on the walls: canopy trees back to slopes ≤40°, shrubs ≤55°, stand
+    patches ≤40°. Past 40° the ground is the wall's, whatever community the weights name.
+  - The wall is coloured by its shape (`paliWall`), not by noise. Bright yellow-green
+    uluhe and moss on the less steep facets and convex ribs; dark blue-grey-green wet
+    basalt on the steepest faces and in concave gullies; grey rock on the steepest
+    concave faces. Curvature is the 10 m heights' Laplacian over ±20 m, from the vertex
+    shader (`VOut.ridge`).
+  - Fine streaks run down the fall line: noise stretched 10× along it, at 2 m and 9 m,
+    each filtered by footprint. Gullies are darker through occlusion.
+  - The forest at the foot keeps its crowns, blended into the wall's texture over a
+    range of slope, with no seam.
+  - The wall's shading starts 30 m from the camera rather than at the ground textures'
+    150 m, so close walls aren't red soil texture.
+  - Lookout used for the comparison: `--camera koolau=55200,34000,-125,7 --eye 120`
+    (Kāneʻohe side, ~4 km from the crest).
+  - Cost: Oʻahu ridge at 07:00 17–22 ms (one 27 ms outlier in eight runs); seed 42
+    summit 22.5.
+- `floragen --sites` is unchanged.
+- Snapshots take `--eye H` to stand the camera over the canopy for distant views.
+
+- **Cost**: 2560×1440 GPU ms, median of 5, every automatic view plus the forest cameras,
+  against §10's build (main after PR #36).
+
+  | View | Hour | main (PR #36) | far foliage | Δ |
+  |---|---|---|---|---|
+  | Oʻahu coast | 07:00 | 10.62 | 11.39 | +0.77 |
+  | Oʻahu coast | 10:00 | 10.37 | 11.35 | +0.98 |
+  | Oʻahu coast | 13:00 | 10.53 | 11.57 | +1.04 |
+  | Oʻahu coast | 16:00 | 10.90 | 11.71 | +0.81 |
+  | Oʻahu dry-forest | 07:00 | 9.97 | 10.37 | +0.40 |
+  | Oʻahu dry-forest | 10:00 | 9.77 | 10.53 | +0.76 |
+  | Oʻahu dry-forest | 13:00 | 9.73 | 10.36 | +0.63 |
+  | Oʻahu dry-forest | 16:00 | 9.95 | 10.26 | +0.31 |
+  | Oʻahu mesic | 07:00 | 14.67 | 14.51 | -0.16 |
+  | Oʻahu mesic | 10:00 | 13.42 | 13.09 | -0.33 |
+  | Oʻahu mesic | 13:00 | 13.38 | 13.05 | -0.33 |
+  | Oʻahu mesic | 16:00 | 14.36 | 13.85 | -0.51 |
+  | Oʻahu pali | 07:00 | 14.56 | 15.30 | +0.74 |
+  | Oʻahu pali | 10:00 | 9.72 | 10.89 | +1.17 |
+  | Oʻahu pali | 13:00 | 9.73 | 10.98 | +1.25 |
+  | Oʻahu pali | 16:00 | 9.56 | 10.94 | +1.38 |
+  | Oʻahu ridge | 07:00 | 19.87 | 21.09 | +1.22 |
+  | Oʻahu ridge | 10:00 | 16.65 | 15.18 | -1.47 |
+  | Oʻahu ridge | 13:00 | 16.14 | 15.11 | -1.03 |
+  | Oʻahu ridge | 16:00 | 16.42 | 15.22 | -1.20 |
+  | Oʻahu riparian | 07:00 | 12.65 | 12.87 | +0.22 |
+  | Oʻahu riparian | 10:00 | 13.02 | 13.05 | +0.03 |
+  | Oʻahu riparian | 13:00 | 13.04 | 13.11 | +0.07 |
+  | Oʻahu riparian | 16:00 | 14.14 | 14.20 | +0.06 |
+  | Oʻahu summit | 07:00 | 14.68 | 14.38 | -0.30 |
+  | Oʻahu summit | 10:00 | 10.62 | 11.86 | +1.24 |
+  | Oʻahu summit | 13:00 | 10.01 | 11.13 | +1.12 |
+  | Oʻahu summit | 16:00 | 11.92 | 12.85 | +0.93 |
+  | Oʻahu wet-forest | 07:00 | 11.47 | 12.90 | +1.43 |
+  | Oʻahu wet-forest | 10:00 | 10.90 | 12.59 | +1.69 |
+  | Oʻahu wet-forest | 13:00 | 11.05 | 12.70 | +1.65 |
+  | Oʻahu wet-forest | 16:00 | 10.62 | 12.07 | +1.45 |
+  | seed 42 coast | 07:00 | 10.49 | 10.79 | +0.30 |
+  | seed 42 coast | 10:00 | 10.28 | 10.79 | +0.51 |
+  | seed 42 coast | 13:00 | 10.26 | 10.64 | +0.38 |
+  | seed 42 coast | 16:00 | 11.12 | 11.84 | +0.72 |
+  | seed 42 dry-forest | 07:00 | 12.12 | 12.55 | +0.43 |
+  | seed 42 dry-forest | 10:00 | 10.36 | 10.92 | +0.56 |
+  | seed 42 dry-forest | 13:00 | 9.99 | 11.01 | +1.02 |
+  | seed 42 dry-forest | 16:00 | 10.16 | 11.28 | +1.12 |
+  | seed 42 mesic | 07:00 | 13.92 | 13.86 | -0.06 |
+  | seed 42 mesic | 10:00 | 13.33 | 12.79 | -0.54 |
+  | seed 42 mesic | 13:00 | 12.94 | 12.75 | -0.19 |
+  | seed 42 mesic | 16:00 | 13.78 | 13.59 | -0.19 |
+  | seed 42 pali | 07:00 | 17.88 | 16.66 | -1.22 |
+  | seed 42 pali | 10:00 | 14.12 | 13.97 | -0.15 |
+  | seed 42 pali | 13:00 | 13.63 | 13.23 | -0.40 |
+  | seed 42 pali | 16:00 | 14.23 | 13.74 | -0.49 |
+  | seed 42 ridge | 07:00 | 16.04 | 14.58 | -1.46 |
+  | seed 42 ridge | 10:00 | 15.27 | 13.90 | -1.37 |
+  | seed 42 ridge | 13:00 | 14.72 | 13.20 | -1.52 |
+  | seed 42 ridge | 16:00 | 15.61 | 13.92 | -1.69 |
+  | seed 42 riparian | 07:00 | 14.81 | 14.17 | -0.64 |
+  | seed 42 riparian | 10:00 | 10.87 | 10.79 | -0.08 |
+  | seed 42 riparian | 13:00 | 10.83 | 10.85 | +0.02 |
+  | seed 42 riparian | 16:00 | 16.59 | 16.23 | -0.36 |
+  | seed 42 summit | 07:00 | 16.35 | 21.08 | +4.73 |
+  | seed 42 summit | 10:00 | 13.57 | 13.11 | -0.46 |
+  | seed 42 summit | 13:00 | 13.28 | 12.73 | -0.55 |
+  | seed 42 summit | 16:00 | 13.33 | 12.81 | -0.52 |
+  | seed 42 wet-forest | 07:00 | 16.17 | 14.47 | -1.70 |
+  | seed 42 wet-forest | 10:00 | 15.36 | 13.55 | -1.81 |
+  | seed 42 wet-forest | 13:00 | 14.94 | 13.45 | -1.49 |
+  | seed 42 wet-forest | 16:00 | 15.64 | 14.38 | -1.26 |
+
+  - The worst view is Oʻahu's ridge at 07:00 at 21.09 ms, within the 21–22 ms working
+    ceiling of the 25 ms budget.
+  - Forest views come out cheaper than before (−0.2 to −1.8 ms): occlusion culling saves
+    more than the far shading and the patches cost.
+  - Open views over far terrain pay +0.3 to +1.7 ms for the canopy shading and patches.
+  - Seed 42's summit at 07:00 (+4.7) is an outlier of that low-sun view, as in §8's
+    summit figures; its other hours are cheaper than before.

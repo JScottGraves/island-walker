@@ -15,7 +15,8 @@ import IslandGen
 /// of ray-traced shadows. `--size 2560x1440` sets the resolution (default 1280x720).
 /// `--detail off` draws only the bundle's own grid, without the generated fine detail;
 /// `--pitch DEG` looks that far below the horizon from every viewpoint (ground close-ups).
-/// `--flora off` draws no trees (for A/B timing). `--camera X,Y,YAW,PITCH` (metres,
+/// `--flora off` draws no trees (for A/B timing). `--eye H` stands the camera H metres
+/// above the ground instead of 1.7 (over the canopy, for distant views). `--camera X,Y,YAW,PITCH` (metres,
 /// degrees; yaw clockwise from north, pitch up) adds a view named camN, or NAME=X,Y,YAW,PITCH
 /// one named NAME; repeat it for more. `--views a,b` renders only the views named.
 /// Each view's GPU frame time is printed and written to timings.csv.
@@ -99,7 +100,7 @@ enum Snapshots {
             for view in views where only?.contains(view.name) ?? true {
                 var c = view.camera
                 renderer.prepareGround(x: c.x, y: c.y)
-                c.z = renderer.groundHeight(x: c.x, y: c.y) + 1.7
+                c.z = renderer.groundHeight(x: c.x, y: c.y) + (option("--eye").flatMap(Double.init) ?? 1.7)
                 if let degrees = option("--pitch").flatMap(Double.init) { c.pitch = -degrees * .pi / 180 }
                 let forward = SIMD3<Float>(Float(sin(c.yaw) * cos(c.pitch)), Float(cos(c.yaw) * cos(c.pitch)), Float(sin(c.pitch)))
                 // nil: the reference sun.
