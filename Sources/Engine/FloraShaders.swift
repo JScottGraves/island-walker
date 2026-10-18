@@ -853,7 +853,7 @@ fragment float4 floraImpostorFragment(FloraImpostorOut in [[stage_in]], constant
 }
 
 // ---- Stand patches (docs/flora.md §11) ----
-// Beyond the single trees, out to a few kilometres, each forested 24 m cell is one
+// Beyond the single trees, out to a few kilometres, each forested 12 m cell is one
 // camera-facing card showing a patch of its community's stand, baked from LOD0 trees in
 // the impostors' eight views (FloraRenderer.bakePatches). They give ridgelines and pali
 // edges their broken silhouette. Same view selection, LOD fades and occlusion as the trees.
@@ -933,7 +933,8 @@ kernel void floraPatches(constant Uniforms &u [[buffer(0)]],
     if (floraRandom(h, 3) >= 1.3 * e.y) return;
     float2 gradient;
     float ground = floraGround(t, d, detail, pages, tiles, xy, length(rel), gradient);
-    if (ground < f.lods.z + 0.5) return;
+    // Walls steeper than 45° are the canopy shading's: a card there stands off the slope.
+    if (ground < f.lods.z + 0.5 || length(gradient) > 1.0) return;
 
     FloraInstance inst;
     float scale = 0.85 + 0.3 * floraRandom(h, 4);

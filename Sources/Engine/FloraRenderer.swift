@@ -136,8 +136,8 @@ final class FloraRenderer {
     /// Stand patches (floraPatches): one card per forested `patchCell` beyond the single
     /// trees, out to `patchRange`, showing a patch of its community baked in the impostors'
     /// views. Per community: half-width, crown cover, height (m) in `patchExtents`.
-    static let patchCell = 24.0
-    static let patchCapacity = 16384
+    static let patchCell = 12.0
+    static let patchCapacity = 32768
     var patchRange: Float = 2500
     let patchAlbedo: MTLTexture
     let patchNormal: MTLTexture
@@ -448,7 +448,7 @@ final class FloraRenderer {
         return (albedo, normal)
     }
 
-    /// Bakes one 24 m patch of each community's stand (Communities.table, at a middling site)
+    /// Bakes one 12 m patch (two to six trees) of each community's stand (Communities.table, at a middling site)
     /// from LOD0 trees in the impostors' `impostorViews` views (layer: community × views +
     /// view), with coverage-preserving mips, and returns each patch's half-width and height.
     static func bakePatches(device: MTLDevice, library: MTLLibrary, vertices: MTLBuffer, indices: MTLBuffer,

@@ -575,6 +575,22 @@ terrain far away. Built here in that order of value.
   - Cost: seed 42's pali at 07:00 went from ~16.7 to ~19.3 ms. Single runs of the
     ridge and summit views at 07:00 ranged 14.7–23.6 ms: all within 25, but above the
     21–22 ms working ceiling at times.
+- **After Scott's second look** (ridge trees too big, slivers on the walls, marbled walls):
+  - Stand patches are 12 m (two to six trees) instead of 24 m, so ridgeline silhouettes are
+    tree-sized. None stand on slopes over 45°, where a card stood off the wall as a sliver;
+    the canopy shading covers those.
+  - The marbling was the crown spacing varying smoothly over the ground (the mat's share
+    follows the slope): a pattern whose scale drifts across a surface is squeezed into
+    rings. Spacing now comes in half-octave steps and is the mat's or the trees', never a
+    mix.
+  - Single crowns are laid out in 3D (a sphere round each cuts any surface into round
+    discs), so they don't stretch down steep walls. Clumps and stands stay on the map's
+    plane, which is cheaper, and their normals are gentle so they read as light and shade,
+    not bubbles.
+  - The crowns' footprint test counts the viewing angle, so walls seen at a slant fall
+    back to the averaged canopy before they alias.
+  - Cost: single runs of the heaviest views at 07:00 reach ~24 ms (Oʻahu ridge, seed 42
+    summit): within 25, above the 22 ms aim.
 - `floragen --sites` is unchanged.
 - Snapshots take `--eye H` to stand the camera over the canopy for distant views.
 

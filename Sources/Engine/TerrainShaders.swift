@@ -439,8 +439,12 @@ ForestCover forestCover(float4 w0, float4 w1, float4 w2, float2 p, float slope, 
     // Stands clump; the fern mat is near-continuous, broken only a little.
     f.cover = saturate(max(trees * (0.55 + 0.9 * clump), mat * (0.85 + 0.3 * clump)));
     f.mat = mat / max(trees + mat, 1e-3);
+    // In steps, never varying smoothly over the ground: a pattern whose scale drifts across
+    // a surface is squeezed into rings round where it changes fastest (contour-like
+    // marbling on the walls, where the mat's share follows the slope).
     float treeSpacing = 100.0 / sqrt(max(stems / max(total, 1e-3), 30.0));
-    f.spacing = mix(kMatSpacing, treeSpacing, trees / max(trees + mat, 1e-3));
+    treeSpacing = exp2(round(log2(treeSpacing) * 2.0) * 0.5);
+    f.spacing = mat > trees ? kMatSpacing : treeSpacing;
     return f;
 }
 
@@ -457,9 +461,70 @@ float forestHash(float2 c, float k) {
     return float(h & 0xffffu) / 65535.0;
 }
 
-// The crown or gap at p: the highest dome over it among the jittered crowns of the cells
-// around (radii varying ±25%, sized so their cover is `cover`).
-CanopyTexel canopyCrowns(float2 p, ForestCover f, float3 n, float3 l) {
+// The crown or gap at p: the highest dome over it among the jittered crowns of the 3D
+// cells around (radii varying ±40%, sized so their cover is about `cover`). In 3D, not on
+// a plane: any 2D layout gets squeezed into contour-like rings where a curved wall meets
+// its plane at a slant, while a sphere round each crown cuts any surface into round discs.
+float forestHash3(float3 c, float k) {
+    uint h = uint(int(c.x)) * 0x8da6b343u ^ uint(int(c.y)) * 0xd8163841u ^ uint(int(c.z)) * 0x9e3779b9u
+        ^ uint(k * 977.0) * 0xcb1ab31fu;
+    h ^= h >> 15; h *= 0x2c1b3c6du; h ^= h >> 12;
+    return float(h & 0xffffu) / 65535.0;
+}
+
+CanopyTexel canopyCrowns(float3 p, ForestCover f, float3 n, float3 l) {
+    float3 q = p / f.spacing;
+    float3 c0 = floor(q);
+    // A sphere cuts a disc of 2/3 its area on average, and a cell holds one crown in a
+    // slab of the surface one cell thick: cover = 1 − exp(−(2/3)πr²).
+    float radius = sqrt(-log(max(1.0 - f.cover, 0.03)) / (M_PI_F * 0.667));
+    float best = -1.0;
+    float3 offset = 0.0;
+    float r = 1.0, shade = 1.0;
+    for (int k = -1; k <= 1; k++) {
+        for (int j = -1; j <= 1; j++) {
+            for (int i = -1; i <= 1; i++) {
+                float3 c = c0 + float3(float(i), float(j), float(k));
+                float3 centre = c + float3(forestHash3(c, 1.0), forestHash3(c, 2.0), forestHash3(c, 6.0));
+                float ri = radius * (0.6 + 0.8 * forestHash3(c, 3.0));
+                float3 d = q - centre;
+                float e = 1.0 - dot(d, d) / (ri * ri);
+                if (e <= 0.0) continue;
+                float top = sqrt(e) * ri + 0.3 * forestHash3(c, 4.0);
+                if (top > best) {
+                    best = top;
+                    offset = d;
+                    r = ri;
+                    shade = 0.85 + 0.3 * forestHash3(c, 5.0);
+                }
+            }
+        }
+    }
+    CanopyTexel t;
+    if (best < 0.0) {
+        // A gap: ground in the crowns' shade unless the sun is high and the stand open.
+        t.albedo = float3(0.35);
+        t.normal = n;
+        t.sun = saturate((l.z - 0.7) * 3.0) * (1.0 - f.cover);
+        t.occlusion = 0.25;
+        return t;
+    }
+    // The dome over the surface: the offset from the crown's centre along the surface.
+    float3 along = (offset - n * dot(offset, n)) / r;
+    float height = sqrt(saturate(1.0 - dot(along, along)));
+    t.albedo = float3(1.2 * shade);
+    // Rounder than a hemisphere's normals: crowns are lumpy, and their lit and shaded
+    // sides are what make a canopy read from afar.
+    t.normal = normalize(along * 1.6 + n * max(height, 0.15));
+    // A crown's lower flanks sit in its neighbours' shade when the sun is low.
+    t.sun = saturate(height * 1.4 + l.z - 0.25);
+    t.occlusion = 0.6 + 0.4 * height;
+    return t;
+}
+
+// Clumps and stands, tens of metres across: the same on the map's plane, 9 cells rather
+// than 27. At their size the stretch down a steep wall barely shows.
+CanopyTexel canopyClumps(float2 p, ForestCover f, float3 n, float3 l) {
     float2 q = p / f.spacing;
     float2 c0 = floor(q);
     float radius = sqrt(-log(max(1.0 - f.cover, 0.03)) / M_PI_F);
@@ -484,23 +549,20 @@ CanopyTexel canopyCrowns(float2 p, ForestCover f, float3 n, float3 l) {
         }
     }
     CanopyTexel t;
-    float3 tx = normalize(float3(1.0, 0.0, 0.0) - n * n.x);
-    float3 ty = cross(n, tx);
     if (best < 0.0) {
-        // A gap: ground in the crowns' shade unless the sun is high and the stand open.
         t.albedo = float3(0.35);
         t.normal = n;
         t.sun = saturate((l.z - 0.7) * 3.0) * (1.0 - f.cover);
         t.occlusion = 0.25;
         return t;
     }
+    float3 tx = normalize(float3(1.0, 0.0, 0.0) - n * n.x);
+    float3 ty = cross(n, tx);
     float2 dome = offset / r;
     float height = sqrt(saturate(1.0 - dot(dome, dome)));
     t.albedo = float3(1.2 * shade);
-    // Rounder than a hemisphere's normals: crowns are lumpy, and their lit and shaded
-    // sides are what make a canopy read from afar.
-    t.normal = normalize((tx * dome.x + ty * dome.y) * 1.6 + n * max(height, 0.15));
-    // A crown's lower flanks sit in its neighbours' shade when the sun is low.
+    // Gentle domes: groups of crowns are lumpy in light and shade, not in shape.
+    t.normal = normalize((tx * dome.x + ty * dome.y) * 0.5 + n);
     t.sun = saturate(height * 1.4 + l.z - 0.25);
     t.occlusion = 0.6 + 0.4 * height;
     return t;
@@ -601,33 +663,35 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
             matGreen = f.mat;
             if (forest > 0.0) {
                 float3 toEyeDir = normalize(u.cameraPosition - in.world);
-                // Crowns while they span a few pixels, their average once a pixel spans them.
-                float footprint = d * 1.1547 / u.frame.y;
+                // Crowns while they span a few pixels, their average once a pixel spans them. A
+                // surface seen at a grazing angle spans more of it per pixel: without that, the
+                // walls' crowns alias into marbled bands.
+                float footprint = d * 1.1547 / u.frame.y / max(abs(dot(n, toEyeDir)), 0.25);
                 crownDetail = 1.0 - smoothstep(0.1, 0.3, footprint / f.spacing);
-                if (crownDetail > 0.0) crowns = canopyCrowns(in.world.xy, f, n, l);
+                if (crownDetail > 0.0) crowns = canopyCrowns(in.world, f, n, l);
                 // Groups of crowns four times as far apart, domed and shaded the same way,
                 // carry the canopy's relief out to where single crowns are long gone.
                 ForestCover g = f;
                 g.spacing = 4.0 * f.spacing;
-                g.cover = 0.7;
+                g.cover = 0.85;
                 clumpDetail = 1.0 - smoothstep(0.1, 0.3, footprint / g.spacing);
-                if (clumpDetail > 0.0) clumps = canopyCrowns(in.world.xy + 17.0, g, n, l);
+                if (clumpDetail > 0.0) clumps = canopyClumps(in.world.xy + 17.0, g, n, l);
                 average = canopyAverage(f, n, l, toEyeDir);
                 // Stands and gaps ~100 m across (sixteen crowns), which still show as a
                 // velvety mottle on a wall many kilometres off.
                 ForestCover st = f;
                 st.spacing = 16.0 * f.spacing;
-                st.cover = 0.75;
+                st.cover = 0.85;
                 float standDetail = 1.0 - smoothstep(0.1, 0.3, footprint / st.spacing);
                 if (standDetail > 0.0) {
-                    CanopyTexel stands = canopyCrowns(in.world.xy + 53.0, st, n, l);
-                    float k = 0.85 * standDetail;
+                    CanopyTexel stands = canopyClumps(in.world.xy + 53.0, st, n, l);
+                    float k = 0.6 * standDetail;
                     average.normal = normalize(mix(average.normal, stands.normal, k));
                     average.sun *= mix(1.0, stands.sun, k);
                     average.albedo *= mix(1.0, stands.albedo.x / 1.2, k);
                 }
                 if (clumpDetail > 0.0) {
-                    float k = 0.9 * clumpDetail;
+                    float k = 0.6 * clumpDetail;
                     average.normal = normalize(mix(average.normal, clumps.normal, k));
                     average.sun *= mix(1.0, clumps.sun, k);
                     average.albedo *= mix(1.0, clumps.albedo.x / 1.2, k);
