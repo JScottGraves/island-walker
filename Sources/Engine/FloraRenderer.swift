@@ -1,5 +1,6 @@
 #if canImport(MetalKit)
 import Metal
+import QuartzCore
 import simd
 import Flora
 import IslandCore
@@ -74,12 +75,25 @@ final class FloraRenderer {
     static let capacity = 4096
     /// Side of an impostor's baked view, texels.
     static let impostorSize = 256
+    /// Views baked per variant, evenly round it: the impostor shows the two nearest the
+    /// direction it is seen from, in the plant's own frame, so it keeps the mesh's shape.
+    static let impostorViews = 8
 
     /// LOD0 out to `lod0Distance`, LOD1 to `lod1Distance` (both pushed out for tall plants),
-    /// then impostors to the layer's range, cross-fading over `fadeWidth`.
-    var lod0Distance: Float = 30
-    var lod1Distance: Float = 80
-    var fadeWidth: Float = 8
+    /// then impostors to the layer's range. A plant crossing one fades between the two over
+    /// `fadeTime` seconds (floraScatter's LOD state table).
+    var lod0Distance: Float = 80
+    var lod1Distance: Float = 250
+    var fadeTime = 0.3
+    /// Slots in the LOD state table (a power of two): every plant drawn in a frame takes one.
+    static let lodStates = 1 << 17
+    let lodKeys: MTLBuffer
+    let lodValues: MTLBuffer
+    /// Frames scattered so far, and when the last one was, for the fades' progress. Snapshots
+    /// set `fixedFrameTime`, since they encode frames far faster than they are shown.
+    var scatterFrame = 0
+    var lastScatter: Double?
+    var fixedFrameTime: Double?
     var canopyRange: Float = 600
     var shrubRange: Float = 120
     /// Ground and tree pixels this close to the camera take shadows from the trees' shadow
@@ -215,9 +229,10 @@ final class FloraRenderer {
                     table.append(m)
                     if lod == 0 {
                         lod0.append(m)
+                        // Half-width from any side: the largest distance off the axis.
                         var r: Float = 0.1, top: Float = 0.1
                         for v in mesh.vertices {
-                            r = Swift.max(r, abs(v.x), abs(v.y))
+                            r = Swift.max(r, (v.x * v.x + v.y * v.y).squareRoot())
                             top = Swift.max(top, v.z)
                         }
                         extents.append(SIMD4(r, 0, top, 0))
@@ -248,6 +263,12 @@ final class FloraRenderer {
               let ab = device.makeBuffer(length: FloraRenderer.buckets * 20, options: .storageModeShared)
         else { throw RendererError.setup("flora buffers") }
         vertices = vb; indices = ib; meshes = mb; counts = cb; instances = instanceBuffer; arguments = ab
+        guard let keys = device.makeBuffer(length: FloraRenderer.lodStates * 4, options: .storageModeShared),
+              let values = device.makeBuffer(length: FloraRenderer.lodStates * 4, options: .storageModeShared)
+        else { throw RendererError.setup("flora LOD states") }
+        memset(keys.contents(), 0, keys.length)
+        memset(values.contents(), 0, values.length)
+        lodKeys = keys; lodValues = values
         memset(ab.contents(), 0, ab.length)
         guard let eb = device.makeBuffer(bytes: extents, length: extents.count * 16, options: .storageModeShared)
         else { throw RendererError.setup("impostor extents") }
@@ -299,8 +320,9 @@ final class FloraRenderer {
                        maps: maps, counts: counts, instances: instances, drawArguments: drawArguments)
     }
 
-    /// Draws every variant's LOD0 mesh from the side into the impostor arrays, then gives
-    /// them mip chains (coverage-preserving for the albedo's alpha).
+    /// Draws every variant's LOD0 mesh from `impostorViews` sides into the impostor arrays
+    /// (layer: variant × views + view; view k looks from azimuth k × 2π / views − π/2 in the
+    /// plant's frame), then gives them mip chains (coverage-preserving for the albedo's alpha).
     static func bakeImpostors(device: MTLDevice, library: MTLLibrary, vertices: MTLBuffer, indices: MTLBuffer,
                               meshes: [Mesh], extents: [SIMD4<Float>], cards: MTLTexture,
                               bark: MTLTexture) throws -> (MTLTexture, MTLTexture) {
@@ -311,7 +333,7 @@ final class FloraRenderer {
             d.pixelFormat = format
             d.width = n
             d.height = n
-            d.arrayLength = meshes.count
+            d.arrayLength = meshes.count * impostorViews
             d.mipmapLevelCount = Int(log2(Double(n))) + 1
             d.usage = [.renderTarget, .shaderRead]
             d.storageMode = .shared
@@ -336,7 +358,10 @@ final class FloraRenderer {
               let queue = device.makeCommandQueue(), let cmd = queue.makeCommandBuffer()
         else { throw RendererError.setup("impostor bake") }
         let pipeline = try device.makeRenderPipelineState(descriptor: desc)
-        for (layer, mesh) in meshes.enumerated() {
+        let views = impostorViews
+        for (variant, mesh) in meshes.enumerated() {
+          for view in 0..<views {
+            let layer = variant * views + view
             let pass = MTLRenderPassDescriptor()
             pass.colorAttachments[0].texture = albedo
             pass.colorAttachments[0].slice = layer
@@ -356,7 +381,8 @@ final class FloraRenderer {
             enc.setRenderPipelineState(pipeline)
             enc.setDepthStencilState(depthState)
             enc.setCullMode(.none)
-            var e = extents[layer]
+            var e = extents[variant]
+            e.w = Float(view) * 2 * .pi / Float(views)
             enc.setVertexBuffer(vertices, offset: Int(mesh.baseVertex) * MemoryLayout<FloraVertex>.stride, index: 2)
             enc.setVertexBytes(&e, length: 16, index: 4)
             enc.setFragmentTexture(cards, index: 6)
@@ -364,20 +390,22 @@ final class FloraRenderer {
             enc.drawIndexedPrimitives(type: .triangle, indexCount: Int(mesh.indexCount), indexType: .uint32,
                                       indexBuffer: indices, indexBufferOffset: Int(mesh.indexStart) * 4)
             enc.endEncoding()
+          }
         }
         cmd.commit()
         cmd.waitUntilCompleted()
-        for layer in 0..<meshes.count {
-            for (texture, coverage) in [(albedo, true), (normal, false)] {
-                var base = [UInt8](repeating: 0, count: n * n * 4)
-                texture.getBytes(&base, bytesPerRow: n * 4, bytesPerImage: n * n * 4,
-                                 from: MTLRegionMake2D(0, 0, n, n), mipmapLevel: 0, slice: layer)
-                let mips = FloraTextures.mipChain(base, size: n, preserveCoverage: coverage, linearData: !coverage)
-                for (level, texels) in mips.enumerated() where level > 0 {
-                    let m = Swift.max(1, n >> level)
-                    texture.replace(region: MTLRegionMake2D(0, 0, m, m), mipmapLevel: level, slice: layer, withBytes: texels,
-                                    bytesPerRow: m * 4, bytesPerImage: m * m * 4)
-                }
+        // Mips on the CPU, every layer at once: each slice is read and written on its own.
+        let jobs = (0..<(meshes.count * views)).flatMap { layer in [(layer, albedo, true), (layer, normal, false)] }
+        DispatchQueue.concurrentPerform(iterations: jobs.count) { j in
+            let (layer, texture, coverage) = jobs[j]
+            var base = [UInt8](repeating: 0, count: n * n * 4)
+            texture.getBytes(&base, bytesPerRow: n * 4, bytesPerImage: n * n * 4,
+                             from: MTLRegionMake2D(0, 0, n, n), mipmapLevel: 0, slice: layer)
+            let mips = FloraTextures.mipChain(base, size: n, preserveCoverage: coverage, linearData: !coverage)
+            for (level, texels) in mips.enumerated() where level > 0 {
+                let m = Swift.max(1, n >> level)
+                texture.replace(region: MTLRegionMake2D(0, 0, m, m), mipmapLevel: level, slice: layer, withBytes: texels,
+                                bytesPerRow: m * 4, bytesPerImage: m * m * 4)
             }
         }
         return (albedo, normal)
@@ -446,10 +474,11 @@ final class FloraRenderer {
         }
         let canopyCell = Float(Communities.canopyCell), shrubCell = Float(Communities.shrubCell)
         out.append(SIMD4(canopyCell, shrubCell, canopyRange, shrubRange))
-        out.append(SIMD4(lod0Distance, fadeWidth, seaLevel, domainSize))
-        out.append(SIMD4(lod1Distance, 0, 0, 0))
-        let canopyCells = Int((2 * canopyRange / canopyCell).rounded(.up)) + 2
-        let shrubCells = Int((2 * shrubRange / shrubCell).rounded(.up)) + 2
+        out.append(SIMD4(lod0Distance, 0, seaLevel, domainSize))
+        out.append(SIMD4(lod1Distance, fadeStep, Float(scatterFrame % 65535 + 1), 0))
+        // A little past the ranges, where plants leaving them fade out (kLodHysteresis).
+        let canopyCells = Int((2.2 * canopyRange / canopyCell).rounded(.up)) + 2
+        let shrubCells = Int((2.2 * shrubRange / shrubCell).rounded(.up)) + 2
         func origin(_ cell: Float, _ cells: Int) -> SIMD2<Float> {
             SIMD2((Float(eye.x) / cell).rounded(.down) - Float(cells / 2), (Float(eye.y) / cell).rounded(.down) - Float(cells / 2))
         }
@@ -482,12 +511,20 @@ final class FloraRenderer {
         return out
     }
 
+    /// LOD fade progress this frame, in 4095ths of a fade.
+    var fadeStep: Float = 0
+
     /// Builds this frame's instances: clears the bucket counts, scatters both layers and
     /// writes the indirect draw arguments. Specimen sheets write theirs once instead.
     func scatter(_ cmd: MTLCommandBuffer, uniforms: inout TerrainRenderer.Uniforms, eye: SIMD3<Double>,
                  viewProjection: simd_float4x4, terrainParams: TerrainRenderer.TerrainParams, detail: TerrainDetail,
                  pages: MTLBuffer, tiles: MTLTexture) {
         if specimens != nil { return }
+        let now = CACurrentMediaTime()
+        let dt = fixedFrameTime ?? lastScatter.map { Swift.min(Swift.max(now - $0, 0), 0.1) } ?? 0
+        lastScatter = now
+        scatterFrame += 1
+        fadeStep = Float((dt / fadeTime * 4095).rounded(.up))
         guard let blit = cmd.makeBlitCommandEncoder() else { return }
         blit.label = "flora clear"
         blit.fill(buffer: counts, range: 0..<counts.length, value: 0)
@@ -505,6 +542,8 @@ final class FloraRenderer {
         enc.setBuffer(pages, offset: 0, index: 4)
         enc.setBuffer(counts, offset: 0, index: 5)
         enc.setBuffer(instances, offset: 0, index: 6)
+        enc.setBuffer(lodKeys, offset: 0, index: 10)
+        enc.setBuffer(lodValues, offset: 0, index: 11)
         enc.setTexture(tiles, index: 0)
         enc.setTexture(detail.texture, index: 1)
         enc.setTextures(biomes, range: 2..<5)

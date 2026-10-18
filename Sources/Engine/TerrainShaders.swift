@@ -609,6 +609,9 @@ float cascadeSun(depth2d_array<float> maps, TreeCascade k, uint c, float share, 
     if (found == 0.0) return 1.0;
     float gap = (depth - blockers / found) * range;  // metres from the leaves to the receiver
     float radius = max(gap * kSunRadius * kPenumbraScale, 0.75 * texel) / width;
+    // Deep in shadow: every tap of the search found leaves over an area wider than the
+    // penumbra. Most of a closed forest's floor, which then skips the filter.
+    if (found == 8.0 && radius < 0.7 * search) return 0.0;
     constexpr sampler compare(filter::linear, compare_func::less_equal, address::clamp_to_edge);
     float lit = 0.0;
     for (int i = 0; i < 16; i++) lit += maps.sample_compare(compare, uv + spin * kPoisson[i] * radius, c, depth, level(0));
@@ -660,7 +663,7 @@ float sunWithoutRays(constant Uniforms &u, SunSurface s, bool crown, float3 l,
 }
 
 // Two passes over the prepass surface. Pass 0 traces the terrain at one pixel per 2×2
-// block. Pass 1 fills in the other three: where the traced pixels around one agree (all lit
+// block (crowns per 4×4). Pass 1 fills in the rest: where the traced pixels around one agree (all lit
 // or all shadowed, on the same surface) it takes their answer, crowns among tree pixels
 // take their mean whatever the depths (foliage being noisy anyway), and at shadow edges
 // and penumbrae it traces its own rays. Each pixel then looks up the trees' shadow maps
@@ -682,13 +685,36 @@ kernel void sunShadow(constant Uniforms &u [[buffer(0)]],
     uint2 g = pass == 0u ? gid * 2u : gid;
     uint2 size = uint2(out.get_width(), out.get_height());
     if (any(g >= size)) return;
-    if (pass == 1u && all((g & 1u) == 0u)) return;
+    // Pass 1 skips the pixels pass 0 traced, but not the crowns it left (blue set).
+    if (pass == 1u && all((g & 1u) == 0u) && out.read(g).b < 0.5) return;
     float3 l = normalize(u.sunDirection);
     SunSurface s = sunSurface(surface, depth, g);
     float meshHeight = s.sky ? 0.0 : shadowMeshHeight(meshHeights, s.p.xy, u.cloudLayer.w);
     bool crown = s.tree && !s.sky && s.p.z > meshHeight + 1.0;
     float distance = length(u.cameraPosition - s.p);
     float visibility = sunWithoutRays(u, s, crown, l, horizons, cloudShadows);
+    // Crowns trace the terrain at one pixel per 4×4 block: at low sun, when the horizon
+    // map can't tell, every crown pixel needs rays, and crowns cover much of a forest view.
+    // Foliage is noisy anyway; the rest take their 4×4 neighbours' mean in pass 1.
+    if (visibility < 0.0 && crown && pass == 0u && any((g & 3u) != 0u)) {
+        out.write(float4(0.0, 1.0, 1.0, 0.0), g);
+        return;
+    }
+    if (visibility < 0.0 && crown && pass == 1u) {
+        uint2 base = g & ~3u;
+        uint2 off = select(uint2(0u), uint2(4u), (g & 3u) != 0u);
+        uint2 last = (size - 1u) & ~3u;
+        uint2 corners[4] = { min(base, last), min(base + uint2(off.x, 0u), last), min(base + uint2(0u, off.y), last),
+                             min(base + off, last) };
+        float sum = 0.0;
+        bool foliage = true;
+        for (int k = 0; k < 4; k++) {
+            SunSurface t = sunSurface(surface, depth, corners[k]);
+            foliage = foliage && t.tree && !t.sky;
+            sum += out.read(corners[k]).r;
+        }
+        if (foliage) visibility = 0.25 * sum;
+    }
     if (visibility < 0.0 && pass == 1u) {
         // The traced pixels of the 2×2 blocks touching this one.
         uint2 base = g & ~1u;
@@ -700,9 +726,12 @@ kernel void sunShadow(constant Uniforms &u [[buffer(0)]],
         bool same = true, foliage = crown;
         for (int k = 0; k < 4; k++) {
             SunSurface t = sunSurface(surface, depth, corners[k]);
-            same = same && !t.sky && length(t.p - s.p) < 0.02 * distance + 2.0;
-            foliage = foliage && t.tree && !t.sky;
-            float v = out.read(corners[k]).r;
+            float4 c = out.read(corners[k]);
+            // A crown pass 0 left has no answer yet.
+            bool known = c.b < 0.5;
+            same = same && known && !t.sky && length(t.p - s.p) < 0.02 * distance + 2.0;
+            foliage = foliage && known && t.tree && !t.sky;
+            float v = c.r;
             lo = min(lo, v);
             hi = max(hi, v);
             sum += v;

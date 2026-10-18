@@ -577,7 +577,9 @@ public final class TerrainRenderer {
         guard let color = device.makeTexture(descriptor: colorDesc), let cmd = queue.makeCommandBuffer(),
               let timed = queue.makeCommandBuffer()
         else { throw RendererError.setup("snapshot targets") }
-        // A fresh history, then enough frames at this camera for it to settle.
+        // A fresh history, then enough frames at this camera for it to settle. Frames count
+        // as 1/60 s apart for the trees' LOD fades, as in the running app.
+        flora?.fixedFrameTime = 1.0 / 60
         historyValid = false
         for k in 0..<TerrainRenderer.snapshotFrames {
             // Load every tile the view needs before the first frame: snapshots don't stream.
