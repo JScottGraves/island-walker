@@ -198,9 +198,14 @@ constant float kTreeShadowFade = 40.0;
 // CPU bake, which also hides the mesh's facets in shadow edges.
 constant float kSunConeRadius = 0.01;
 
-// Fraction of 4 rays towards the sun's disc that escape the terrain. A per-pixel rotation
-// (interleaved gradient noise) spreads the 4 samples into a smooth penumbra.
-float rayTracedSun(float3 p, float3 n, float3 l, float2 pixel, float distance, float maxHeight,
+// Fraction of rays towards the sun's disc that escape the terrain. A per-pixel rotation
+// (interleaved gradient noise) spreads the samples into a smooth penumbra.
+// Two rays from opposite sides of the disc first: where they agree the point is almost
+// surely fully lit or fully shadowed. At an edge, eight rays over a cone wide enough that
+// the penumbra spans at least one cell of the shadow mesh (`cell` metres) at the
+// occluder's distance: a ridge of that mesh is a row of flat triangles, and at low sun a
+// narrower penumbra draws each one's edge as a straight tooth, a comb along the shadow.
+float rayTracedSun(float3 p, float3 n, float3 l, float2 pixel, float distance, float maxHeight, float cell,
                    primitive_acceleration_structure terrain) {
     float3 t = normalize(cross(l, abs(l.z) < 0.9 ? float3(0.0, 0.0, 1.0) : float3(1.0, 0.0, 0.0)));
     float3 b = cross(l, t);
@@ -213,23 +218,30 @@ float rayTracedSun(float3 p, float3 n, float3 l, float2 pixel, float distance, f
     // it. Rays only stop on faces turned towards them: from below, they pass through.
     isect.set_triangle_front_facing_winding(winding::clockwise);
     isect.set_triangle_cull_mode(triangle_cull_mode::back);
-    // Two rays from opposite sides of the sun's disc first: where they agree the point is
-    // almost surely fully lit or fully shadowed, and only penumbrae pay for the other two.
-    // Far away a penumbra is narrower than a pixel, so two rays are enough there.
-    float hits[4];
-    const int order[4] = { 1, 3, 0, 2 };
-    for (int i = 0; i < 4; i++) {
-        int k = order[i];
-        float r = kSunConeRadius * sqrt((float(k) + 0.5) / 4.0);
-        float a = float(k) * 2.3999632 + spin;
-        float3 d = normalize(l + (t * cos(a) + b * sin(a)) * r);
-        // Nothing can block a ray once it has climbed above the highest peak.
+    float lit = 0.0, hitDistance = 0.0;
+    for (int k = 0; k < 2; k++) {
+        float a = float(k) * M_PI_F + spin;
+        float3 d = normalize(l + (t * cos(a) + b * sin(a)) * kSunConeRadius);
         float reach = d.z > 1e-4 ? (maxHeight + 1.0 - origin.z) / d.z : 200000.0;
         ray shadowRay(origin, d, 0.5, clamp(reach, 1.0, 200000.0));
-        hits[i] = isect.intersect(shadowRay, terrain).type == intersection_type::none ? 1.0 : 0.0;
-        if (i == 1 && (hits[0] == hits[1] || distance > 4000.0)) return 0.5 * (hits[0] + hits[1]);
+        auto hit = isect.intersect(shadowRay, terrain);
+        if (hit.type == intersection_type::none) lit += 1.0;
+        else hitDistance = max(hitDistance, hit.distance);
     }
-    return 0.25 * (hits[0] + hits[1] + hits[2] + hits[3]);
+    if (lit == 0.0 || lit == 2.0) return 0.5 * lit;
+    // A penumbra at least a shadow-mesh cell wide where the occluder stands.
+    float cone = max(kSunConeRadius, 0.8 * cell / max(hitDistance, 1.0));
+    cone = min(cone, 0.06);
+    lit = 0.0;
+    for (int k = 0; k < 8; k++) {
+        float r = cone * sqrt((float(k) + 0.5) / 8.0);
+        float a = float(k) * 2.3999632 + spin;
+        float3 d = normalize(l + (t * cos(a) + b * sin(a)) * r);
+        float reach = d.z > 1e-4 ? (maxHeight + 1.0 - origin.z) / d.z : 200000.0;
+        ray shadowRay(origin, d, 0.5, clamp(reach, 1.0, 200000.0));
+        lit += isect.intersect(shadowRay, terrain).type == intersection_type::none ? 1.0 : 0.0;
+    }
+    return lit / 8.0;
 }
 
 // How far the sun stands above the terrain's horizon (radians), from the 16-sector
@@ -1111,15 +1123,17 @@ kernel void sunShadow(constant Uniforms &u [[buffer(0)]],
             hi = max(hi, v);
             sum += v;
         }
-        if (foliage) visibility = 0.25 * sum;
-        else if (same && (hi <= 0.0 || lo >= 1.0)) visibility = lo;
+        // On one surface, their mean: penumbrae are at least a shadow-mesh cell wide, so they
+        // vary smoothly across two pixels.
+        if (foliage || same) visibility = 0.25 * sum;
     }
     if (visibility < 0.0) {
         // Crown pixels leave towards the sun: a card's normal may face away from it. Anything
         // else starts no lower than the shadow mesh: from under it (a valley floor the coarse
         // mesh bridges over) a ray would pass out through the backs of the ridges around it.
         float3 origin = crown ? s.p : float3(s.p.xy, max(s.p.z, meshHeight));
-        visibility = rayTracedSun(origin, crown ? l : s.n, l, float2(g) + 0.5, distance, u.maxHeight, terrain);
+        visibility = rayTracedSun(origin, crown ? l : s.n, l, float2(g) + 0.5, distance, u.maxHeight,
+                                  u.cloudLayer.w / float(meshHeights.get_width()), terrain);
     }
     // Leaves offset towards the sun (cards are two-sided), the ground along its normal.
     float leaves = 1.0;
