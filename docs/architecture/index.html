@@ -938,6 +938,7 @@ tile name: &lt;level&gt;/&lt;ty&gt;_&lt;tx&gt;.lz4, row 0 south</code></pre>
         <p>Two methods share the work.</p>
         <p><b>Horizon map.</b> At start-up <code>TerrainLighting.bake</code> marches 16 compass sectors out to 25 km from every overview cell (three marches per sector, keeping the highest) and stores each sector's horizon angle as a byte. Any sun position can then be tested by comparing its elevation with the horizon at its azimuth.</p>
         <p><b>Ray tracing.</b> A Metal acceleration structure is built over a mesh of the same overview. Where the horizon map puts the sun more than ~3° clear of both neighbouring sectors, or ~3° below both, the pixel is decided without rays. Only the uncertain band traces: two rays across the sun's 0.53° disc, and two more only where they disagree, softened over about a degree. Beyond 4 km two rays are enough. A ray stops once it has climbed above the highest peak.</p>
+        <p><b>Soft edges at low sun</b> (PR #41). Each flat 78 m triangle of the shadow mesh used to cast its own straight-edged tooth, and a one-degree penumbra was much narrower than a triangle seen from far away, so at low sun the shadow edge across the forest read as a comb. Where the first two rays disagree, eight rays now sample a cone wide enough that the soft edge spans at least one mesh cell at the hill casting it (sized from the hit distance). The worst view rose from about 23.5 to 24.0 ms.</p>
         <p><b>In its own pass (PR #25).</b> Rays used to be traced in the terrain fragment shader. Far away, triangles cover only a few pixels, so most lanes of each 2×2 quad were helper lanes tracing rays for nothing. Now the depth prepass also writes each pixel's surface position and normal, and a <code>sunShadow</code> compute pass traces from those into a one-byte sun-visibility target that the shading pass just reads. It traces one pixel per 2×2 block first; the other three copy that answer where the surrounding traced pixels agree and lie on the same surface, and trace their own rays only at shadow edges. Shadows come out the same (mean difference ≤ 0.11/255), and the slowest low-sun views went from 16.2–17.9 ms to 14.1 ms.</p>
         <p>The shadow mesh is coarser than the drawn terrain, so a valley floor can sit under it. Rays ignore faces seen from below, which lets them out.</p>
       </div>
@@ -1180,10 +1181,10 @@ tile name: &lt;level&gt;/&lt;ty&gt;_&lt;tx&gt;.lz4, row 0 south</code></pre>
       <ul>
         <li><b>Stand patches, 600 m to 2.5 km.</b> Each community's stand is baked at start-up as a 12 m patch of two to six trees, in the impostors' eight views, and drawn as one camera-facing card per forested cell with the same view blend, timed fades and occlusion as the trees. They give ridgelines broken, tree-sized silhouettes.</li>
         <li><b>Canopy shading on the terrain</b>, from 150 m out under the drawn trees. Crowns sized from each community's stems per hectare are shaded as domes with dark gaps while they span a pixel, then clumps, then stands about 100 m across, each tilting the normal; past all of them, an averaged canopy term with the down-sun hotspot (after Bruneton &amp; Neyret 2012). Every layer fades by pixel footprint, so there are no rings or aliasing.</li>
-        <li><b>Pali walls</b> are texture only: trees and patches stop at 40°, shrubs at 55°. Following Scott's photo of the windward Koʻolau, the wall is coloured by its shape: bright yellow-green uluhe and moss on convex ribs and less steep facets, dark wet blue-grey-green basalt on the steepest faces and in gullies (curvature from the 10 m heights over ±20 m), with fine streaks down the fall line. It starts 30 m from the camera, and the forest at the foot blends into it with no seam.</li>
+        <li><b>Pali walls</b> are texture only: trees and patches stop at 40°, shrubs at 55°. Following Scott's photo of the windward Koʻolau, the wall is coloured by its shape: bright yellow-green uluhe and moss on convex ribs and less steep facets, dark wet blue-grey-green basalt on the steepest faces and in gullies (curvature from the 10 m heights over ±20 m), with fine streaks down the fall line. It starts 30 m from the camera, and the forest at the foot blends into it with no seam. Patches start 600 m from the camera in 3D, not across the map, so a high camera sees no treeless ring under it (PR #40).</li>
       </ul>
       <p><b>Occlusion culling</b> (PR #38). Last frame's depth prepass becomes a pyramid of farthest depths; a tree or patch whose nearest point lies behind everything in its screen rectangle is not drawn. The pyramid is skipped for a frame after a 2 m move or 3° turn. Forest views draw a fifth to a half of their trees, which pays for the far tiers.</p>
-      <p><b>Cost</b> at 1440p on the M3, against the 25 ms (40 fps) budget Scott set on 2026-10-18: with PR #38 the heaviest views (Oʻahu ridge and seed 42 summit at 07:00) run 17–22.5 ms. Time with the app closed: an open app window shares the GPU and inflates snapshot timings.</p>
+      <p><b>Cost</b> at 1440p on the M3, against the 25 ms (40 fps) budget Scott set on 2026-10-18: with PR #41 the heaviest views (Oʻahu ridge and seed 42 summit at 07:00) run 17.7–24 ms. Time with the app closed: an open app window shares the GPU and inflates snapshot timings.</p>
     </div>
   </div>
 </section>
@@ -1260,7 +1261,7 @@ tile name: &lt;level&gt;/&lt;ty&gt;_&lt;tx&gt;.lz4, row 0 south</code></pre>
         <tr><td>Debug overlay</td><td><span class="pill part">basic</span></td><td>Title bar: time, GPU ms, nodes, tiles</td></tr>
         <tr><td>Native vegetation (added)</td><td><span class="pill part">trees done</span></td><td>Biome bake, six tree and shrub species, eight-view impostors with timed LOD fades, shadow-mapped tree shadows, per-community ground textures (§5.9). Far forest to the horizon: stand patches to 2.5 km, canopy shading beyond, photo-guided pali walls, occlusion culling (PR #38).</td></tr>
         <tr><td>Real DEM import</td><td><span class="pill ok">done</span></td><td>Oʻahu at 10 m as a bundle; scoring</td></tr>
-        <tr><td>40 fps at 1440p, bake &lt; 10 min</td><td><span class="pill ok">met</span></td><td>Bake is well under. The frame budget is 25 ms since 2026-10-18 (was 16.7 ms for 60 fps); with far foliage the heaviest views run 17–22.5 ms.</td></tr>
+        <tr><td>40 fps at 1440p, bake &lt; 10 min</td><td><span class="pill ok">met</span></td><td>Bake is well under. The frame budget is 25 ms since 2026-10-18 (was 16.7 ms for 60 fps); with far foliage and soft shadow edges the heaviest views run 17.7–24 ms.</td></tr>
       </tbody>
     </table>
   </div>
@@ -1324,6 +1325,9 @@ tile name: &lt;level&gt;/&lt;ty&gt;_&lt;tx&gt;.lz4, row 0 south</code></pre>
         <tr><td class="num">36</td><td>Tree shadow maps, per-community ground textures, timed LOD fades</td><td>flora</td></tr>
         <tr><td class="num">37</td><td>Explainer: tree shadow maps, ground textures, 25 ms budget</td><td>flora</td></tr>
         <tr><td class="num">38</td><td>Far foliage: stand patches to 2.5 km, canopy shading, pali walls after Scott's photo, occlusion culling</td><td>flora</td></tr>
+        <tr><td class="num">39</td><td>Explainer: far foliage</td><td>flora</td></tr>
+        <tr><td class="num">40</td><td>No treeless ring under a high camera</td><td>flora</td></tr>
+        <tr><td class="num">41–42</td><td>Soft terrain-shadow edges at low sun (no comb across the forest)</td><td>flora</td></tr>
       </tbody>
     </table>
   </div>
