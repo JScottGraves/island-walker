@@ -149,8 +149,12 @@ bool floraCandidate(constant Uniforms &u, constant FloraParams &f, constant Terr
     float4 info = f.plant[plant];
 
     float2 gradient;
-    // On the terrain level drawn at this distance.
-    float ground = floraGround(t, d, detail, pages, tiles, xy, length(float3(rel, u.cameraPosition.z)), gradient);
+    // On the terrain level drawn at this distance: the CDLOD rings go by 3D distance from
+    // the camera to the ground, so the height above it counts (a coarse level's height
+    // stands in for the ground's). Using the camera's height above the sea instead put
+    // trees on far rings' surfaces when the camera stood high, sunk or floating.
+    float roughGround = levelHeight(t, pages, tiles, min(2, t.levels - 1), xy);
+    float ground = floraGround(t, d, detail, pages, tiles, xy, length(float3(rel, u.cameraPosition.z - roughGround)), gradient);
     if (ground < f.lods.z + 0.5 || length(gradient) > info.w) return false;
     // Taller where wetter and sheltered (site, in biome2.w), with some spread.
     float site = w2.w;
@@ -920,8 +924,10 @@ kernel void floraPatches(constant Uniforms &u [[buffer(0)]],
     float2 xy = (float2(cell) + 0.5 + 0.3 * (float2(floraRandom(h, 0), floraRandom(h, 1)) - 0.5)) * kPatchCell;
     float2 rel = xy - u.cameraPosition.xy;
     float nearest = pp.range.x, farthest = pp.range.y;
+    // Only the outer edge is cut here, horizontally: the inner edge goes by 3D distance
+    // below, as the single trees' end does. Cutting it horizontally too left a ring with
+    // neither trees nor patches under a camera high above the ground.
     if (dot(rel, rel) > pow(farthest * (1.0 + 2.0 * kLodHysteresis), 2.0)) return;
-    if (dot(rel, rel) < pow(nearest * (1.0 - 2.0 * kLodHysteresis), 2.0)) return;
     constexpr sampler linear(filter::linear, address::clamp_to_edge);
     float2 uv = xy / f.lods.w;
     int community = floraPickCommunity(biome0.sample(linear, uv, level(0)), biome1.sample(linear, uv, level(0)),
