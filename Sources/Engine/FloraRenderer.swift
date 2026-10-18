@@ -82,13 +82,21 @@ final class FloraRenderer {
     var fadeWidth: Float = 8
     var canopyRange: Float = 600
     var shrubRange: Float = 120
-    /// Ground and tree pixels this close to the camera take shadows from the trees' proxies
-    /// (fading out over the last 50 m); beyond it the canopy stand-in shades the ground.
-    var shadowRange: Float = 200
-    /// Trees this much past the shadow range still cast into it (the structure is rebuilt
-    /// only every `shadowRebuild` metres of camera travel, and shadows fall at an angle).
-    var shadowMargin: Float = 60
-    var shadowRebuild: Double = 10
+    /// Ground and tree pixels this close to the camera take shadows from the trees' shadow
+    /// maps (fading out over the last 40 m); beyond it the canopy stand-in shades the ground.
+    var shadowRange: Float = 220
+    /// Far edges of the shadow cascades (the last is the shadow range), metres; as many as
+    /// the shaders' kTreeCascades.
+    var cascadeSplits: [Double] = [25, 80, 220]
+    static let cascadeCount = 3
+    /// Trees this much past the shadow range still cast into it: shadows fall at an angle.
+    var casterMargin: Float = 80
+    /// Side of each cascade's shadow map, texels (3.8, 12 and 33 cm texels): each draws
+    /// into a corner of one array slice `shadowMapSize` across. Their cost is mostly the
+    /// alpha-tested leaf cards' fill, which grows with the square of the side; 2048² maps
+    /// cost 1.5–3 ms more at no visible gain in the close-ups.
+    var cascadeSizes = [1024, 1024, 1024]
+    static let shadowMapSize = 1024
 
     let device: MTLDevice
     let scatterPipeline: MTLComputePipelineState
@@ -122,29 +130,26 @@ final class FloraRenderer {
     /// Triangles per bucket, for the stats.
     let triangles: [Int]
 
-    /// Tree shadows (with ray tracing and scattered trees): two proxy structures per (plant,
-    /// variant), trunk then crown, and the instance structure over every tree in the shadow
-    /// range (its trunk and crown as instances 2k and 2k + 1), rebuilt on the GPU as the
-    /// camera moves.
-    struct Shadows {
-        let proxies: [MTLAccelerationStructure]
-        let proxyIDs: MTLBuffer
+    /// Tree shadows (with ray tracing and scattered trees): a depth map per cascade, drawn
+    /// each frame from the trees that overlap it (floraCasters), one bucket per (cascade,
+    /// plant, variant, LOD).
+    struct Casters {
         let scatter: MTLComputePipelineState
-        let clamp: MTLComputePipelineState
-        let descriptors: MTLBuffer
-        let scattered: MTLBuffer
-        let count: MTLBuffer
-        let descriptor: MTLIndirectInstanceAccelerationStructureDescriptor
-        let accel: MTLAccelerationStructure
-        let scratch: MTLBuffer
+        let arguments: MTLComputePipelineState
+        let pipeline: MTLRenderPipelineState
+        /// The far cascade's: impostors facing the sun.
+        let impostorPipeline: MTLRenderPipelineState
+        let depthState: MTLDepthStencilState
+        let maps: MTLTexture
+        let counts: MTLBuffer
+        let instances: MTLBuffer
+        let drawArguments: MTLBuffer
     }
-    let shadows: Shadows?
-    /// Camera position the shadow structure was last built around, and whether every tile
-    /// it stands on had loaded by then (otherwise it is rebuilt next frame).
-    var shadowCentre: SIMD3<Double>?
-    var shadowSettled = false
-    /// Instances in the shadow structure: two per tree.
-    static let shadowCapacity = 32768
+    let casters: Casters?
+    /// Caster buckets: one per (cascade, plant, variant, LOD).
+    static let casterBuckets = cascadeCount * plantBuckets
+    /// This frame's cascades as the shaders' TreeShadows (nil until drawn, or without them).
+    var shadowParams: [SIMD4<Float>]?
 
     init(device: MTLDevice, library: MTLLibrary, constants: MTLFunctionConstantValues, colorFormat: MTLPixelFormat,
          depthFormat: MTLPixelFormat, rayTraced: Bool, treeShadows: Bool, maps: FloraMaps?, seed: UInt32,
@@ -247,86 +252,44 @@ final class FloraRenderer {
         biomes = try FloraRenderer.biomeTextures(device: device, maps: maps)
         (impostorAlbedo, impostorNormal) = try FloraRenderer.bakeImpostors(
             device: device, library: library, vertices: vb, indices: ib, meshes: lod0, extents: extents, cards: cards, bark: bark)
-        shadows = treeShadows ? try FloraRenderer.makeShadows(device: device, library: library) : nil
+        casters = treeShadows ? try FloraRenderer.makeCasters(device: device, library: library, depthFormat: depthFormat) : nil
     }
 
-    static func makeShadows(device: MTLDevice, library: MTLLibrary) throws -> Shadows {
-        guard MemoryLayout<MTLIndirectAccelerationStructureInstanceDescriptor>.stride == 72 else {
-            throw RendererError.setup("instance descriptor layout")
-        }
-        guard let scatter = library.makeFunction(name: "floraShadows"),
-              let clamp = library.makeFunction(name: "floraShadowCount") else { throw RendererError.setup("tree shadow kernels") }
-        // Every variant's proxy: positions and indices in one buffer pair, one structure each.
-        var positions: [Float] = [], indices: [UInt32] = []
-        var parts: [[(vertex: Int, index: Int, triangles: Int)]] = []
-        for plant in Plant.allCases {
-            for v in 0..<Flora.variants {
-                let proxy = Flora.shadowProxy(plant, variant: v)
-                parts.append([proxy.trunk, proxy.crown].map { part in
-                    let entry = (vertex: positions.count * 4, index: indices.count * 4, triangles: part.indices.count / 3)
-                    for p in part.positions { positions += [p.x, p.y, p.z] }
-                    indices += part.indices
-                    return entry
-                })
-            }
-        }
-        guard let queue = device.makeCommandQueue(),
-              let vb = device.makeBuffer(bytes: positions, length: positions.count * 4, options: .storageModeShared),
-              let ib = device.makeBuffer(bytes: indices, length: indices.count * 4, options: .storageModeShared),
-              let cmd = queue.makeCommandBuffer(), let enc = cmd.makeAccelerationStructureCommandEncoder()
-        else { throw RendererError.setup("tree shadow proxies") }
-        var proxies: [MTLAccelerationStructure] = []
-        var scratches: [MTLBuffer] = []
-        for part in parts.joined() {
-            let desc = MTLPrimitiveAccelerationStructureDescriptor()
-            desc.geometryDescriptors = [part].map { part in
-                let g = MTLAccelerationStructureTriangleGeometryDescriptor()
-                g.vertexBuffer = vb
-                g.vertexBufferOffset = part.vertex
-                g.vertexStride = 12
-                g.vertexFormat = .float3
-                g.indexBuffer = ib
-                g.indexBufferOffset = part.index
-                g.indexType = .uint32
-                g.triangleCount = part.triangles
-                g.opaque = true
-                return g
-            }
-            let sizes = device.accelerationStructureSizes(descriptor: desc)
-            guard let accel = device.makeAccelerationStructure(size: sizes.accelerationStructureSize),
-                  let scratch = device.makeBuffer(length: sizes.buildScratchBufferSize, options: .storageModePrivate)
-            else { throw RendererError.setup("tree shadow proxy") }
-            enc.build(accelerationStructure: accel, descriptor: desc, scratchBuffer: scratch, scratchBufferOffset: 0)
-            proxies.append(accel)
-            scratches.append(scratch)
-        }
-        enc.endEncoding()
-        cmd.commit()
-        cmd.waitUntilCompleted()
-        let ids = proxies.map { $0.gpuResourceID._impl }
-
-        let capacity = FloraRenderer.shadowCapacity
-        let descriptor = MTLIndirectInstanceAccelerationStructureDescriptor()
-        guard let idBuffer = device.makeBuffer(bytes: ids, length: ids.count * 8, options: .storageModeShared),
-              let descriptors = device.makeBuffer(length: capacity * 72, options: .storageModePrivate),
-              let scattered = device.makeBuffer(length: 4, options: .storageModePrivate),
-              let count = device.makeBuffer(length: 4, options: .storageModeShared)
-        else { throw RendererError.setup("tree shadow buffers") }
-        memset(count.contents(), 0, 4)
-        descriptor.instanceDescriptorType = .indirect
-        descriptor.instanceDescriptorBuffer = descriptors
-        descriptor.instanceDescriptorStride = 72
-        descriptor.maxInstanceCount = capacity
-        descriptor.instanceCountBuffer = count
-        let sizes = device.accelerationStructureSizes(descriptor: descriptor)
-        guard let accel = device.makeAccelerationStructure(size: sizes.accelerationStructureSize),
-              let scratch = device.makeBuffer(length: sizes.buildScratchBufferSize, options: .storageModePrivate)
-        else { throw RendererError.setup("tree shadow structure") }
-        return Shadows(proxies: proxies, proxyIDs: idBuffer,
-                       scatter: try device.makeComputePipelineState(function: scatter),
-                       clamp: try device.makeComputePipelineState(function: clamp),
-                       descriptors: descriptors, scattered: scattered, count: count, descriptor: descriptor,
-                       accel: accel, scratch: scratch)
+    static func makeCasters(device: MTLDevice, library: MTLLibrary, depthFormat: MTLPixelFormat) throws -> Casters {
+        guard let scatter = library.makeFunction(name: "floraCasters"),
+              let args = library.makeFunction(name: "floraCasterArguments") else { throw RendererError.setup("tree caster kernels") }
+        let desc = MTLRenderPipelineDescriptor()
+        desc.vertexFunction = library.makeFunction(name: "floraVertex")
+        desc.fragmentFunction = library.makeFunction(name: "floraDepth")
+        desc.depthAttachmentPixelFormat = .depth32Float
+        let pipeline = try device.makeRenderPipelineState(descriptor: desc)
+        desc.vertexFunction = library.makeFunction(name: "floraImpostorCasterVertex")
+        desc.fragmentFunction = library.makeFunction(name: "floraImpostorDepth")
+        let impostorPipeline = try device.makeRenderPipelineState(descriptor: desc)
+        let depthDesc = MTLDepthStencilDescriptor()
+        depthDesc.depthCompareFunction = .less
+        depthDesc.isDepthWriteEnabled = true
+        let n = shadowMapSize
+        let mapDesc = MTLTextureDescriptor()
+        mapDesc.textureType = .type2DArray
+        mapDesc.pixelFormat = .depth32Float
+        mapDesc.width = n
+        mapDesc.height = n
+        mapDesc.arrayLength = cascadeCount
+        mapDesc.usage = [.renderTarget, .shaderRead]
+        mapDesc.storageMode = .private
+        let buckets = casterBuckets
+        guard let depthState = device.makeDepthStencilState(descriptor: depthDesc),
+              let maps = device.makeTexture(descriptor: mapDesc),
+              let counts = device.makeBuffer(length: buckets * 4, options: .storageModeShared),
+              let instances = device.makeBuffer(length: buckets * capacity * MemoryLayout<Instance>.stride, options: .storageModePrivate),
+              let drawArguments = device.makeBuffer(length: buckets * 20, options: .storageModeShared)
+        else { throw RendererError.setup("tree shadow maps") }
+        memset(drawArguments.contents(), 0, drawArguments.length)
+        return Casters(scatter: try device.makeComputePipelineState(function: scatter),
+                       arguments: try device.makeComputePipelineState(function: args),
+                       pipeline: pipeline, impostorPipeline: impostorPipeline, depthState: depthState,
+                       maps: maps, counts: counts, instances: instances, drawArguments: drawArguments)
     }
 
     /// Draws every variant's LOD0 mesh from the side into the impostor arrays, then gives
@@ -552,27 +515,37 @@ final class FloraRenderer {
         enc.endEncoding()
     }
 
-    /// Rebuilds the tree shadow structure around `eye` when the camera has moved
-    /// `shadowRebuild` metres since the last build, or the last build stood on tiles still
-    /// loading. `settled`: every tile the view needs has loaded.
-    func updateShadows(_ cmd: MTLCommandBuffer, uniforms: inout TerrainRenderer.Uniforms, eye: SIMD3<Double>,
-                       terrainParams: TerrainRenderer.TerrainParams, detail: TerrainDetail, pages: MTLBuffer,
-                       tiles: MTLTexture, settled: Bool) {
-        guard let shadows, specimens == nil else { return }
-        if let c = shadowCentre, shadowSettled, simd_distance(c, eye) < shadowRebuild { return }
-        shadowCentre = eye
-        shadowSettled = settled
+    /// Fits this frame's cascades to the view, scatters the trees that overlap each, and
+    /// draws them into its shadow map (same vertex code and alpha test as the prepass).
+    func renderShadows(_ cmd: MTLCommandBuffer, uniforms: inout TerrainRenderer.Uniforms, eye: SIMD3<Double>,
+                       forward: SIMD3<Float>, sun: SIMD3<Double>, aspect: Double,
+                       terrainParams: TerrainRenderer.TerrainParams, detail: TerrainDetail, pages: MTLBuffer, tiles: MTLTexture) {
+        guard let casters, specimens == nil else { return }
+        let cascades = ShadowCascades.fit(
+            eye: eye, forward: SIMD3(Double(forward.x), Double(forward.y), Double(forward.z)), sun: sun,
+            splits: cascadeSplits, tanHalfFovY: tan(Double.pi / 6), aspect: aspect,
+            resolutions: cascadeSizes, casterReach: casterReach(sun: sun))
+        var shadow: [SIMD4<Float>] = []
+        for c in cascades {
+            let rows = c.clipRows.map { r in SIMD4(Float(r.x), Float(r.y), Float(r.z), Float(r.w)) }
+            shadow += rows
+            shadow.append(SIMD4(Float(c.texel), Float(c.depthRange), Float(c.split), Float(c.radius)))
+        }
+        let n = Float(FloraRenderer.shadowMapSize)
+        shadow.append(SIMD4(shadowRange, Float(cascadeSizes[0]) / n, Float(cascadeSizes[1]) / n, Float(cascadeSizes[2]) / n))
+        shadowParams = shadow
+
         guard let blit = cmd.makeBlitCommandEncoder() else { return }
-        blit.label = "tree shadows clear"
-        blit.fill(buffer: shadows.scattered, range: 0..<4, value: 0)
+        blit.label = "tree casters clear"
+        blit.fill(buffer: casters.counts, range: 0..<casters.counts.length, value: 0)
         blit.endEncoding()
         guard let enc = cmd.makeComputeCommandEncoder() else { return }
-        enc.label = "tree shadows scatter"
+        enc.label = "tree casters"
         var p = params(eye: eye, viewProjection: matrix_identity_float4x4)
         var t = terrainParams
         var d = detail.params
-        let reach = shadowRange + shadowMargin
-        let shrubReach = Swift.min(shrubRange - 10, reach)
+        let reach = shadowRange + casterMargin
+        let shrubReach = Swift.min(shrubRange, reach)
         let canopyCell = Float(Communities.canopyCell), shrubCell = Float(Communities.shrubCell)
         let canopyCells = Int((2 * reach / canopyCell).rounded(.up)) + 2
         let shrubCells = Int((2 * shrubReach / shrubCell).rounded(.up)) + 2
@@ -581,18 +554,17 @@ final class FloraRenderer {
         }
         let oc = origin(canopyCell, canopyCells), os = origin(shrubCell, shrubCells)
         var sp: [SIMD4<Float>] = [SIMD4(oc.x, oc.y, os.x, os.y),
-                                  SIMD4(Float(canopyCells), Float(shrubCells), reach, shrubReach),
-                                  SIMD4(Float(FloraRenderer.shadowCapacity), 0, 0, 0)]
-        enc.setComputePipelineState(shadows.scatter)
+                                  SIMD4(Float(canopyCells), Float(shrubCells), reach, shrubReach)]
+        enc.setComputePipelineState(casters.scatter)
         enc.setBytes(&uniforms, length: MemoryLayout<TerrainRenderer.Uniforms>.stride, index: 0)
         enc.setBytes(&p, length: p.count * 16, index: 1)
         enc.setBytes(&t, length: MemoryLayout<TerrainRenderer.TerrainParams>.stride, index: 2)
         enc.setBytes(&d, length: MemoryLayout<TerrainDetail.Params>.stride, index: 3)
         enc.setBuffer(pages, offset: 0, index: 4)
-        enc.setBuffer(shadows.scattered, offset: 0, index: 5)
-        enc.setBuffer(shadows.descriptors, offset: 0, index: 6)
+        enc.setBuffer(casters.counts, offset: 0, index: 5)
+        enc.setBuffer(casters.instances, offset: 0, index: 6)
         enc.setBytes(&sp, length: sp.count * 16, index: 8)
-        enc.setBuffer(shadows.proxyIDs, offset: 0, index: 9)
+        enc.setBytes(&shadow, length: shadow.count * 16, index: 9)
         enc.setTexture(tiles, index: 0)
         enc.setTexture(detail.texture, index: 1)
         enc.setTextures(biomes, range: 2..<5)
@@ -603,22 +575,74 @@ final class FloraRenderer {
             let side = layer == 0 ? canopyCells : shrubCells
             enc.dispatchThreads(MTLSize(width: side, height: side, depth: 1), threadsPerThreadgroup: group)
         }
-        enc.setComputePipelineState(shadows.clamp)
-        enc.setBuffer(shadows.count, offset: 0, index: 10)
-        enc.dispatchThreads(MTLSize(width: 1, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
+        enc.setComputePipelineState(casters.arguments)
+        enc.setBuffer(meshes, offset: 0, index: 8)
+        enc.setBuffer(casters.drawArguments, offset: 0, index: 9)
+        enc.dispatchThreads(MTLSize(width: FloraRenderer.casterBuckets, height: 1, depth: 1),
+                            threadsPerThreadgroup: MTLSize(width: 64, height: 1, depth: 1))
         enc.endEncoding()
-        guard let build = cmd.makeAccelerationStructureCommandEncoder() else { return }
-        build.label = "tree shadows build"
-        build.useResources(shadows.proxies, usage: .read)
-        build.build(accelerationStructure: shadows.accel, descriptor: shadows.descriptor,
-                    scratchBuffer: shadows.scratch, scratchBufferOffset: 0)
-        build.endEncoding()
+
+        let perCascade = FloraRenderer.plantBuckets
+        for (c, cascade) in cascades.enumerated() {
+            let pass = MTLRenderPassDescriptor()
+            pass.depthAttachment.texture = casters.maps
+            pass.depthAttachment.slice = c
+            pass.depthAttachment.loadAction = .clear
+            pass.depthAttachment.clearDepth = 1
+            pass.depthAttachment.storeAction = .store
+            guard let draw = cmd.makeRenderCommandEncoder(descriptor: pass) else { return }
+            draw.label = "tree shadow map \(c)"
+            draw.setDepthStencilState(casters.depthState)
+            draw.setCullMode(.none)
+            let side = Double(cascadeSizes[c])
+            draw.setViewport(MTLViewport(originX: 0, originY: 0, width: side, height: side, znear: 0, zfar: 1))
+            // Leaf cards seen edge-on from the sun get a slope-scaled bias, up to 0.3 m.
+            draw.setDepthBias(0, slopeScale: 1.0, clamp: Float(0.3 / cascade.depthRange))
+            var cu = uniforms
+            cu.viewProjection = simd_float4x4(rows: [shadow[4 * c], shadow[4 * c + 1], shadow[4 * c + 2], SIMD4(0, 0, 0, 1)])
+            draw.setVertexBytes(&cu, length: MemoryLayout<TerrainRenderer.Uniforms>.stride, index: 1)
+            draw.setVertexBuffer(vertices, offset: 0, index: 2)
+            draw.setVertexBuffer(casters.instances, offset: 0, index: 3)
+            draw.setFragmentTexture(cards, index: 6)
+            var capacity = UInt32(FloraRenderer.capacity)
+            draw.setVertexBuffer(impostorExtents, offset: 0, index: 4)
+            draw.setVertexBytes(&capacity, length: 4, index: 5)
+            draw.setFragmentTexture(impostorAlbedo, index: 10)
+            // Meshes nearest LOD first, then the impostors.
+            for impostors in [false, true] {
+                draw.setRenderPipelineState(impostors ? casters.impostorPipeline : casters.pipeline)
+                for b in 0..<perCascade where (b % FloraRenderer.lodBuckets == Flora.lods) == impostors {
+                    draw.drawIndexedPrimitives(type: .triangle, indexType: .uint32, indexBuffer: indices, indexBufferOffset: 0,
+                                               indirectBuffer: casters.drawArguments, indirectBufferOffset: (c * perCascade + b) * 20)
+                }
+            }
+            draw.endEncoding()
+        }
     }
 
-    /// Trees in the shadow structure at its last build. Only meaningful once that build has
-    /// completed.
-    var shadowInstances: Int {
-        shadows.map { Int($0.count.contents().load(as: UInt32.self)) / 2 } ?? 0
+    /// How far beyond a cascade towards the sun its casters are kept (metres along the
+    /// light): no tree top stands more than ~45 m above the ground it shades, which it
+    /// reaches 45 / sin(elevation) m down the light.
+    func casterReach(sun: SIMD3<Double>) -> Double {
+        let l = ShadowCascades.normalized(sun)
+        return Swift.min(300, 45 / Swift.max(l.z, 0.15))
+    }
+
+    /// Tree instances drawn into each shadow map last frame, and their triangles. Only
+    /// meaningful once that frame has completed.
+    func casterCounts() -> [(instances: Int, triangles: Int)] {
+        guard let casters else { return [] }
+        let args = casters.drawArguments.contents().bindMemory(to: UInt32.self, capacity: FloraRenderer.casterBuckets * 5)
+        let perCascade = FloraRenderer.plantBuckets
+        return (0..<FloraRenderer.cascadeCount).map { c in
+            var n = 0, tris = 0
+            for k in 0..<perCascade {
+                let count = Int(args[(c * perCascade + k) * 5 + 1])
+                n += count
+                tris += count * triangles[k]
+            }
+            return (n, tris)
+        }
     }
 
     /// Places `specimens` and writes their draw arguments; the scatter stays off.

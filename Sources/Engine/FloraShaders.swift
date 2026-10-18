@@ -124,11 +124,11 @@ void floraAppend(device atomic_uint *counts, device FloraInstance *instances, ui
 // The plant (if any) a hash-grid cell grows: layer 0 the canopy, layer 1 the shrubs and
 // subcanopy. A tree always stands at the same place on revisits, and nothing is stored
 // per tree. Fills everything in `inst` but the fade. Shared by the draw scatter and the
-// shadow scatter, so shadows stand exactly where the trees are drawn.
+// shadow casters' scatter, so shadows stand exactly where the trees are drawn.
 bool floraCandidate(constant Uniforms &u, constant FloraParams &f, constant TerrainParams &t,
                     constant DetailParams &d, const device int *pages, texture2d_array<ushort, access::read> tiles,
                     texture2d_array<float, access::read> detail, texture2d<float> biome0, texture2d<float> biome1,
-                    texture2d<float> biome2, bool canopy, int2 cell, float range, bool finest,
+                    texture2d<float> biome2, bool canopy, int2 cell, float range,
                     thread FloraInstance &inst, thread int &plantOut, thread int &variantOut) {
     float cellSize = canopy ? f.cells.x : f.cells.y;
     uint h = floraHash(cell, canopy ? 0u : 1u, uint(f.counts.w));
@@ -149,9 +149,8 @@ bool floraCandidate(constant Uniforms &u, constant FloraParams &f, constant Terr
     float4 info = f.plant[plant];
 
     float2 gradient;
-    // On the terrain level drawn at this distance, or (`finest`: shadow proxies, which must
-    // not move as the camera does between rebuilds) the finest.
-    float ground = floraGround(t, d, detail, pages, tiles, xy, finest ? 0.0 : length(float3(rel, u.cameraPosition.z)), gradient);
+    // On the terrain level drawn at this distance.
+    float ground = floraGround(t, d, detail, pages, tiles, xy, length(float3(rel, u.cameraPosition.z)), gradient);
     if (ground < f.lods.z + 0.5 || length(gradient) > info.w) return false;
     // Taller where wetter and sheltered (site, in biome2.w), with some spread.
     float site = w2.w;
@@ -195,7 +194,7 @@ kernel void floraScatter(constant Uniforms &u [[buffer(0)]],
     int2 cell = int2(canopy ? f.origins.xy : f.origins.zw) + int2(gid);
     FloraInstance inst;
     int plant, variant;
-    if (!floraCandidate(u, f, t, d, pages, tiles, detail, biome0, biome1, biome2, canopy, cell, range, false,
+    if (!floraCandidate(u, f, t, d, pages, tiles, detail, biome0, biome1, biome2, canopy, cell, range,
                         inst, plant, variant)) return;
     float height = inst.height;
 
@@ -232,83 +231,6 @@ kernel void floraScatter(constant Uniforms &u [[buffer(0)]],
     }
 }
 
-// ---- Tree shadows ----
-// Every plant within the shadow range (no view culling: trees behind the camera shade what
-// it sees) becomes an instance of its variant's shadow proxy in an instance acceleration
-// structure, built on the GPU from these descriptors (FloraRenderer.updateShadows).
-
-// MTLIndirectAccelerationStructureInstanceDescriptor (72 bytes).
-struct FloraShadowInstance {
-    packed_float3 columns[4];   // MTLPackedFloat4x3: the linear part, then the translation
-    uint options;
-    uint mask;
-    uint intersectionFunctionTableOffset;
-    uint userID;
-    uint2 accelerationStructure; // MTLResourceID of the variant's proxy
-};
-
-// Where the shadow scatter looks, laid out as FloraRenderer.ShadowParams.
-struct FloraShadowParams {
-    float4 origins;         // first canopy cell (xy), first shrub cell (zw)
-    float4 extent;          // canopy cells per side, shrub cells per side, canopy range, shrub range (m)
-    float4 capacity;        // instances (x)
-};
-
-kernel void floraShadows(constant Uniforms &u [[buffer(0)]],
-                         constant FloraParams &f [[buffer(1)]],
-                         constant TerrainParams &t [[buffer(2)]],
-                         constant DetailParams &d [[buffer(3)]],
-                         const device int *pages [[buffer(4)]],
-                         device atomic_uint *count [[buffer(5)]],
-                         device FloraShadowInstance *out [[buffer(6)]],
-                         constant uint &layer [[buffer(7)]],
-                         constant FloraShadowParams &s [[buffer(8)]],
-                         const device uint2 *proxies [[buffer(9)]],
-                         texture2d_array<ushort, access::read> tiles [[texture(0)]],
-                         texture2d_array<float, access::read> detail [[texture(1)]],
-                         texture2d<float> biome0 [[texture(2)]],
-                         texture2d<float> biome1 [[texture(3)]],
-                         texture2d<float> biome2 [[texture(4)]],
-                         uint2 gid [[thread_position_in_grid]]) {
-    bool canopy = layer == 0;
-    int side = int(canopy ? s.extent.x : s.extent.y);
-    if (int(gid.x) >= side || int(gid.y) >= side) return;
-    int2 cell = int2(canopy ? s.origins.xy : s.origins.zw) + int2(gid);
-    FloraInstance inst;
-    int plant, variant;
-    if (!floraCandidate(u, f, t, d, pages, tiles, detail, biome0, biome1, biome2, canopy, cell,
-                        canopy ? s.extent.z : s.extent.w, true, inst, plant, variant)) return;
-    // Trunk and crown are instances of their own (2k and 2k + 1), so each has a tight box:
-    // a ray along the ground meets few crown boxes, and few trunk boxes higher up.
-    uint index = atomic_fetch_add_explicit(count, 1u, memory_order_relaxed);
-    if (2u * index + 1u >= uint(s.capacity.x)) return;
-    // floraVertex's placement without the wind: scale, yaw, then lean with height.
-    float k = inst.scale;
-    float2 r = inst.rotation;
-    FloraShadowInstance o;
-    o.columns[0] = packed_float3(k * r.x, k * r.y, 0.0);
-    o.columns[1] = packed_float3(-k * r.y, k * r.x, 0.0);
-    o.columns[2] = packed_float3(k * inst.lean.x, k * inst.lean.y, k);
-    o.columns[3] = inst.position;
-    o.options = 5u;  // disable triangle culling | opaque
-    o.mask = 1u;  // trunks: kTrunkMask
-    o.intersectionFunctionTableOffset = 0u;
-    o.userID = 0u;
-    uint proxy = uint(plant * kFloraVariants + variant);
-    o.accelerationStructure = proxies[2u * proxy];
-    out[2u * index] = o;
-    o.accelerationStructure = proxies[2u * proxy + 1u];
-    o.mask = 2u;  // crowns: kCrownMask
-    out[2u * index + 1u] = o;
-}
-
-// The instance count the build reads, no more than the descriptors written.
-kernel void floraShadowCount(const device uint *scattered [[buffer(5)]],
-                             device uint *count [[buffer(10)]],
-                             constant FloraShadowParams &s [[buffer(8)]]) {
-    count[0] = min(2u * scattered[0], uint(s.capacity.x) & ~1u);
-}
-
 // One thread per bucket: this frame's instance count into its indirect draw arguments.
 struct FloraMesh {
     uint indexCount;
@@ -334,6 +256,85 @@ kernel void floraArguments(constant FloraParams &f [[buffer(1)]],
     if (bucket > uint(kFloraPlants * kFloraVariants * kFloraLods)) return;  // plants, then the scale figure
     uint capacity = uint(f.counts.z);
     FloraMesh m = meshes[bucket];
+    args[bucket].indexCount = m.indexCount;
+    args[bucket].instanceCount = min(counts[bucket], capacity);
+    args[bucket].indexStart = m.indexStart;
+    args[bucket].baseVertex = m.baseVertex;
+    args[bucket].baseInstance = bucket * capacity;
+}
+
+// ---- Tree shadow casters ----
+// Every plant near enough to shade what the camera sees (no view culling: trees behind the
+// camera and off to the sides cast into the view) goes into each cascade whose map it
+// overlaps, in a (cascade, plant, variant, LOD) bucket (FloraRenderer.renderShadows). The
+// LOD goes by the tree's distance from the camera, never finer than the cascade's: LOD0
+// within kCasterLod0 in the nearest cascade, LOD1 within kCasterLod1 short of the far
+// cascade, impostors facing the sun beyond. A far tree casting into a near cascade (at low
+// sun, long shadows reach the camera from 100 m away) stands well above what it shades,
+// so its penumbra is wide and its mesh's detail would be lost anyway. Same placement as floraScatter
+// (the ground at its drawn LOD), so each tree meets its own shadow.
+
+// Where the caster scatter looks, laid out as FloraRenderer.renderShadows writes it.
+struct FloraCasterParams {
+    float4 origins;         // first canopy cell (xy), first shrub cell (zw)
+    float4 extent;          // canopy cells per side, shrub cells per side, canopy reach, shrub reach (m)
+};
+
+constant int kFloraPlantVariants = kFloraPlants * kFloraVariants;
+constant float kCasterLod0 = 35.0, kCasterLod1 = 150.0;
+
+kernel void floraCasters(constant Uniforms &u [[buffer(0)]],
+                         constant FloraParams &f [[buffer(1)]],
+                         constant TerrainParams &t [[buffer(2)]],
+                         constant DetailParams &d [[buffer(3)]],
+                         const device int *pages [[buffer(4)]],
+                         device atomic_uint *counts [[buffer(5)]],
+                         device FloraInstance *instances [[buffer(6)]],
+                         constant uint &layer [[buffer(7)]],
+                         constant FloraCasterParams &s [[buffer(8)]],
+                         constant TreeShadows &shadows [[buffer(9)]],
+                         texture2d_array<ushort, access::read> tiles [[texture(0)]],
+                         texture2d_array<float, access::read> detail [[texture(1)]],
+                         texture2d<float> biome0 [[texture(2)]],
+                         texture2d<float> biome1 [[texture(3)]],
+                         texture2d<float> biome2 [[texture(4)]],
+                         uint2 gid [[thread_position_in_grid]]) {
+    bool canopy = layer == 0;
+    int side = int(canopy ? s.extent.x : s.extent.y);
+    if (int(gid.x) >= side || int(gid.y) >= side) return;
+    int2 cell = int2(canopy ? s.origins.xy : s.origins.zw) + int2(gid);
+    FloraInstance inst;
+    int plant, variant;
+    if (!floraCandidate(u, f, t, d, pages, tiles, detail, biome0, biome1, biome2, canopy, cell,
+                        canopy ? s.extent.z : s.extent.w, inst, plant, variant)) return;
+    float3 centre = float3(inst.position) + float3(0.0, 0.0, 0.55 * inst.height) - u.cameraPosition;
+    float radius = 0.65 * inst.height + 1.0;
+    uint capacity = uint(f.counts.z);
+    float dist = length(centre.xy);
+    int nearest = dist < kCasterLod0 ? 0 : (dist < kCasterLod1 ? 1 : 2);
+    int bucket0 = (plant * kFloraVariants + variant) * kFloraLods;
+    for (int c = 0; c < kTreeCascades; c++) {
+        TreeCascade k = shadows.cascades[c];
+        float across = radius / k.info.w;
+        float x = dot(k.x.xyz, centre) + k.x.w, y = dot(k.y.xyz, centre) + k.y.w;
+        float z = dot(k.z.xyz, centre) + k.z.w;
+        float deep = radius / k.info.y;
+        if (abs(x) > 1.0 + across || abs(y) > 1.0 + across || z < -deep || z > 1.0 + deep) continue;
+        int lod = c == kTreeCascades - 1 ? 2 : max(nearest, c);
+        floraAppend(counts, instances, capacity, c * kFloraPlantVariants * kFloraLods + bucket0 + lod, inst);
+    }
+}
+
+// One thread per caster bucket: its count and mesh into the indirect arguments.
+kernel void floraCasterArguments(constant FloraParams &f [[buffer(1)]],
+                                 const device uint *counts [[buffer(5)]],
+                                 constant FloraMesh *meshes [[buffer(8)]],
+                                 device FloraDrawArguments *args [[buffer(9)]],
+                                 uint bucket [[thread_position_in_grid]]) {
+    uint perCascade = uint(kFloraPlantVariants * kFloraLods);
+    if (bucket >= uint(kTreeCascades) * perCascade) return;
+    uint capacity = uint(f.counts.z);
+    FloraMesh m = meshes[bucket % perCascade];
     args[bucket].indexCount = m.indexCount;
     args[bucket].instanceCount = min(counts[bucket], capacity);
     args[bucket].indexStart = m.indexStart;
@@ -577,6 +578,38 @@ fragment uint4 floraImpostorSurface(FloraImpostorOut in [[stage_in]], texture2d_
     float3 n = float3(-in.right.y, in.right.x, 0.0);
     return uint4(as_type<uint>(p.x), as_type<uint>(p.y), as_type<uint>(p.z),
                  pack_float_to_snorm2x16(octEncode(n)) | kTreeSurface | kImpostorSurface);
+}
+
+// A caster for the far shadow cascade: the variant's side view on a quad facing the sun,
+// pivoting about the middle of the crown so the crown's shadow lands where the mesh's would.
+// Its shadow is the silhouette drawn out by 1 / sin(elevation) along the sun, as a round
+// crown's is.
+vertex FloraImpostorOut floraImpostorCasterVertex(uint vid [[vertex_id]], uint iid [[instance_id]],
+                                                  constant Uniforms &u [[buffer(1)]],
+                                                  const device FloraVertex *vertices [[buffer(2)]],
+                                                  const device FloraInstance *instances [[buffer(3)]],
+                                                  constant FloraImpostor *impostors [[buffer(4)]],
+                                                  constant uint &capacity [[buffer(5)]]) {
+    FloraVertex v = vertices[vid];
+    FloraInstance inst = instances[iid];
+    int layer = (int(iid / capacity) / kFloraLods) % kFloraPlantVariants;  // baseInstance = bucket × capacity
+    float4 e = impostors[layer].extent;
+    float3 l = normalize(u.sunDirection);
+    float3 right = normalize(cross(l, abs(l.z) < 0.999 ? float3(0.0, 0.0, 1.0) : float3(1.0, 0.0, 0.0)));
+    float3 up = cross(right, l);
+    float side = (v.uv.x - 0.5) * 2.0 * e.x * inst.scale;
+    float mid = 0.5 * (e.y + e.z) * inst.scale;
+    float z = mix(e.y, e.z, v.uv.y) * inst.scale;
+    FloraImpostorOut o;
+    float3 world = float3(inst.position) + float3(0.0, 0.0, mid) + right * side + up * (z - mid);
+    o.position = u.viewProjection * float4(world - u.cameraPosition, 1.0);
+    o.world = world;
+    o.uv = float2(inst.rotation.y < 0.0 ? 1.0 - v.uv.x : v.uv.x, 1.0 - v.uv.y);
+    o.right = right.xy;
+    o.tint = inst.tint;
+    o.fade = 0.0;
+    o.layer = layer;
+    return o;
 }
 
 fragment void floraImpostorDepth(FloraImpostorOut in [[stage_in]], texture2d_array<float> albedo [[texture(10)]]) {
