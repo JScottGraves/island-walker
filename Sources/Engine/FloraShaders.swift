@@ -933,8 +933,8 @@ kernel void floraPatches(constant Uniforms &u [[buffer(0)]],
     if (floraRandom(h, 3) >= 1.3 * e.y) return;
     float2 gradient;
     float ground = floraGround(t, d, detail, pages, tiles, xy, length(rel), gradient);
-    // Walls steeper than 45° are the canopy shading's: a card there stands off the slope.
-    if (ground < f.lods.z + 0.5 || length(gradient) > 1.0) return;
+    // Walls steeper than 40° are the canopy shading's: a card there stands off the slope.
+    if (ground < f.lods.z + 0.5 || length(gradient) > 0.84) return;
 
     FloraInstance inst;
     float scale = 0.85 + 0.3 * floraRandom(h, 4);

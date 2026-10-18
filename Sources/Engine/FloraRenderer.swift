@@ -689,8 +689,9 @@ final class FloraRenderer {
         for e in Communities.table { out += cumulative(e.canopyShares) }
         for e in Communities.table { out += cumulative(e.shrubShares) }
         for plant in Plant.allCases {
-            // Canopy trees on slopes to ~50°, shrubs and ferns to ~70°: pali walls carry them.
-            let steepest: Float = plant == .ohia || plant == .koa || plant == .loulu ? 1.19 : 2.75
+            // Canopy trees on slopes to ~40°, shrubs and ferns to ~55°: pali walls are the far
+            // canopy shading's (paliWall), with no trees standing off them.
+            let steepest: Float = plant == .ohia || plant == .koa || plant == .loulu ? 0.84 : 1.43
             out.append(SIMD4(Float(plant.heightRange.lowerBound), Float(plant.heightRange.upperBound),
                              Float(plant.referenceHeight), steepest))
         }

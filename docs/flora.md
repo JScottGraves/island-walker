@@ -600,6 +600,24 @@ terrain far away. Built here in that order of value.
     far albedo's soil, so no red returns.
   - Crowns, clumps and stands remain for forest on gentler ground.
   - Cost: single runs of the heaviest 07:00 views are 16–24 ms.
+- **Scott's photo of the windward Koʻolau** as the guide (2026-10-18):
+  - No accent trees on the walls: canopy trees back to slopes ≤40°, shrubs ≤55°, stand
+    patches ≤40°. Past 40° the ground is the wall's, whatever community the weights name.
+  - The wall is coloured by its shape (`paliWall`), not by noise. Bright yellow-green
+    uluhe and moss on the less steep facets and convex ribs; dark blue-grey-green wet
+    basalt on the steepest faces and in concave gullies; grey rock on the steepest
+    concave faces. Curvature is the 10 m heights' Laplacian over ±20 m, from the vertex
+    shader (`VOut.ridge`).
+  - Fine streaks run down the fall line: noise stretched 10× along it, at 2 m and 9 m,
+    each filtered by footprint. Gullies are darker through occlusion.
+  - The forest at the foot keeps its crowns, blended into the wall's texture over a
+    range of slope, with no seam.
+  - The wall's shading starts 30 m from the camera rather than at the ground textures'
+    150 m, so close walls aren't red soil texture.
+  - Lookout used for the comparison: `--camera koolau=55200,34000,-125,7 --eye 120`
+    (Kāneʻohe side, ~4 km from the crest).
+  - Cost: Oʻahu ridge at 07:00 17–22 ms (one 27 ms outlier in eight runs); seed 42
+    summit 22.5.
 - `floragen --sites` is unchanged.
 - Snapshots take `--eye H` to stand the camera over the canopy for distant views.
 
