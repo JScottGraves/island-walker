@@ -698,3 +698,12 @@ terrain far away. Built here in that order of value.
   - Open views over far terrain pay +0.3 to +1.7 ms for the canopy shading and patches.
   - Seed 42's summit at 07:00 (+4.7) is an outlier of that low-sun view, as in §8's
     summit figures; its other hours are cheaper than before.
+
+- **Ring without trees when flying** (2026-10-18): a high camera saw a band a few hundred
+  metres out with neither single trees nor stand patches. The trees end by 3D distance;
+  the patches cut their inner edge by horizontal distance, so cells horizontally inside
+  the trees' range but 3D beyond it got nothing. Patches now cut only their outer edge
+  horizontally and take their inner edge from the same 3D distance (with the time fades).
+  Also fixed: `floraCandidate` chose the trunk's CDLOD ground ring from the camera's
+  height above the sea, not above the ground, which put trees on far rings' surfaces
+  under a high camera.
