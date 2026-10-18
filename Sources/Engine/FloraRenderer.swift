@@ -133,6 +133,23 @@ final class FloraRenderer {
     let impostorNormal: MTLTexture
     /// Per variant: half-width and z range of its LOD0 mesh (FloraImpostor).
     let impostorExtents: MTLBuffer
+    /// Stand patches (floraPatches): one card per forested `patchCell` beyond the single
+    /// trees, out to `patchRange`, showing a patch of its community baked in the impostors'
+    /// views. Per community: half-width, crown cover, height (m) in `patchExtents`.
+    static let patchCell = 24.0
+    static let patchCapacity = 16384
+    var patchRange: Float = 2500
+    let patchAlbedo: MTLTexture
+    let patchNormal: MTLTexture
+    let patchExtents: MTLBuffer
+    let patchCounts: MTLBuffer
+    let patchInstances: MTLBuffer
+    let patchArguments: MTLBuffer
+    let patchScatter: MTLComputePipelineState
+    let patchArgumentsPipeline: MTLComputePipelineState
+    let patchPrepassPipeline: MTLRenderPipelineState
+    let patchShadePipeline: MTLRenderPipelineState
+    let patchQuad: Mesh
     let vertices: MTLBuffer
     let indices: MTLBuffer
     let meshes: MTLBuffer
@@ -220,6 +237,15 @@ final class FloraRenderer {
         desc.fragmentFunction = try library.makeFunction(name: "floraImpostorFragment", constantValues: constants)
         desc.colorAttachments[0].pixelFormat = colorFormat
         impostorShadePipeline = try device.makeRenderPipelineState(descriptor: desc)
+        desc.vertexFunction = library.makeFunction(name: "floraPatchVertex")
+        patchShadePipeline = try device.makeRenderPipelineState(descriptor: desc)
+        desc.fragmentFunction = library.makeFunction(name: rayTraced ? "floraImpostorSurface" : "floraImpostorDepth")
+        desc.colorAttachments[0].pixelFormat = rayTraced ? .rgba32Uint : .invalid
+        patchPrepassPipeline = try device.makeRenderPipelineState(descriptor: desc)
+        guard let ps = library.makeFunction(name: "floraPatches"), let pa = library.makeFunction(name: "floraPatchArguments")
+        else { throw RendererError.setup("patch kernels") }
+        patchScatter = try device.makeComputePipelineState(function: ps)
+        patchArgumentsPipeline = try device.makeComputePipelineState(function: pa)
 
         // Every plant's meshes in one buffer pair, bucket order (plant, variant, LOD), each
         // variant's impostor quad after its meshes.
@@ -291,6 +317,19 @@ final class FloraRenderer {
         biomes = try FloraRenderer.biomeTextures(device: device, maps: maps)
         (impostorAlbedo, impostorNormal) = try FloraRenderer.bakeImpostors(
             device: device, library: library, vertices: vb, indices: ib, meshes: lod0, extents: extents, cards: cards, bark: bark)
+        patchQuad = table[FloraRenderer.lodBuckets - 1]
+        let patches = try FloraRenderer.bakePatches(device: device, library: library, vertices: vb, indices: ib, meshes: lod0,
+                                                    extents: extents, cards: cards, bark: bark)
+        (patchAlbedo, patchNormal) = (patches.albedo, patches.normal)
+        let groups = Communities.table.count
+        guard let pe = device.makeBuffer(bytes: patches.extents, length: patches.extents.count * 16, options: .storageModeShared),
+              let pc = device.makeBuffer(length: groups * 4, options: .storageModeShared),
+              let pi = device.makeBuffer(length: groups * FloraRenderer.patchCapacity * MemoryLayout<Instance>.stride,
+                                         options: .storageModePrivate),
+              let pargs = device.makeBuffer(length: groups * 20, options: .storageModeShared)
+        else { throw RendererError.setup("patch buffers") }
+        memset(pargs.contents(), 0, pargs.length)
+        patchExtents = pe; patchCounts = pc; patchInstances = pi; patchArguments = pargs
         casters = treeShadows ? try FloraRenderer.makeCasters(device: device, library: library, depthFormat: depthFormat) : nil
     }
 
@@ -405,8 +444,145 @@ final class FloraRenderer {
         }
         cmd.commit()
         cmd.waitUntilCompleted()
-        // Mips on the CPU, every layer at once: each slice is read and written on its own.
-        let jobs = (0..<(meshes.count * views)).flatMap { layer in [(layer, albedo, true), (layer, normal, false)] }
+        finishMips(albedo: albedo, normal: normal, layers: meshes.count * views)
+        return (albedo, normal)
+    }
+
+    /// Bakes one 24 m patch of each community's stand (Communities.table, at a middling site)
+    /// from LOD0 trees in the impostors' `impostorViews` views (layer: community × views +
+    /// view), with coverage-preserving mips, and returns each patch's half-width and height.
+    static func bakePatches(device: MTLDevice, library: MTLLibrary, vertices: MTLBuffer, indices: MTLBuffer,
+                            meshes: [Mesh], extents: [SIMD4<Float>], cards: MTLTexture,
+                            bark: MTLTexture) throws -> (albedo: MTLTexture, normal: MTLTexture, extents: [SIMD4<Float>]) {
+        let n = impostorSize, views = impostorViews
+        let half = Float(patchCell / 2)
+        // Each community's trees, as instances around the patch centre.
+        var trees: [[(instance: Instance, mesh: Int)]] = []
+        var patchExtents: [SIMD4<Float>] = []
+        for (k, entry) in Communities.table.enumerated() {
+            var rng = SplitMix64(seed: UInt64(1000 + k))
+            func random() -> Float { Float(Double.random(in: 0..<1, using: &rng)) }
+            func pick(_ shares: [(plant: Plant, share: Double)]) -> Plant? {
+                var r = Double(random())
+                for s in shares { r -= s.share; if r < 0 { return s.plant } }
+                return shares.last?.plant
+            }
+            var list: [(instance: Instance, mesh: Int)] = []
+            var reach: Float = 0, top: Float = 0
+            // The shrub layer only where it is the cover seen from afar: single shrubs end at
+            // shrubRange, well before the patches start, and under a canopy they're hidden.
+            let shrubs = entry.canopy == 0 || entry.channel == "biome-cliff" || entry.channel == "biome-cloud-shrubland"
+            let layers = [(Communities.canopyCell, entry.canopy, entry.canopyShares)]
+                + (shrubs ? [(Communities.shrubCell, entry.shrubs, entry.shrubShares)] : [])
+            let cover = 1 - exp(-(entry.canopy * 25 + (shrubs ? entry.shrubs * 6 : 0)) * 1e-4)
+            for (cell, density, shares) in layers {
+                let c = Float(cell)
+                let side = Int((2 * half / c).rounded(.up))
+                for j in 0..<side {
+                    for i in 0..<side {
+                        let accept = random() < Float(density * cell * cell * 1e-4)
+                        let x = -half + (Float(i) + random()) * c, y = -half + (Float(j) + random()) * c
+                        guard accept, abs(x) < half, abs(y) < half, let plant = pick(shares) else { continue }
+                        let variant = Int(random() * Float(Flora.variants)) % Flora.variants
+                        let range = plant.heightRange
+                        let height = Float(range.lowerBound + 0.6 * (range.upperBound - range.lowerBound)) * (0.75 + 0.4 * random())
+                        let scale = height / Float(plant.referenceHeight)
+                        let yaw = random() * 2 * .pi
+                        let mesh = plant.rawValue * Flora.variants + variant
+                        list.append((Instance(x: x, y: y, z: 0, scale: scale, cosYaw: cos(yaw), sinYaw: sin(yaw), leanX: 0, leanY: 0,
+                                              fade: 0, tint: 0.85 + 0.3 * random(), phase: 0, height: height), mesh))
+                        reach = Swift.max(reach, (x * x + y * y).squareRoot() + extents[mesh].x * scale)
+                        top = Swift.max(top, extents[mesh].z * scale)
+                    }
+                }
+            }
+            trees.append(list)
+            patchExtents.append(SIMD4(reach, Float(cover), list.isEmpty ? 0 : top * 1.02, 0))
+        }
+        let all = trees.flatMap { $0 }.map(\.instance)
+        func array(_ format: MTLPixelFormat) throws -> MTLTexture {
+            let d = MTLTextureDescriptor()
+            d.textureType = .type2DArray
+            d.pixelFormat = format
+            d.width = n
+            d.height = n
+            d.arrayLength = trees.count * views
+            d.mipmapLevelCount = Int(log2(Double(n))) + 1
+            d.usage = [.renderTarget, .shaderRead]
+            d.storageMode = .shared
+            guard let t = device.makeTexture(descriptor: d) else { throw RendererError.setup("patch textures") }
+            return t
+        }
+        let albedo = try array(.rgba8Unorm_srgb), normal = try array(.rgba8Unorm)
+        let depthDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .depth32Float, width: n, height: n, mipmapped: false)
+        depthDesc.usage = [.renderTarget]
+        depthDesc.storageMode = .private
+        let desc = MTLRenderPipelineDescriptor()
+        desc.vertexFunction = library.makeFunction(name: "floraPatchBakeVertex")
+        desc.fragmentFunction = library.makeFunction(name: "floraBakeFragment")
+        desc.colorAttachments[0].pixelFormat = .rgba8Unorm_srgb
+        desc.colorAttachments[1].pixelFormat = .rgba8Unorm
+        desc.depthAttachmentPixelFormat = .depth32Float
+        let depthStateDesc = MTLDepthStencilDescriptor()
+        depthStateDesc.depthCompareFunction = .less
+        depthStateDesc.isDepthWriteEnabled = true
+        guard let depth = device.makeTexture(descriptor: depthDesc),
+              let depthState = device.makeDepthStencilState(descriptor: depthStateDesc),
+              let instanceBuffer = device.makeBuffer(bytes: all.isEmpty ? [Instance(x: 0, y: 0, z: 0, scale: 1, cosYaw: 1, sinYaw: 0, leanX: 0, leanY: 0, fade: 0, tint: 1, phase: 0, height: 1)] : all,
+                                                     length: Swift.max(all.count, 1) * MemoryLayout<Instance>.stride, options: .storageModeShared),
+              let queue = device.makeCommandQueue(), let cmd = queue.makeCommandBuffer()
+        else { throw RendererError.setup("patch bake") }
+        let pipeline = try device.makeRenderPipelineState(descriptor: desc)
+        var first = 0
+        for (k, list) in trees.enumerated() {
+            for view in 0..<views {
+                let pass = MTLRenderPassDescriptor()
+                pass.colorAttachments[0].texture = albedo
+                pass.colorAttachments[0].slice = k * views + view
+                pass.colorAttachments[0].loadAction = .clear
+                pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+                pass.colorAttachments[0].storeAction = .store
+                pass.colorAttachments[1].texture = normal
+                pass.colorAttachments[1].slice = k * views + view
+                pass.colorAttachments[1].loadAction = .clear
+                pass.colorAttachments[1].clearColor = MTLClearColor(red: 0.5, green: 0.5, blue: 1, alpha: 0)
+                pass.colorAttachments[1].storeAction = .store
+                pass.depthAttachment.texture = depth
+                pass.depthAttachment.loadAction = .clear
+                pass.depthAttachment.clearDepth = 1
+                pass.depthAttachment.storeAction = .dontCare
+                guard let enc = cmd.makeRenderCommandEncoder(descriptor: pass) else { throw RendererError.setup("patch bake pass") }
+                enc.setRenderPipelineState(pipeline)
+                enc.setDepthStencilState(depthState)
+                enc.setCullMode(.none)
+                var frame = SIMD4(Swift.max(patchExtents[k].x, 1), Swift.max(patchExtents[k].z, 1),
+                                  Float(view) * 2 * .pi / Float(views), 0)
+                enc.setVertexBuffer(vertices, offset: 0, index: 2)
+                enc.setVertexBuffer(instanceBuffer, offset: 0, index: 3)
+                enc.setVertexBytes(&frame, length: 16, index: 4)
+                enc.setFragmentTexture(cards, index: 6)
+                enc.setFragmentTexture(bark, index: 7)
+                for (t, tree) in list.enumerated() {
+                    let m = meshes[tree.mesh]
+                    enc.drawIndexedPrimitives(type: .triangle, indexCount: Int(m.indexCount), indexType: .uint32,
+                                              indexBuffer: indices, indexBufferOffset: Int(m.indexStart) * 4, instanceCount: 1,
+                                              baseVertex: Int(m.baseVertex), baseInstance: first + t)
+                }
+                enc.endEncoding()
+            }
+            first += list.count
+        }
+        cmd.commit()
+        cmd.waitUntilCompleted()
+        finishMips(albedo: albedo, normal: normal, layers: trees.count * views)
+        return (albedo, normal, patchExtents)
+    }
+
+    /// Mip chains for baked views (coverage-preserving for the albedo's alpha), on the CPU,
+    /// every layer at once: each slice is read and written on its own.
+    static func finishMips(albedo: MTLTexture, normal: MTLTexture, layers: Int) {
+        let n = albedo.width
+        let jobs = (0..<layers).flatMap { layer in [(layer, albedo, true), (layer, normal, false)] }
         DispatchQueue.concurrentPerform(iterations: jobs.count) { j in
             let (layer, texture, coverage) = jobs[j]
             var base = [UInt8](repeating: 0, count: n * n * 4)
@@ -419,7 +595,6 @@ final class FloraRenderer {
                                 bytesPerRow: m * 4, bytesPerImage: m * m * 4)
             }
         }
-        return (albedo, normal)
     }
 
     static func textureArray(device: MTLDevice, images: [FloraTextures.Image],
@@ -574,6 +749,7 @@ final class FloraRenderer {
         guard let blit = cmd.makeBlitCommandEncoder() else { return }
         blit.label = "flora clear"
         blit.fill(buffer: counts, range: 0..<counts.length, value: 0)
+        blit.fill(buffer: patchCounts, range: 0..<patchCounts.length, value: 0)
         blit.endEncoding()
         guard let enc = cmd.makeComputeCommandEncoder() else { return }
         enc.label = "flora scatter"
@@ -618,6 +794,26 @@ final class FloraRenderer {
         enc.setBuffer(arguments, offset: 0, index: 9)
         enc.dispatchThreads(MTLSize(width: FloraRenderer.buckets, height: 1, depth: 1),
                             threadsPerThreadgroup: MTLSize(width: 64, height: 1, depth: 1))
+
+        // Stand patches from the single trees' end out to `patchRange`.
+        let patchCell = Float(FloraRenderer.patchCell)
+        let patchCells = Int((2.2 * patchRange / patchCell).rounded(.up)) + 2
+        let po = SIMD2((Float(eye.x) / patchCell).rounded(.down) - Float(patchCells / 2),
+                       (Float(eye.y) / patchCell).rounded(.down) - Float(patchCells / 2))
+        var pp: [SIMD4<Float>] = [SIMD4(po.x, po.y, Float(patchCells), 0),
+                                  SIMD4(canopyRange, patchRange, Float(FloraRenderer.patchCapacity), 0)]
+        enc.setComputePipelineState(patchScatter)
+        enc.setBuffer(patchCounts, offset: 0, index: 5)
+        enc.setBuffer(patchInstances, offset: 0, index: 6)
+        enc.setBytes(&pp, length: pp.count * 16, index: 7)
+        enc.setBuffer(patchExtents, offset: 0, index: 8)
+        enc.dispatchThreads(MTLSize(width: patchCells, height: patchCells, depth: 1), threadsPerThreadgroup: group)
+        enc.setComputePipelineState(patchArgumentsPipeline)
+        var quad = patchQuad
+        enc.setBytes(&quad, length: MemoryLayout<Mesh>.stride, index: 8)
+        enc.setBuffer(patchArguments, offset: 0, index: 9)
+        enc.dispatchThreads(MTLSize(width: Communities.table.count, height: 1, depth: 1),
+                            threadsPerThreadgroup: MTLSize(width: 16, height: 1, depth: 1))
         enc.endEncoding()
     }
 
@@ -794,7 +990,7 @@ final class FloraRenderer {
     }
 
     /// The mesh buckets (both LODs and the figure), then the impostors with their pipeline.
-    func draw(_ enc: MTLRenderCommandEncoder, impostors: MTLRenderPipelineState) {
+    func draw(_ enc: MTLRenderCommandEncoder, impostors: MTLRenderPipelineState, patches: MTLRenderPipelineState) {
         enc.setVertexBuffer(vertices, offset: 0, index: 2)
         enc.setVertexBuffer(instances, offset: 0, index: 3)
         enc.setFragmentTexture(cards, index: 6)
@@ -816,12 +1012,23 @@ final class FloraRenderer {
             enc.drawIndexedPrimitives(type: .triangle, indexType: .uint32, indexBuffer: indices, indexBufferOffset: 0,
                                       indirectBuffer: arguments, indirectBufferOffset: b * 20)
         }
+        enc.setRenderPipelineState(patches)
+        var patchCapacity = UInt32(FloraRenderer.patchCapacity)
+        enc.setVertexBuffer(patchInstances, offset: 0, index: 3)
+        enc.setVertexBuffer(patchExtents, offset: 0, index: 4)
+        enc.setVertexBytes(&patchCapacity, length: 4, index: 5)
+        enc.setFragmentTexture(patchAlbedo, index: 10)
+        enc.setFragmentTexture(patchNormal, index: 11)
+        for b in 0..<Communities.table.count {
+            enc.drawIndexedPrimitives(type: .triangle, indexType: .uint32, indexBuffer: indices, indexBufferOffset: 0,
+                                      indirectBuffer: patchArguments, indirectBufferOffset: b * 20)
+        }
     }
 
     /// Trees in the depth prepass, after the terrain (same depth state and uniforms).
     func drawPrepass(_ enc: MTLRenderCommandEncoder) {
         enc.setRenderPipelineState(prepassPipeline)
-        draw(enc, impostors: impostorPrepassPipeline)
+        draw(enc, impostors: impostorPrepassPipeline, patches: patchPrepassPipeline)
     }
 
     /// Trees in the shading pass, after the terrain: the terrain's fragment textures stay
@@ -833,7 +1040,7 @@ final class FloraRenderer {
         enc.setFragmentTexture(bark, index: 7)
         enc.setFragmentTexture(skyVisibility, index: 8)
         enc.setFragmentTexture(horizons, index: 9)
-        draw(enc, impostors: impostorShadePipeline)
+        draw(enc, impostors: impostorShadePipeline, patches: patchShadePipeline)
     }
 
     /// Instances drawn last frame (both LODs, cross-fades counted twice) and their triangles.

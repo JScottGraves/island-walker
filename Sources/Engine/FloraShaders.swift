@@ -602,7 +602,8 @@ fragment float4 floraFragment(FloraOut in [[stage_in]], constant Uniforms &u [[b
 // Each plant variant drawn once from the side at start-up (floraBake*) into an albedo
 // and a normal texture array, then drawn far away as a camera-facing quad.
 
-// Per plant variant: half-width, lowest and highest z of the LOD0 mesh (reference scale).
+// Per plant variant: half-width, lowest and highest z of the LOD0 mesh (reference scale);
+// per stand patch: half-width, crown cover, height.
 struct FloraImpostor {
     float4 extent;
 };
@@ -850,4 +851,193 @@ fragment float4 floraImpostorFragment(FloraImpostorOut in [[stage_in]], constant
     }
     return finishSurface(u, skyView, clouds, cloudDistance, color, in.world, in.position.xy);
 }
+
+// ---- Stand patches (docs/flora.md §11) ----
+// Beyond the single trees, out to a few kilometres, each forested 24 m cell is one
+// camera-facing card showing a patch of its community's stand, baked from LOD0 trees in
+// the impostors' eight views (FloraRenderer.bakePatches). They give ridgelines and pali
+// edges their broken silhouette. Same view selection, LOD fades and occlusion as the trees.
+
+constant float kPatchCell = \(FloraRenderer.patchCell);
+
+// A patch tree for the bake: floraVertex's placement without the wind, the whole patch
+// turned by −frame.z about its centre, then the orthographic side view of floraBakeVertex
+// over frame.x either side, from 0.15 × frame.y below the ground to frame.y above it.
+vertex FloraBakeOut floraPatchBakeVertex(uint vid [[vertex_id]], uint iid [[instance_id]],
+                                         const device FloraVertex *vertices [[buffer(2)]],
+                                         const device FloraInstance *instances [[buffer(3)]],
+                                         constant float4 &frame [[buffer(4)]]) {
+    FloraVertex v = vertices[vid];
+    FloraInstance inst = instances[iid];
+    float3 p = float3(v.position) * inst.scale;
+    float2 r = inst.rotation;
+    p.xy = float2(r.x * p.x - r.y * p.y, r.y * p.x + r.x * p.y);
+    float3 n = float3(v.normal);
+    n.xy = float2(r.x * n.x - r.y * n.y, r.y * n.x + r.x * n.y);
+    p += float3(inst.position);
+    float c = cos(frame.z), s = sin(frame.z);
+    p.xy = float2(c * p.x + s * p.y, -s * p.x + c * p.y);
+    n.xy = float2(c * n.x + s * n.y, -s * n.x + c * n.y);
+    float hw = frame.x;
+    FloraBakeOut o;
+    o.position = float4(p.x / hw, (p.z + 0.15 * frame.y) / (1.15 * frame.y) * 2.0 - 1.0, (p.y + hw) / (2.0 * hw), 1.0);
+    o.normal = n;
+    o.uv = float2(v.uv.x, 1.0 - v.uv.y);
+    o.ao = v.ao;
+    o.material = int(v.material);
+    return o;
+}
+
+// Where the patch scatter looks, laid out as FloraRenderer.scatterPatches writes it.
+struct FloraPatchParams {
+    float4 grid;            // first cell (xy), cells per side, unused
+    float4 range;           // nearest, farthest distance (m), bucket capacity, unused
+};
+
+kernel void floraPatches(constant Uniforms &u [[buffer(0)]],
+                         constant FloraParams &f [[buffer(1)]],
+                         constant TerrainParams &t [[buffer(2)]],
+                         constant DetailParams &d [[buffer(3)]],
+                         const device int *pages [[buffer(4)]],
+                         device atomic_uint *counts [[buffer(5)]],
+                         device FloraInstance *instances [[buffer(6)]],
+                         constant FloraPatchParams &pp [[buffer(7)]],
+                         constant FloraImpostor *patches [[buffer(8)]],
+                         device atomic_uint *lodKeys [[buffer(10)]],
+                         device uint *lodValues [[buffer(11)]],
+                         constant FloraHzb &hzbInfo [[buffer(12)]],
+                         texture2d_array<ushort, access::read> tiles [[texture(0)]],
+                         texture2d_array<float, access::read> detail [[texture(1)]],
+                         texture2d<float> biome0 [[texture(2)]],
+                         texture2d<float> biome1 [[texture(3)]],
+                         texture2d<float> biome2 [[texture(4)]],
+                         texture2d<float> hzb [[texture(5)]],
+                         uint2 gid [[thread_position_in_grid]]) {
+    int side = int(pp.grid.z);
+    if (int(gid.x) >= side || int(gid.y) >= side) return;
+    int2 cell = int2(pp.grid.xy) + int2(gid);
+    uint h = floraHash(cell, 7u, uint(f.counts.w));
+    float2 xy = (float2(cell) + 0.5 + 0.3 * (float2(floraRandom(h, 0), floraRandom(h, 1)) - 0.5)) * kPatchCell;
+    float2 rel = xy - u.cameraPosition.xy;
+    float nearest = pp.range.x, farthest = pp.range.y;
+    if (dot(rel, rel) > pow(farthest * (1.0 + 2.0 * kLodHysteresis), 2.0)) return;
+    if (dot(rel, rel) < pow(nearest * (1.0 - 2.0 * kLodHysteresis), 2.0)) return;
+    constexpr sampler linear(filter::linear, address::clamp_to_edge);
+    float2 uv = xy / f.lods.w;
+    int community = floraPickCommunity(biome0.sample(linear, uv, level(0)), biome1.sample(linear, uv, level(0)),
+                                       biome2.sample(linear, uv, level(0)), floraRandom(h, 2));
+    if (community < 0) return;
+    float4 e = patches[community].extent;
+    if (e.z <= 0.0) return;  // nothing grows there tall enough
+    // Open stands leave cells empty, by the cover of what the patch shows.
+    if (floraRandom(h, 3) >= 1.3 * e.y) return;
+    float2 gradient;
+    float ground = floraGround(t, d, detail, pages, tiles, xy, length(rel), gradient);
+    if (ground < f.lods.z + 0.5) return;
+
+    FloraInstance inst;
+    float scale = 0.85 + 0.3 * floraRandom(h, 4);
+    inst.position = packed_float3(xy.x, xy.y, ground);
+    inst.scale = scale;
+    float yaw = floraRandom(h, 5) * 6.2831853;
+    inst.rotation = float2(cos(yaw), sin(yaw));
+    inst.lean = 0.0;
+    inst.tint = 0.9 + 0.2 * floraRandom(h, 6);
+    inst.phase = 0.0;
+    inst.height = e.z * scale;
+    float3 centre = float3(xy, ground + 0.5 * inst.height) - u.cameraPosition;
+    float radius = length(float2(e.x, 0.5 * e.z)) * scale;
+    for (int i = 0; i < 6; i++) {
+        if (dot(f.planes[i].xyz, centre) + f.planes[i].w < -radius) return;
+    }
+    if (floraOccluded(hzbInfo, hzb, centre + u.cameraPosition, radius)) return;
+
+    // In range or not, faded in time as the trees' LODs are (state 0 drawn, 3 not).
+    float dist = length(centre);
+    uint frame = uint(f.lods2.z) & 0xffffu;
+    uint key = floraLodKey(cell, true) * 0x9e3779b1u | 1u;
+    int slot = floraLodSlot(lodKeys, lodValues, key, frame);
+    uint state = slot >= 0 ? lodValues[slot] : 0u;
+    bool seen = slot >= 0 && ((frame - (state >> 16)) & 0xffffu) <= 2u && (state >> 16) != 0u;
+    uint current = state & 3u, from = (state >> 2) & 3u, progress = (state >> 4) & 0xfffu;
+    uint target;
+    if (seen) {
+        float slack = current == 0u ? kLodHysteresis : -kLodHysteresis;
+        target = dist > nearest * (1.0 - slack) && dist < farthest * (1.0 + slack) ? 0u : 3u;
+    } else {
+        target = dist > nearest && dist < farthest ? 0u : 3u;
+        current = target;
+        from = target;
+        progress = kLodProgressMax;
+    }
+    if (target != current) {
+        from = current;
+        current = target;
+        progress = 0u;
+    } else {
+        progress = min(progress + uint(f.lods2.y), kLodProgressMax);
+    }
+    if (slot >= 0) lodValues[slot] = current | (from << 2) | (progress << 4) | (max(frame, 1u) << 16);
+    float p = float(progress) / float(kLodProgressMax);
+    bool fading = progress < kLodProgressMax && from != current;
+    uint capacity = uint(pp.range.z);
+    if (current == 0u) {
+        inst.fade = fading ? max(p, 1e-3) : 0.0;
+        floraAppend(counts, instances, capacity, community, inst);
+    } else if (fading && from == 0u) {
+        inst.fade = -max(p, 1e-3);
+        floraAppend(counts, instances, capacity, community, inst);
+    }
+}
+
+// One thread per community: its patch count into the indirect arguments (the impostor quad).
+kernel void floraPatchArguments(const device uint *counts [[buffer(5)]],
+                                constant FloraMesh &quad [[buffer(8)]],
+                                device FloraDrawArguments *args [[buffer(9)]],
+                                constant FloraPatchParams &pp [[buffer(7)]],
+                                uint bucket [[thread_position_in_grid]]) {
+    if (bucket >= 11u) return;
+    uint capacity = uint(pp.range.z);
+    args[bucket].indexCount = quad.indexCount;
+    args[bucket].instanceCount = min(counts[bucket], capacity);
+    args[bucket].indexStart = quad.indexStart;
+    args[bucket].baseVertex = quad.baseVertex;
+    args[bucket].baseInstance = bucket * capacity;
+}
+
+// A patch's card: as floraImpostorVertex, its layers the community's views.
+vertex FloraImpostorOut floraPatchVertex(uint vid [[vertex_id]], uint iid [[instance_id]],
+                                         constant Uniforms &u [[buffer(1)]],
+                                         const device FloraVertex *vertices [[buffer(2)]],
+                                         const device FloraInstance *instances [[buffer(3)]],
+                                         constant FloraImpostor *patches [[buffer(4)]],
+                                         constant uint &capacity [[buffer(5)]]) {
+    FloraVertex v = vertices[vid];
+    FloraInstance inst = instances[iid];
+    int community = int(iid / capacity);
+    float4 e = patches[community].extent;
+    float3 base = float3(inst.position);
+    float2 toCamera = u.cameraPosition.xy - base.xy;
+    float len = length(toCamera);
+    float2 back = len > 1e-3 ? -toCamera / len : float2(0.0, 1.0);
+    float2 right = float2(back.y, -back.x);
+    FloraImpostorViews views = floraImpostorViews(-back, inst.rotation, community);
+    float side = (v.uv.x - 0.5) * 2.0 * e.x * inst.scale;
+    // From a little below the ground (as baked), so slopes don't show daylight under it.
+    float z = mix(-0.15 * e.z, e.z, v.uv.y) * inst.scale;
+    FloraImpostorOut o;
+    float3 world = base + float3(right * side, z);
+    o.position = u.viewProjection * float4(world - u.cameraPosition, 1.0);
+    o.world = world;
+    o.uv = float2(v.uv.x, 1.0 - v.uv.y);
+    o.right = right;
+    o.tint = inst.tint;
+    o.fade = inst.fade;
+    o.layer = views.first;
+    o.layer2 = views.second;
+    o.blend = views.blend;
+    o.rights = views.rights;
+    return o;
+}
+
 """
