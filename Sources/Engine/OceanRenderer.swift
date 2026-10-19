@@ -203,15 +203,20 @@ final class OceanRenderer {
         }
         let r0 = row(0), r1 = row(1), r2 = row(2), r3 = row(3)
         let planes: [SIMD4<Double>] = [r3 + r0, r3 - r0, r3 + r1, r3 - r1, r2, r3 - r2]
-        let rel = SIMD3(eye.x, eye.y, eye.z - Double(seaLevel))
-        let selected = tree.select(eye: (rel.x, rel.y, rel.z)) { lo, hi in
-            let a = lo - rel, b = hi - rel
+        let rel = SIMD3<Double>(eye.x, eye.y, eye.z - Double(seaLevel))
+        // A named, fully typed test: as a trailing closure CI's compiler can't type-check it in time.
+        func visible(_ lo: SIMD3<Double>, _ hi: SIMD3<Double>) -> Bool {
+            let a: SIMD3<Double> = lo - rel, b: SIMD3<Double> = hi - rel
             for p in planes {
-                let x = p.x > 0 ? b.x : a.x, y = p.y > 0 ? b.y : a.y, z = p.z > 0 ? b.z : a.z
-                if p.x * x + p.y * y + p.z * z + p.w < 0 { return false }
+                let x: Double = p.x > 0 ? b.x : a.x
+                let y: Double = p.y > 0 ? b.y : a.y
+                let z: Double = p.z > 0 ? b.z : a.z
+                let side: Double = p.x * x + p.y * y + p.z * z + p.w
+                if side < 0 { return false }
             }
             return true
         }
+        let selected = tree.select(eye: (rel.x, rel.y, rel.z), visible: visible)
         nodeBufferIndex = (nodeBufferIndex + 1) % nodeBuffers.count
         let out = nodeBuffers[nodeBufferIndex].contents().bindMemory(to: TerrainRenderer.NodeInstance.self,
                                                                        capacity: OceanRenderer.maxNodes)
