@@ -168,16 +168,17 @@ public enum Look {
         haze.mix(zenith, 1 - exp(-3 * Swift.max(0, e)))
     }
 
-    /// Fraction of the sky a water surface reflects (Schlick, F0 = 0.02), given the cosine
-    /// between the view ray and the mean water surface and the distance to it. Nearby,
-    /// waves tilt the surface toward the viewer (an effective cosine of at least ~0.35), so
-    /// bays keep their own colour; far out the waves blur into a flat grazing mirror, which
-    /// is what lets the distant sea meet the sky without a dark seam.
-    public static func waterReflectance(cosView: Double, distance: Double) -> Double {
-        let c = Swift.min(1, Swift.max(0, cosView))
-        let roughness = 0.35 * (1 - smoothstep(6000, 35_000, distance))
-        let m = 1 - (c * c + roughness * roughness).squareRoot()
-        return 0.02 + 0.9 * m * m * m * m * m
+    /// Fraction of light a flat water surface reflects at a view ray making cosine `cosView`
+    /// with it: the unpolarised Fresnel equations for water (n = 1.333). Waves, glint and
+    /// the water column are the renderer's (OceanShaders); this is the flat-sea limit.
+    public static func waterReflectance(cosView: Double) -> Double {
+        let n = 1.333
+        let ci = Swift.min(1, Swift.max(1e-6, cosView))
+        let st2 = (1 - ci * ci) / (n * n)
+        if st2 >= 1 { return 1 }
+        let ct = (1 - st2).squareRoot()
+        let rs = (ci - n * ct) / (ci + n * ct), rp = (n * ci - ct) / (n * ci + ct)
+        return 0.5 * (rs * rs + rp * rp)
     }
 
     static func smoothstep(_ e0: Double, _ e1: Double, _ x: Double) -> Double {
@@ -256,7 +257,7 @@ public enum Look {
             return mix(color, float3(newPeak), g);
         }
 
-        // Mirrors Look.albedo, Look.skyColor and Look.waterReflectance.
+        // Mirrors Look.albedo and Look.skyColor.
         float exposureBlobs(float2 p) {
             float a = sin(p.x / 170.0 + 1.7 * sin(p.y / 230.0));
             float b = sin(p.y / 190.0 + 1.3 * sin(p.x / 260.0));
@@ -287,12 +288,6 @@ public enum Look {
             return mix(haze, zenith, 1.0 - exp(-3.0 * max(0.0, sinElevation)));
         }
 
-        float waterReflectance(float cosView, float dist) {
-            float c = saturate(cosView);
-            float roughness = 0.35 * (1.0 - smoothstep(6000.0, 35000.0, dist));
-            float m = 1.0 - sqrt(c * c + roughness * roughness);
-            return 0.02 + 0.9 * m * m * m * m * m;
-        }
 
         """
     }
