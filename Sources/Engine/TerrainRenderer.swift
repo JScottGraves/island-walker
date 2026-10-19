@@ -896,6 +896,8 @@ public final class TerrainRenderer {
             enc.setTextures([targets.depth, motion], range: 0..<2)
             enc.dispatchThreads(MTLSize(width: width, height: height, depth: 1), threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
             enc.endEncoding()
+            // ground cover motion: geometry that moves on its own (wind) overwrites the
+            // camera's motion here, drawn again at equal depth into `motion`.
         }
 
         // 2. The cloud shadow map, then clouds at reduced resolution, marched up to that depth
