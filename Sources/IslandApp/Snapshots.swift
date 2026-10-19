@@ -63,8 +63,8 @@ enum Snapshots {
         ("makapuu", 72871, 22129, 345, -7, 1.7),
         // Windward Koʻolau above Kahaluʻu (~505 m), out to sea over the bay.
         ("koolau-slope", 51923, 35571, 55, -6, 32),
-        // Lanikai beach at eye height, towards the Mokulua islets.
-        ("lanikai", 66432, 31354, 75, -1, 1.7),
+        // Lanikai beach at eye height near the water's edge, towards the Mokulua islets.
+        ("lanikai", 66480, 31367, 75, -1, 1.7),
         // A rocky Waiʻanae-coast shore, west into the afternoon sun.
         ("waianae-shore", 13037, 41993, 265, -2, 1.7),
     ]

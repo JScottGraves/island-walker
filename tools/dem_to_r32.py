@@ -10,7 +10,8 @@ expects), bilinear from the geographic tiles. Without bathymetry, ocean and noda
 
 --bathymetry takes topobathy tiles (NOAA NCEI CUDEM Hawaii, metres on LMSL). Land stays
 the land tiles' wherever they are above 0; everywhere else takes the sea tiles' depth,
-kept at least 0.2 m under the sea so the two datums can't make new land along the shore.
+kept at least 0.2 m under the sea so the two datums can't make new land along the shore, and
+land at least 5 cm above it, so the bundle's height steps (~7 cm) can't flip either.
 Sea cells no tile covers are filled smoothly from their neighbours. Tiles listed earlier
 win where tiles overlap, so list the finest first.
 Needs numpy and tifffile (+ imagecodecs for the LZW tiles).
@@ -112,6 +113,9 @@ def main():
         result[sea] = depth[sea]
         result = fill(result)
         result[sea] = np.minimum(result[sea], -0.2)
+        # Land at least 5 cm up: a bundle's 16-bit heights step ~7 cm over this range, and land a
+        # centimetre or two above the sea would otherwise round under it into a film of water.
+        result[~sea] = np.maximum(result[~sea], 0.05)
     else:
         result[sea] = -1.0
     result.astype("<f4").tofile(out)
