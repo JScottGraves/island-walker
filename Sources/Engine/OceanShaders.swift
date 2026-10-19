@@ -287,6 +287,9 @@ struct OceanOut {
     float2 plane;           // the undisplaced point, where the maps are read
     float depth;            // water depth under it (m)
     float crest;            // its height above the mean sea (m)
+    // Near the camera, the floor's slope (xy) and convexity (z) under the vertex, valid where
+    // w is 1 (oceanFloorShape); further out the fragment works them out itself.
+    float4 floorShape;
 };
 
 struct OceanMotionOut {
@@ -364,6 +367,19 @@ float3 oceanDisplacement(constant OceanParams &o, texture2d_array<float> maps, O
     return d;
 }
 
+// The floor's slope and convexity over ~20 m around xy (as terrainVertex's ridge): its
+// normal is normalize(-slope, 1); reef darkens where convexity is positive.
+float3 oceanFloorShape(constant TerrainParams &t, const device int *pages, texture2d_array<ushort, access::read> tiles,
+                       int level, float2 xy, float h) {
+    const float r = 20.0;
+    float hx0 = levelHeight(t, pages, tiles, level, xy - float2(r, 0.0)), hx1 = levelHeight(t, pages, tiles, level, xy + float2(r, 0.0));
+    float hy0 = levelHeight(t, pages, tiles, level, xy - float2(0.0, r)), hy1 = levelHeight(t, pages, tiles, level, xy + float2(0.0, r));
+    return float3((hx1 - hx0) / (2.0 * r), (hy1 - hy0) / (2.0 * r), -(hx0 + hx1 + hy0 + hy1 - 4.0 * h) / r);
+}
+
+// Grid spacing under which the vertices work out the floor's shape (finer than its 20 m scale).
+constant float kFloorShapeSpacing = 8.0;
+
 vertex OceanOut oceanVertex(uint vid [[vertex_id]], uint iid [[instance_id]],
                             constant Uniforms &u [[buffer(1)]],
                             constant TerrainParams &t [[buffer(3)]],
@@ -380,6 +396,10 @@ vertex OceanOut oceanVertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     out.plane = p.plane;
     out.depth = p.depth;
     out.crest = d.z;
+    out.floorShape = 0.0;
+    if (p.filter < kFloorShapeSpacing && p.depth < 120.0 && all(p.plane > 0.0) && all(p.plane < float2(t.domainSize))) {
+        out.floorShape = float4(oceanFloorShape(t, pages, tiles, 0, p.plane, u.seaLevel - p.depth), 1.0);
+    }
     return out;
 }
 
@@ -451,7 +471,7 @@ struct OceanFloor {
 
 OceanFloor oceanFloor(constant Uniforms &u, constant TerrainParams &t, const device int *pages,
                       texture2d_array<ushort, access::read> tiles, float3 p, float3 dir, float depth,
-                      float footprint, float sunLight) {
+                      float footprint, float sunLight, float4 shape) {
     int level = clamp(int(floor(log2(max(footprint / t.cellMetres, 1.0)))), 0, t.levels - 1);
     float down = max(-dir.z, 0.05);
     float below = max(depth + (p.z - u.seaLevel), 0.0);
@@ -461,11 +481,11 @@ OceanFloor oceanFloor(constant Uniforms &u, constant TerrainParams &t, const dev
     f.below = max(p.z - h, 0.0);
     f.path = f.below / down;
     xy = p.xy + dir.xy * f.path;
-    const float r = 20.0;
-    float hx0 = levelHeight(t, pages, tiles, level, xy - float2(r, 0.0)), hx1 = levelHeight(t, pages, tiles, level, xy + float2(r, 0.0));
-    float hy0 = levelHeight(t, pages, tiles, level, xy - float2(0.0, r)), hy1 = levelHeight(t, pages, tiles, level, xy + float2(0.0, r));
-    float3 n = normalize(float3(hx0 - hx1, hy0 - hy1, 2.0 * r));
-    float ridge = -(hx0 + hx1 + hy0 + hy1 - 4.0 * h) / r;
+    // Near the camera the vertices have the floor's shape already (a few metres off along the
+    // refracted ray, well inside its 20 m scale).
+    float3 s = shape.w > 0.999 ? shape.xyz : oceanFloorShape(t, pages, tiles, level, xy, h);
+    float3 n = normalize(float3(-s.xy, 1.0));
+    float ridge = s.z;
     float reef = saturate(ridge * 3.0) * (1.0 - smoothstep(8.0, 25.0, u.seaLevel - h));
     float3 albedo = mix(kSand, kReef, reef) * (0.88 + 0.24 * groundNoise(xy / 3.7 + 5.0));
     float3 l = normalize(u.sunDirection);
@@ -539,7 +559,7 @@ fragment float4 oceanFragment(OceanOut in [[stage_in]], constant Uniforms &u [[b
     float path = 1e5;
     if (in.depth < 120.0) {
         float3 refracted = refract(-v, n, 1.0 / kWaterIndex);
-        OceanFloor f = oceanFloor(u, t, pages, tiles, in.world, refracted, in.depth, footprint, sunLight);
+        OceanFloor f = oceanFloor(u, t, pages, tiles, in.world, refracted, in.depth, footprint, sunLight, in.floorShape);
         path = f.path;
         float sunCos = sqrt(max(1.0 - (1.0 - l.z * l.z) / (kWaterIndex * kWaterIndex), 0.05));
         float3 kd = (o.absorption.rgb + 0.5 * o.scattering.rgb + 0.02 * o.scattering.w) / sunCos;
