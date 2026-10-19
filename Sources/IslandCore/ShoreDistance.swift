@@ -21,6 +21,30 @@ public enum ShoreDistance {
         return out
     }
 
+    /// `grid` blurred by `passes` 3×3 box filters (edges clamped): about a Gaussian of
+    /// √(2·passes/3) cells, which keeps linear ramps and rounds the corners of a distance field.
+    public static func smoothed(_ grid: Grid, passes: Int) -> Grid {
+        var g = grid
+        let w = g.width, h = g.height
+        for _ in 0..<passes {
+            for horizontal in [true, false] {
+                let src = g.values
+                for j in 0..<h {
+                    for i in 0..<w {
+                        var sum: Float = 0
+                        for d in -1...1 {
+                            let x = horizontal ? Swift.min(Swift.max(i + d, 0), w - 1) : i
+                            let y = horizontal ? j : Swift.min(Swift.max(j + d, 0), h - 1)
+                            sum += src[y * w + x]
+                        }
+                        g.values[j * w + i] = sum / 3
+                    }
+                }
+            }
+        }
+        return g
+    }
+
     /// How much of a wave system coming `from` that direction (a unit vector) reaches each
     /// cell, 0…1: the water upstream at 120, 350 and 900 m. Land there stops the waves; a reef
     /// or bar shallower than ~3 m has broken them already. Off the grid counts as open sea.

@@ -63,7 +63,8 @@ final class OceanRenderer {
     /// The sky the sea reflects, as an upper-hemisphere octahedral map with mips.
     let environment: MTLTexture
     /// Over the domain, from the overview, for the surf: signed distance to the shoreline (m,
-    /// positive at sea), and how exposed the water is to the swell and to the wind sea.
+    /// positive at sea), how exposed the water is to the swell and to the wind sea, and the
+    /// water's depth smoothed.
     let shore: MTLTexture
     var current = 0
     var previousValid = false
@@ -93,17 +94,24 @@ final class OceanRenderer {
         occlusion = TerrainOcclusion(height: overview)
         let spectrum = OceanSpectrum(windTowards: windTowards)
         self.spectrum = spectrum
-        let distance = ShoreDistance.signed(height: overview, seaLevel: seaLevel)
+        // Smoothed over ~150 m, so the surf's fronts (which follow it) curve without corners.
+        let distance = ShoreDistance.smoothed(ShoreDistance.signed(height: overview, seaLevel: seaLevel), passes: 3)
         let swellTowards = spectrum.swell.direction
         let swellExposure = ShoreDistance.exposure(height: overview, seaLevel: seaLevel,
                                                    from: SIMD2(-cos(swellTowards), -sin(swellTowards)))
         let seaExposure = ShoreDistance.exposure(height: overview, seaLevel: seaLevel,
                                                  from: SIMD2(-cos(windTowards), -sin(windTowards)))
+        // Water depth smoothed over ~150 m, for where waves start to break (a line along the reef
+        // or bar, not the floor's contours).
+        var depth = overview
+        for k in 0..<depth.values.count { depth.values[k] = Swift.max(seaLevel - depth.values[k], 0) }
+        depth = ShoreDistance.smoothed(depth, passes: 2)
         var texels = [Float](repeating: 0, count: distance.values.count * 4)
         for k in 0..<distance.values.count {
             texels[4 * k] = distance.values[k]
             texels[4 * k + 1] = swellExposure.values[k]
             texels[4 * k + 2] = seaExposure.values[k]
+            texels[4 * k + 3] = depth.values[k]
         }
         let shoreDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba32Float, width: distance.width,
                                                                  height: distance.height, mipmapped: false)

@@ -205,3 +205,18 @@ final class ExposureTests: XCTestCase {
         XCTAssertEqual(Double(w[13, 10]), 0, accuracy: 1e-6)
     }
 }
+
+final class SmoothingTests: XCTestCase {
+    func testSmoothingKeepsRampsAndRoundsCorners() {
+        // A linear ramp stays a ramp; a corner gets rounded.
+        var g = Grid(width: 20, height: 20, cellSize: 10)
+        for j in 0..<20 { for i in 0..<20 { g[i, j] = Float(i * 10) } }
+        let s = ShoreDistance.smoothed(g, passes: 3)
+        XCTAssertEqual(Double(s[10, 10]), 100, accuracy: 1e-3)
+        var c = Grid(width: 20, height: 20, cellSize: 10)
+        for j in 0..<20 { for i in 0..<20 { c[i, j] = Float(min(i, j) * 10) } }
+        let r = ShoreDistance.smoothed(c, passes: 3)
+        XCTAssertLessThan(Double(r[10, 10]), 100)
+        XCTAssertGreaterThan(Double(r[10, 10]), 80)
+    }
+}

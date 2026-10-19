@@ -380,52 +380,16 @@ float3 oceanDisplacement(constant OceanParams &o, texture2d_array<float> maps, O
 // residual foam at the waterline. Advected bubbles, faded to their mean coverage where a pixel
 // spans them.
 
-// Bubbles: cells ~0.7 m across, brightest at their centres, over finer value noise, stretched
-// along the shore like the streaks a breaker leaves.
-float foamCells(float2 q) {
-    float2 c0 = floor(q);
-    float best = 1e9;
-    for (int j = -1; j <= 1; j++) {
-        for (int i = -1; i <= 1; i++) {
-            float2 c = c0 + float2(float(i), float(j));
-            float2 d = q - c - float2(forestHash(c, 11.0), forestHash(c, 12.0));
-            best = min(best, dot(d, d));
-        }
-    }
-    return 1.0 - saturate(sqrt(best));
+// Foam's lace: a network of thin worm-like strands (ridged value noise), 1 on a
+// strand and 0 in the holes between.
+float foamLace(float2 q) {
+    // Turned off the noise's lattice, whose squares would show in the strands.
+    float2 r = float2(0.866 * q.x - 0.5 * q.y, 0.5 * q.x + 0.866 * q.y);
+    return smoothstep(0.75, 0.95, 1.0 - abs(2.0 * groundNoise(r) - 1.0));
 }
 
-float foamPattern(float2 p, float2 along) {
-    float2 q = float2(dot(p, along), 0.5 * dot(p, float2(-along.y, along.x)));
-    return 0.55 * foamCells(q / 0.7) + 0.45 * groundNoise(q / 0.22 + 7.3);
-}
-
-// What the surf does around a water point, worked out per vertex (it varies over tens of
-// metres): the significant height that reaches it, how exposed it is to the wind sea, metres
-// to the shore in swell periods, its exposure to either system, and the shoreward direction. Far from any shallows (deeper than 6 m) there is none.
-float4 surfSetting(constant Uniforms &u, constant OceanParams &o, constant TerrainParams &t, const device int *pages,
-                   texture2d_array<ushort, access::read> tiles, texture2d<float> shore, float2 xy, float depth,
-                   thread float2 &shoreward) {
-    shoreward = float2(0.0);
-    if (depth > 6.0 || any(xy < 0.0) || any(xy > float2(t.domainSize))) return float4(0.0, 0.0, 1e4, 0.0);
-    constexpr sampler linear(filter::linear, address::clamp_to_edge);
-    float2 uv = xy / t.domainSize;
-    float4 setting = shore.sample(linear, uv, level(0));
-    float toShore = setting.r;
-    float e = 60.0 / t.domainSize;
-    float2 gradient = float2(shore.sample(linear, uv + float2(e, 0.0), level(0)).r - shore.sample(linear, uv - float2(e, 0.0), level(0)).r,
-                             shore.sample(linear, uv + float2(0.0, e), level(0)).r - shore.sample(linear, uv - float2(0.0, e), level(0)).r);
-    shoreward = length(gradient) > 1e-4 ? -normalize(gradient) : float2(0.0, 1.0);
-    // Exposure to each system (ShoreDistance.exposure): land or a reef upstream shelters.
-    float swell = setting.g, sea = setting.b;
-    // The significant height that reaches here (m): each system's, sheltered.
-    float hs = sqrt(o.surf.x * o.surf.x * sea * sea + o.surf.y * o.surf.y * swell * swell);
-    // Swell periods a crest takes from here to the shore at the shallow-water speed sqrt(g h):
-    // from the vertices' smoother depth, since the floor's own ripples would shift each front
-    // along the shore by much of a band.
-    float travel = toShore / (sqrt(9.81 * max(depth, 0.3)) * o.surf.z);
-    return float4(hs, sea, travel, max(sea, swell));
-}
+// Speed the surf's fronts come in at (m/s): sqrt(g h) over ~2 m.
+constant float kSurfSpeed = 4.4;
 
 // How hard waves of significant height `hs` (offshore, sheltered) break over `depth` metres of
 // water: depth-limited breaking where the local significant height (shrunk by depth) nears the
@@ -433,40 +397,92 @@ float4 surfSetting(constant Uniforms &u, constant OceanParams &o, constant Terra
 // around Hs/h ≈ 0.1–0.2 (the depth-limited local Hs saturates there). Breakers also need waves
 // of some size left (over ~0.2 m) and water to break in (over ~0.4 m): across flats a few
 // decimetres deep the waves have spent themselves (and the bathymetry keeps the sea at least
-// 0.2 m deep, so wide flats near shore sit at that). Per pixel, from the floor's own depth: from
-// the vertices' it alternates along the mesh.
+// 0.2 m deep, so wide flats near shore sit at that).
 float surfBreaking(constant OceanParams &o, float hs, float depth) {
     float h = max(depth, 0.05);
     float local = hs * oceanDepthFactor(o.meanK.x, h);
     return smoothstep(0.1, 0.2, local / h) * smoothstep(0.15, 0.3, local) * smoothstep(0.25, 0.5, depth);
 }
 
-// Foam cover (0…1) at a water point `depth` metres deep, from its surf setting, with the
-// camera's `footprint` (m).
-float surfFoam(constant OceanParams &o, float4 setting, float2 shoreward, float2 xy, float depth, float footprint) {
-    float breaking = surfBreaking(o, setting.x, depth), sea = setting.y, travel = setting.z;
-    float2 along = float2(-shoreward.y, shoreward.x);
-    // Bands: crests coming in on the swell's period at sqrt(g h), each in sections along the shore.
-    float period = o.surf.z;
-    float speed = sqrt(9.81 * max(depth, 0.3));
-    float wave = o.time.x / period + travel;
-    float index = floor(wave), u0 = fract(wave);
-    float front = exp(-5.0 * u0);
-    float sections = smoothstep(0.35, 0.65, groundNoise(float2(dot(xy, along) / 140.0, index * 1.37)));
-    // The wind sea's shorter, choppier breakers between them.
-    float chop = o.time.x / (0.55 * period) + travel / 0.55 + 0.37;
-    float chopFront = exp(-7.0 * fract(chop)) * smoothstep(0.45, 0.7, groundNoise(float2(dot(xy, along) / 70.0, floor(chop) * 2.11 + 5.0)));
-    float bands = max(front * sections, 0.6 * chopFront * (sea * sea));
-    // A pixel wider than a fraction of the band spacing sees the surf zone's mean whitewater.
-    bands = mix(bands, 0.35, smoothstep(0.08, 0.35, footprint / (speed * period)));
+// What the surf does around a water point, worked out per vertex and smooth over tens of
+// metres (so no front follows the floor's every knoll): how hard waves break here (x), the
+// local significant height (y, m), the swell periods a crest takes to reach the shore (z), and
+// how exposed the water is to either system (w); and the shoreward direction. Far from any
+// shallows (deeper than 6 m) there is none.
+float4 surfSetting(constant Uniforms &u, constant OceanParams &o, constant TerrainParams &t, const device int *pages,
+                   texture2d_array<ushort, access::read> tiles, texture2d<float> shore, float2 xy, float depth,
+                   thread float2 &shoreward) {
+    shoreward = float2(0.0);
+    if (depth > 6.0 || any(xy < 0.0) || any(xy > float2(t.domainSize))) return float4(0.0, 0.0, 1e4, 0.0);
+    constexpr sampler linear(filter::linear, address::clamp_to_edge);
+    float2 uv = xy / t.domainSize;
+    // Shore distance (smoothed when baked) and each system's exposure (ShoreDistance.exposure).
+    float4 setting = shore.sample(linear, uv, level(0));
+    float toShore = setting.r;
+    float e = 80.0 / t.domainSize;
+    float2 gradient = float2(shore.sample(linear, uv + float2(e, 0.0), level(0)).r - shore.sample(linear, uv - float2(e, 0.0), level(0)).r,
+                             shore.sample(linear, uv + float2(0.0, e), level(0)).r - shore.sample(linear, uv - float2(0.0, e), level(0)).r);
+    shoreward = length(gradient) > 1e-4 ? -normalize(gradient) : float2(0.0, 1.0);
+    float swell = setting.g, sea = setting.b;
+    float hs = sqrt(o.surf.x * o.surf.x * sea * sea + o.surf.y * o.surf.y * swell * swell);
+    // Depth smoothed over ~150 m (baked): the breaking zone's onset is a line along the reef or
+    // bar, not the floor's contours.
+    float h = setting.a;
+    float local = hs * oceanDepthFactor(o.meanK.x, max(h, 0.05));
+    float breaking = surfBreaking(o, hs, h);
+    // Crests come in at a shallow-water speed (sqrt(g·2 m)) on the swell's period: fronts run
+    // parallel to the shore at an even spacing, ~60 m.
+    float travel = toShore / (kSurfSpeed * o.surf.z);
+    return float4(breaking, local, travel, max(sea, swell));
+}
 
+
+// Foam cover (0…1) at a water point `depth` metres deep, from its surf setting, with the
+// camera's `footprint` (m). Each breaking wave is a solid whitewater roller a couple of wave
+// heights wide with an irregular leading edge, in sections along the shore that peel a little,
+// trailing clumpy foam that thins into patches and lace over ~35 m behind it. Returns the
+// cover, and through `roller` how much of it is the front (brighter).
+float surfFoam(constant OceanParams &o, float4 setting, float2 shoreward, float2 xy, float depth, float footprint,
+               thread float &roller) {
+    roller = 0.0;
+    float breaking = setting.x, local = setting.y, travel = setting.z;
+    float spacing = kSurfSpeed * o.surf.z;          // metres between fronts
+    // Sections 50–300 m long, re-dealt every wave, peeling: each one's front lags a little
+    // towards one end. In world axes (xy is tens of kilometres: rotating it by the shoreward
+    // direction, which varies across a triangle, would scramble every pattern).
+    float wave = o.time.x / o.surf.z + travel;
+    float index = floor(wave + 0.5);
+    float section = groundNoise(xy / 160.0 + index * 1.37);
+    float peel = 0.08 * section;
+    // The leading edge, a metre or two ragged.
+    float ragged = groundNoise(xy / 2.5 + 4.1) - 0.5;
+    float edge = 2.2 * ragged;
+    float u0 = fract(wave + peel + edge / spacing);
+    float width = clamp(3.0 * local, 3.0, 8.0) / spacing;
+    float front = 1.0 - smoothstep(0.6 * width, 1.4 * width, u0);
+    // Dense whitewater right behind the roller, thinning into clumps over ~15 m, then a lace.
+    float trail = 0.85 * exp(-u0 * spacing / 15.0) + 0.25 * exp(-u0 * spacing / 45.0);
+    // Section ends ragged, not cut straight across.
+    float on = smoothstep(0.3, 0.45, section + 0.15 * ragged);
+    float bands = on * max(front, trail);
+    // A pixel wider than a fraction of the spacing sees the mean whitewater over a cycle.
+    float spread = smoothstep(0.05, 0.25, footprint / spacing);
+    float mean = 0.55 * (width + (0.85 * 15.0 + 0.25 * 45.0) / spacing);
+    bands = mix(bands, mean, spread);
     float lace = 1.0 - smoothstep(0.02, 0.12, depth);
-    float cover = saturate(breaking * (0.12 + 0.88 * bands) + lace * 0.6 * max(setting.w, 0.35));
+    // No breakers over the last few decimetres of water (the shallows' own depth): there the
+    // front has become a sheet of swash and the waterline's lace.
+    float cover = saturate(breaking * smoothstep(0.25, 0.5, depth) * bands + lace * 0.6 * max(setting.w, 0.35));
     if (cover <= 0.02) return 0.0;
-    // Bubbles drifting shoreward, and their mean where a pixel spans them.
-    float pattern = foamPattern(xy - shoreward * (1.2 * o.time.x), along);
-    float lacy = smoothstep(1.0 - cover - 0.25, 1.0 - cover + 0.2, pattern) * (0.35 + 0.5 * cover);
-    return mix(lacy, 0.8 * cover, smoothstep(0.08, 0.5, footprint));
+    roller = breaking * on * front * (1.0 - spread);
+    // Clumps a few metres across, and within them a lace of strands, drifting shoreward.
+    // Thinning foam breaks into clumps, then into lace with holes.
+    float2 q = xy - shoreward * (1.0 * o.time.x);
+    float clumps = groundNoise(q / 2.6 + 1.7);
+    float body = smoothstep(1.0 - cover - 0.08, 1.0 - cover + 0.08, clumps);
+    float net = mix(foamLace(q / 1.6), 0.35, smoothstep(0.05, 0.2, footprint / 1.6));
+    float lacy = max(body * mix(net, 1.0, smoothstep(0.55, 0.85, cover)), 0.7 * net * smoothstep(0.1, 0.4, cover) * (1.0 - body));
+    return mix(lacy, cover, smoothstep(0.08, 0.5, footprint));
 }
 
 // The floor's slope and convexity over ~20 m around xy (as terrainVertex's ridge): its
@@ -680,11 +696,14 @@ fragment float4 oceanFragment(OceanOut in [[stage_in]], constant Uniforms &u [[b
     float3 color = oceanShade(u, o, environment, n, -n.xy / n.z, variance, v, floorLight, path, sunLight, in.crest);
     // Foam over the shallows (its own white: albedo ~0.8, lit by sun and sky, in the sun's and
     // the clouds' shadows), hiding the glint and the water beneath where it's dense.
-    if ((in.surf.x > 0.05 && waterDepth < 6.0) || waterDepth < 0.12) {
+    if (in.surf.x > 0.02 || waterDepth < 0.12) {
         float2 shoreward = length(in.shoreward) > 1e-3 ? normalize(in.shoreward) : float2(0.0, 1.0);
-        float foam = surfFoam(o, in.surf, shoreward, in.plane, waterDepth, oceanFootprint(u, dist));
+        float roller;
+        float foam = surfFoam(o, in.surf, shoreward, in.plane, waterDepth, oceanFootprint(u, dist), roller);
         if (foam > 0.0) {
-            float3 white = 0.8 * (u.sunRadiance * (saturate(l.z) * sunLight) + skyIrradiance(u, float3(0.0, 0.0, 1.0)));
+            // The roller's churned water brighter (0.88) than the foam it leaves (0.75).
+            float albedo = mix(0.75, 0.88, roller);
+            float3 white = albedo * (u.sunRadiance * (saturate(l.z) * sunLight) + skyIrradiance(u, float3(0.0, 0.0, 1.0)));
             color = mix(color, white, foam);
         }
     }
