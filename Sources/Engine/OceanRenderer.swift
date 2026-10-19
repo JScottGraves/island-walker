@@ -38,6 +38,8 @@ final class OceanRenderer {
 
     let spectrum: OceanSpectrum
     let tree: OceanQuadtree
+    /// Sea nodes the terrain hides (from the overview heights) are not drawn.
+    let occlusion: TerrainOcclusion
     let seaLevel: Float
     var params: Params
     let rowsPipeline: MTLComputePipelineState
@@ -79,9 +81,11 @@ final class OceanRenderer {
     private(set) var drawnNodes = 0
 
     init(device: MTLDevice, library: MTLLibrary, constants: MTLFunctionConstantValues, colorFormat: MTLPixelFormat,
-         depthFormat: MTLPixelFormat, rayTraced: Bool, motion: Bool, seaLevel: Float, domain: Double, windTowards: Double,
+         depthFormat: MTLPixelFormat, rayTraced: Bool, motion: Bool, seaLevel: Float, domain: Double, overview: Grid,
+         windTowards: Double,
          queue: MTLCommandQueue) throws {
         self.seaLevel = seaLevel
+        occlusion = TerrainOcclusion(height: overview)
         let spectrum = OceanSpectrum(windTowards: windTowards)
         self.spectrum = spectrum
         tree = OceanQuadtree(quads: OceanRenderer.nodeQuads, cellMetres: 0.5, centre: (domain / 2, domain / 2),
@@ -228,7 +232,19 @@ final class OceanRenderer {
             }
             return true
         }
-        let selected = tree.select(eye: (rel.x, rel.y, rel.z), visible: visible)
+        // Then the nodes the terrain hides from the eye: every ray to nine points over the node
+        // (at crest height) blocked.
+        let crest: Double = Double(seaLevel) + tree.amplitude
+        let world = SIMD3<Double>(eye.x, eye.y, eye.z)
+        let selected = tree.select(eye: (rel.x, rel.y, rel.z), visible: visible).filter { node in
+            var points: [SIMD3<Double>] = []
+            for j in 0...2 {
+                for i in 0...2 {
+                    points.append(SIMD3<Double>(node.x + node.size * Double(i) / 2, node.y + node.size * Double(j) / 2, crest))
+                }
+            }
+            return !occlusion.hides(eye: world, points: points)
+        }
         nodeBufferIndex = (nodeBufferIndex + 1) % nodeBuffers.count
         let out = nodeBuffers[nodeBufferIndex].contents().bindMemory(to: TerrainRenderer.NodeInstance.self,
                                                                        capacity: OceanRenderer.maxNodes)

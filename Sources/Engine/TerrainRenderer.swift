@@ -365,7 +365,7 @@ public final class TerrainRenderer {
         ocean = try OceanRenderer(device: device, library: library, constants: constants, colorFormat: shadeFormat,
                                   depthFormat: depthFormat, rayTraced: shadows == .rayTraced, motion: temporal,
                                   seaLevel: terrain.seaLevel,
-                                  domain: terrain.domainMetres, windTowards: 5 * Double.pi / 4, queue: queue)  // windDirection's default
+                                  domain: terrain.domainMetres, overview: overview, windTowards: 5 * Double.pi / 4, queue: queue)  // windDirection's default
         // Rings two node sizes wide: three drew 40% more triangles, mostly a few pixels across
         // far away (shading 3 ms slower at 1440p), with no relief visible in the difference.
         let tree = TerrainQuadtree(quads: TerrainRenderer.nodeQuads, cellMetres: terrain.cellMetres / Double(1 << detailLods),
