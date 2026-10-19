@@ -93,10 +93,18 @@ struct Uniforms {
     float4 skySH[9];        // SunLight.skySH: sky irradiance for any normal (rgb)
     float4 cloudLayer;      // cloud base, inversion (m above sea), clock (s), domain size (m)
     float4 cloudWind;       // trade wind velocity xy (m/s), orographic coverage gain, unused
-    float4x4 previousViewProjection; // last frame's, for reprojecting the cloud history
+    float4x4 previousViewProjection; // last frame's, without its jitter (reprojection, motion)
     float4 previousCamera;  // last frame's camera position (xyz)
     float4 frame;           // render target width, height (px), frame number, history valid (0/1)
+    float4 jitter;          // this frame's sub-pixel jitter (px, y down) in viewProjection; render scale
 };
+
+// Where a clip-space position from viewProjection falls on screen without this frame's
+// jitter (UV, y down): with previousViewProjection's UV, a pixel's motion for upscaling.
+float2 unjitteredUV(constant Uniforms &u, float4 clip) {
+    float2 ndc = clip.xy / clip.w;
+    return float2(0.5 + 0.5 * ndc.x, 0.5 - 0.5 * ndc.y) + u.jitter.xy / u.frame.xy;
+}
 
 // Sky radiance along a direction, from the sky-view LUT (Atmosphere.skyView).
 float3 skyRadiance(texture2d<float> skyView, float3 dir) {

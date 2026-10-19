@@ -43,6 +43,7 @@ public final class TerrainRenderer {
         var previousViewProjection: simd_float4x4
         var previousCamera: SIMD4<Float>
         var frame: SIMD4<Float>
+        var jitter: SIMD4<Float>
     }
 
     /// How terrain casts sun shadows.
@@ -68,7 +69,6 @@ public final class TerrainRenderer {
     let presentPipeline: MTLRenderPipelineState?
     /// The jitter's sign as handed to the scaler (1 or -1), for checking the convention.
     public var jitterSign: Float = 1
-    var previousUnjittered = matrix_identity_float4x4
     let depthState: MTLDepthStencilState
     let depthPipeline: MTLRenderPipelineState
     let prepassDepthState: MTLDepthStencilState
@@ -851,7 +851,8 @@ public final class TerrainRenderer {
                              Float(orographicGain), 0),
             previousViewProjection: previousViewProjection,
             previousCamera: SIMD4(previousCamera, 0),
-            frame: SIMD4(Float(width), Float(height), Float(frameNumber % 4096), historyValid ? 1 : 0))
+            frame: SIMD4(Float(width), Float(height), Float(frameNumber % 4096), historyValid ? 1 : 0),
+            jitter: SIMD4(jitter.x, jitter.y, Float(renderScale ?? 1), 0))
         let skyView = skyViews[skyViewIndex]
         let frameTerrain = prepareTerrain(eye: eye, viewProjection: viewProjection, synchronously: synchronousStreaming)
         // 0. Fine detail for the ground the camera has moved over, then this frame's trees on it
@@ -888,7 +889,7 @@ public final class TerrainRenderer {
         if let motionPipeline, let motion = targets.motion, let enc = cmd.makeComputeCommandEncoder() {
             enc.label = "motion"
             var m = MotionParams(inverseJittered: drawViewProjection.inverse, current: viewProjection,
-                                 previous: historyValid ? previousUnjittered : viewProjection,
+                                 previous: historyValid ? previousViewProjection : viewProjection,
                                  cameraStep: SIMD4(historyValid ? u.cameraPosition - previousCamera : .zero, 0))
             enc.setComputePipelineState(motionPipeline)
             enc.setBytes(&m, length: MemoryLayout<MotionParams>.stride, index: 0)
@@ -1007,8 +1008,7 @@ public final class TerrainRenderer {
         historyIndex = next
         historyValid = true
         frameNumber += 1
-        previousViewProjection = drawViewProjection
-        previousUnjittered = viewProjection
+        previousViewProjection = viewProjection
         previousCamera = u.cameraPosition
     }
 
