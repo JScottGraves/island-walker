@@ -1183,4 +1183,43 @@ fragment float4 skyFragment(SkyOut in [[stage_in]], constant Uniforms &u [[buffe
     color = compositeClouds(u, clouds, cloudDistance, color, in.position.xy, skyViewEnd(u, dir));
     return float4(pbrNeutral(color * u.exposure), 1.0);
 }
+// Upscaling (TerrainRenderer.upscaler): each pixel's motion since the last frame, for the
+// MetalFX temporal scaler. From the pixel's depth, under this frame's jittered projection,
+// back to its camera-relative position; then where the unjittered projections of this
+// frame and the last put it, as the last frame's UV minus this frame's (y down). The scene
+// is static, so the camera's motion is all there is; the sky's depth (the far plane, 150 km
+// out) gives the rotation alone.
+struct MotionParams {
+    float4x4 inverseJittered;   // this frame's jittered clip space → camera-relative
+    float4x4 current;           // this frame's unjittered view-projection
+    float4x4 previous;          // the last frame's unjittered view-projection
+    float4 cameraStep;          // this frame's camera minus the last frame's (xyz)
+};
+
+float2 clipToUV(float4 c) {
+    float2 ndc = c.xy / max(c.w, 1e-6);
+    return float2(0.5 + 0.5 * ndc.x, 0.5 - 0.5 * ndc.y);
+}
+
+kernel void motionVectors(constant MotionParams &m [[buffer(0)]],
+                          depth2d<float, access::read> depth [[texture(0)]],
+                          texture2d<float, access::write> out [[texture(1)]],
+                          uint2 g [[thread_position_in_grid]]) {
+    uint2 size = uint2(out.get_width(), out.get_height());
+    if (any(g >= size)) return;
+    float2 uv = (float2(g) + 0.5) / float2(size);
+    float4 p = m.inverseJittered * float4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, depth.read(g), 1.0);
+    float3 rel = p.xyz / p.w;
+    float4 now = m.current * float4(rel, 1.0);
+    float4 before = m.previous * float4(rel + m.cameraStep.xyz, 1.0);
+    // Behind the last frame's camera: no history to point at.
+    float2 motion = before.w > 1e-3 ? clipToUV(before) - clipToUV(now) : float2(0.0);
+    out.write(float4(motion, 0.0, 0.0), g);
+}
+
+// The upscaled frame into the drawable (or a snapshot's target), which applies its sRGB
+// encoding on write.
+fragment float4 presentFragment(SkyOut in [[stage_in]], texture2d<float, access::read> frame [[texture(0)]]) {
+    return float4(frame.read(uint2(in.position.xy)).rgb, 1.0);
+}
 """

@@ -74,6 +74,13 @@ enum Snapshots {
         return Viewpoints.automatic(height: height, drainageArea: area, scarp: scarp)
     }
 
+    /// `--scale X`: draw at X of the output size and upscale with MetalFX (1 for temporal
+    /// anti-aliasing alone); `--scale off` draws at the output size without it. Default 0.75.
+    static func renderScale() -> Double? {
+        guard let value = option("--scale") else { return 0.75 }
+        return value == "off" ? nil : Double(value).map { Swift.min(Swift.max($0, 0.5), 1) }
+    }
+
     static func run(outDir: String) {
         let out = URL(fileURLWithPath: outDir, isDirectory: true)
         do {
@@ -86,8 +93,9 @@ enum Snapshots {
                                                shadows: requested, clouds: clouds,
                                                detailMaps: IslandSource.detailMaps(),
                                                fineDetail: option("--detail") != "off",
-                                               flora: IslandSource.floraMaps())
-            print("shadows: \(renderer.shadows.rawValue)")
+                                               flora: IslandSource.floraMaps(), renderScale: renderScale())
+            renderer.jitterSign = option("--jitter-sign").flatMap(Float.init) ?? 1
+            print("shadows: \(renderer.shadows.rawValue); render scale: \(renderer.renderScale.map { String($0) } ?? "off")")
             // Viewpoints are picked on the overview; the camera then stands on the full-detail ground.
             let height = try tiles.grid(level: tiles.overviewLevel())
             let dims = option("--size")?.split(separator: "x").compactMap { Int($0) } ?? []
