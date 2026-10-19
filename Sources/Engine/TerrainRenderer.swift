@@ -88,7 +88,7 @@ public final class TerrainRenderer {
     let depthPipeline: MTLRenderPipelineState
     let prepassDepthState: MTLDepthStencilState
     let skyDepthState: MTLDepthStencilState
-    /// The sea, in the prepass (writing) and the shading pass: winning ties with the floor, which
+    /// The sea in the prepass: winning ties with the floor, which
     /// a few kilometres out, where depth steps grow coarser than the shallows are deep, rounds
     /// to the water's depth (never nearer).
     let seaDepthState: MTLDepthStencilState
@@ -118,9 +118,6 @@ public final class TerrainRenderer {
         let depth: MTLTexture
         /// With ray tracing: each pixel's surface position and normal, and its sun visibility.
         let surface: MTLTexture?, sun: MTLTexture?
-        /// The depth of everything but the sea, which the shading pass draws against so the
-        /// sea floor is shaded for the water to look through.
-        let floorDepth: MTLTexture
         let clouds: MTLTexture, cloudDistance: MTLTexture
         let history: [MTLTexture], historyDistance: [MTLTexture]
     }
@@ -772,16 +769,12 @@ public final class TerrainRenderer {
             sun = device.makeTexture(descriptor: sunDesc)
             if surface == nil || sun == nil { return nil }
         }
-        let floorDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: depthFormat, width: width, height: height, mipmapped: false)
-        floorDesc.usage = [.renderTarget]
-        floorDesc.storageMode = .private
-        guard let depth = device.makeTexture(descriptor: depthDesc), let floorDepth = device.makeTexture(descriptor: floorDesc),
+        guard let depth = device.makeTexture(descriptor: depthDesc),
               let clouds = reduced(.rgba16Float), let cloudDistance = reduced(.rg32Float),
               let h0 = reduced(.rgba16Float), let h1 = reduced(.rgba16Float),
               let d0 = reduced(.rg32Float), let d1 = reduced(.rg32Float) else { return nil }
         return Targets(width: width, height: height, outputWidth: outputWidth, outputHeight: outputHeight,
                        color: color, motion: motion, upscaled: upscaled, scaler: scaler, resolved: resolved, depth: depth, surface: surface, sun: sun,
-                       floorDepth: floorDepth,
                        clouds: clouds, cloudDistance: cloudDistance, history: [h0, h1], historyDistance: [d0, d1])
     }
 
@@ -959,13 +952,9 @@ public final class TerrainRenderer {
         flora?.drawPrepass(enc)
         groundCover?.drawPrepass(enc)
         enc.endEncoding()
-        // The sea floor's depth (everything so far), then the sea over it in the same depth
-        // and surface buffers, so sun rays, clouds, motion and haze all see the water.
-        guard let save = cmd.makeBlitCommandEncoder() else { return }
-        save.label = "floor depth"
-        save.copy(from: targets.depth, to: targets.floorDepth)
-        save.endEncoding()
-        // The camera's motion for every pixel, from the depth without the sea.
+        // The camera's motion for every pixel, from the depth without the sea; then the sea in
+        // the same depth and surface buffers, so sun rays, clouds, motion and haze all see the
+        // water (and the terrain under it is never shaded: the water shades its floor).
         if let motionPipeline, let motion = targets.motion, let enc = cmd.makeComputeCommandEncoder() {
             enc.label = "motion"
             var m = MotionParams(inverseJittered: drawViewProjection.inverse, current: viewProjection,
@@ -1047,14 +1036,14 @@ public final class TerrainRenderer {
             rays.endEncoding()
         }
 
-        // 4. Sky where nothing covers it, then the terrain's nearest surface, both with clouds,
-        // against the depth without the sea (the sea floor is shaded for the water to show).
+        // 4. Sky where nothing covers it, then the nearest surface (terrain, trees, ground cover,
+        // then the sea over its own floor), all with clouds.
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = targets.color ?? color
         pass.colorAttachments[0].loadAction = .clear
         pass.colorAttachments[0].storeAction = .store
         pass.colorAttachments[0].clearColor = TerrainRenderer.skyClearColor
-        pass.depthAttachment.texture = targets.floorDepth
+        pass.depthAttachment.texture = targets.depth
         pass.depthAttachment.loadAction = .load
         pass.depthAttachment.storeAction = .dontCare
         guard let shade = shadeCmd.makeRenderCommandEncoder(descriptor: pass) else { return }
@@ -1083,13 +1072,13 @@ public final class TerrainRenderer {
         drawTerrain(shade, frame: frameTerrain)
         flora?.drawShading(shade, skyVisibility: skyVisibility, horizons: horizons)
         groundCover?.drawShading(shade, skyVisibility: skyVisibility, horizons: horizons)
-        // The sea over them, looking down through the water at the floor drawn beneath it.
-        shade.setDepthStencilState(seaDepthState)
+        // The sea, where the prepass left it nearest.
+        shade.setDepthStencilState(depthState)
         shade.setFragmentTextures([skyView, cloudMap, targets.history[next], targets.historyDistance[next], cloudShadows],
                                   range: 0..<5)
         if let sun = targets.sun { shade.setFragmentTexture(sun, index: 5) }
         bindTerrain(shade, frame: frameTerrain)
-        ocean.drawShading(shade, uniforms: &u)
+        ocean.drawShading(shade, uniforms: &u, terrainParams: terrainParams, pages: frameTerrain.pages, tiles: streamer.tiles)
         shade.endEncoding()
 
 

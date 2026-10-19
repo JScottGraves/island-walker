@@ -149,15 +149,6 @@ float3 oceanShade(constant Uniforms &u, constant OceanParams &o, texture2d<float
     return color + (1.0 - fresnel) * below;
 }
 
-// The sea floor hands its depth below the sea (m) to the water drawn over it in its colour's
-// alpha: 1 − ½e^(−d/25) in [0.5, 1), so it survives an 8-bit target too; land and sky write 1.
-float floorAlpha(float depth) { return 1.0 - 0.5 * exp(-max(depth, 0.0) / 25.0); }
-
-// −1 where no floor lies beneath (alpha 1).
-float floorDepthFromAlpha(float a) {
-    return a < 0.999 ? -25.0 * log(max(2.0 * (1.0 - a), 1e-6)) : -1.0;
-}
-
 // The open sea with no detail left: a flat mean surface whose slopes are all variance.
 float3 oceanFlatVariance(constant OceanParams &o) {
     float3 v = oceanRemainder(o);
@@ -455,14 +446,47 @@ fragment uint4 oceanSurface(OceanOut in [[stage_in]]) {
     return oceanSurfaceTexel(in.world);
 }
 
+// The sea floor seen from the water surface at `p` along the refracted view `t`: where that ray
+// meets the floor (one refinement from the depth straight below, which is the refraction's
+// offset), its depth below the surface (`below`) and the metres travelled underwater (`path`),
+// and its light as it leaves the floor (pre-exposure): sand, darker on knolls and patch reefs
+// (convex over ~20 m, as terrainVertex's ridge), lit by the sun through the surface's shadows.
+struct OceanFloor {
+    float3 light;
+    float below;
+    float path;
+};
+
+OceanFloor oceanFloor(constant Uniforms &u, constant TerrainParams &t, const device int *pages,
+                      texture2d_array<ushort, access::read> tiles, float3 p, float3 dir, float depth,
+                      float footprint, float sunLight) {
+    int level = clamp(int(floor(log2(max(footprint / t.cellMetres, 1.0)))), 0, t.levels - 1);
+    float down = max(-dir.z, 0.05);
+    float below = max(depth + (p.z - u.seaLevel), 0.0);
+    float2 xy = p.xy + dir.xy * (below / down);
+    float h = levelHeight(t, pages, tiles, level, xy);
+    OceanFloor f;
+    f.below = max(p.z - h, 0.0);
+    f.path = f.below / down;
+    xy = p.xy + dir.xy * f.path;
+    const float r = 20.0;
+    float hx0 = levelHeight(t, pages, tiles, level, xy - float2(r, 0.0)), hx1 = levelHeight(t, pages, tiles, level, xy + float2(r, 0.0));
+    float hy0 = levelHeight(t, pages, tiles, level, xy - float2(0.0, r)), hy1 = levelHeight(t, pages, tiles, level, xy + float2(0.0, r));
+    float3 n = normalize(float3(hx0 - hx1, hy0 - hy1, 2.0 * r));
+    float ridge = -(hx0 + hx1 + hy0 + hy1 - 4.0 * h) / r;
+    float reef = saturate(ridge * 3.0) * (1.0 - smoothstep(8.0, 25.0, u.seaLevel - h));
+    float3 albedo = mix(kSand, kReef, reef) * (0.88 + 0.24 * groundNoise(xy / 3.7 + 5.0));
+    float3 l = normalize(u.sunDirection);
+    f.light = litSurface(u, albedo, n, saturate(dot(n, l)), sunLight, 1.0, 1.0, 1.0);
+    return f;
+}
+
 // The water's colour, drawn over the shaded scene in the same pass (after the terrain, trees
 // and ground cover). Normals and their filtered variance from the cascades' derivative and
 // moment maps (each faded out to pure variance as it drops below the pixel); the sea floor
-// beneath, read from the frame itself (framebuffer fetch: its light, unhazed, and in alpha its
-// depth, floorDepthFromAlpha), seen through the water column; then haze and clouds.
+// beneath (oceanFloor), seen through the water column; then haze and clouds.
 fragment float4 oceanFragment(OceanOut in [[stage_in]], constant Uniforms &u [[buffer(1)]],
                               constant OceanParams &o [[buffer(7)]],
-                              float4 under [[color(0)]],
                               texture2d<float> skyView [[texture(0)]],
                               texture2d<float> clouds [[texture(2)]],
                               texture2d<float> cloudDistance [[texture(3)]],
@@ -470,7 +494,10 @@ fragment float4 oceanFragment(OceanOut in [[stage_in]], constant Uniforms &u [[b
                               texture2d<float, access::read> tracedSun [[texture(5), function_constant(kRayTraced)]],
                               texture2d_array<float> derivatives [[texture(6)]],
                               texture2d_array<float> moments [[texture(7)]],
-                              texture2d<float> environment [[texture(8)]]) {
+                              texture2d<float> environment [[texture(8)]],
+                              constant TerrainParams &t [[buffer(3)]],
+                              const device int *pages [[buffer(5)]],
+                              texture2d_array<ushort, access::read> tiles [[texture(9)]]) {
     constexpr sampler aniso(filter::linear, mip_filter::linear, address::repeat, max_anisotropy(4));
     float3 toEye = u.cameraPosition - in.world;
     float dist = length(toEye);
@@ -504,19 +531,18 @@ fragment float4 oceanFragment(OceanOut in [[stage_in]], constant Uniforms &u [[b
     float sunLight = cloudSunlight(u, cloudShadows, in.world);
     if (kRayTraced) sunLight *= tracedSunAt(tracedSun, uint2(in.position.xy));
 
-    // The floor under this pixel: its light dimmed on the way down to it and back up the
-    // refracted view. The open sea past the heightfield (sky behind) has none.
+    // The floor along the refracted view: its light dimmed on the way down to it and back up.
+    // Under more than ~120 m of water none shows; past the heightfield there is none.
     float3 floorLight = 0.0;
     float path = 1e5;
-    float floorDepth = floorDepthFromAlpha(under.a);
-    if (floorDepth >= 0.0) {
+    if (in.depth < 120.0) {
         float3 refracted = refract(-v, n, 1.0 / kWaterIndex);
-        float below = max(floorDepth + in.crest, 0.0);
-        path = below / max(-refracted.z, 0.05);
+        OceanFloor f = oceanFloor(u, t, pages, tiles, in.world, refracted, in.depth, footprint, sunLight);
+        path = f.path;
         float sunCos = sqrt(max(1.0 - (1.0 - l.z * l.z) / (kWaterIndex * kWaterIndex), 0.05));
         float3 kd = (o.absorption.rgb + 0.5 * o.scattering.rgb + 0.02 * o.scattering.w) / sunCos;
         float3 c = o.absorption.rgb + o.scattering.rgb + o.scattering.w;
-        floorLight = under.rgb / max(u.exposure, 1e-6) * exp(-kd * below - c * path);
+        floorLight = f.light * exp(-kd * f.below - c * path);
     }
     float3 color = oceanShade(u, o, environment, n, -n.xy / n.z, variance, v, floorLight, path, sunLight, in.crest);
     return finishSurface(u, skyView, clouds, cloudDistance, color, in.world, in.position.xy);

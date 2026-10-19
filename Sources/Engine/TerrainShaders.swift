@@ -725,12 +725,9 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
     float3 wallAlbedo = 0.0;
     CanopyTexel crowns, clumps, average;
     if (h < 0.0) {
-        // The sea floor, seen through the water the ocean pass draws over it: sand, darker
-        // where reef stands on it (until the floor has material channels): knolls and patch
-        // reefs that rise above their surroundings. Its sun comes from the water surface
-        // above it (the prepass shows the sea there).
-        float reef = saturate(in.ridge * 3.0) * (1.0 - smoothstep(8.0, 25.0, -h));
-        albedo = mix(kSand, kReef, saturate(reef));
+        // The sea floor: the water shades it itself (oceanFloor), so it only shows here where
+        // it peeks out at the waterline.
+        albedo = kSand;
     } else {
         constexpr sampler linear(filter::linear, address::clamp_to_edge);
         float4 canopy = canopyMap.sample(linear, in.world.xy / u.cloudLayer.w);
@@ -883,9 +880,6 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
         color = mix(color, canopy, forest);
     }
 
-    // Under the sea: the floor's own light, unhazed, and its depth, for the water drawn over it
-    // to look through (oceanFragment).
-    if (h < 0.0) return float4(color * u.exposure, floorAlpha(-h));
     return finishSurface(u, skyView, clouds, cloudDistance, color, in.world, in.position.xy);
 }
 

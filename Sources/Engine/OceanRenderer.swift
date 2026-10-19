@@ -13,9 +13,9 @@ import IslandCore
 /// sea floor seen through a Beer–Lambert water column with single scattering.
 ///
 /// Frame order (TerrainRenderer.encode): `update` before the depth prepass; `drawPrepass`
-/// after the terrain's own prepass (whose depth is saved as the sea floor's and gives the
+/// after the terrain's own prepass (whose depth gives the
 /// camera's motion vectors, which the water's own then overwrite); `drawShading` last in the
-/// shading pass, which draws against the sea floor's depth.
+/// shading pass, shading the sea floor too.
 final class OceanRenderer {
     /// OceanParams in OceanShaders.
     struct Params {
@@ -312,13 +312,17 @@ final class OceanRenderer {
         drawNodes(enc)
     }
 
-    /// The water's colour, drawn in the shading pass over the terrain, trees and ground cover
-    /// (reading the sea floor's colour beneath it from the frame).
-    func drawShading(_ enc: MTLRenderCommandEncoder, uniforms: inout TerrainRenderer.Uniforms) {
+    /// The water's colour (and its floor's), drawn in the shading pass where the prepass left it
+    /// nearest; the terrain's heights must be bound (TerrainRenderer.bindTerrain).
+    func drawShading(_ enc: MTLRenderCommandEncoder, uniforms: inout TerrainRenderer.Uniforms,
+                     terrainParams: TerrainRenderer.TerrainParams, pages: MTLBuffer, tiles: MTLTexture) {
         enc.setRenderPipelineState(shadePipeline)
         bind(enc, uniforms: &uniforms)
         enc.setFragmentBytes(&uniforms, length: MemoryLayout<TerrainRenderer.Uniforms>.stride, index: 1)
-        enc.setFragmentTextures([derivatives, moments, environment], range: 6..<9)
+        enc.setFragmentTextures([derivatives, moments, environment, tiles], range: 6..<10)
+        var t = terrainParams
+        enc.setFragmentBytes(&t, length: MemoryLayout<TerrainRenderer.TerrainParams>.stride, index: 3)
+        enc.setFragmentBuffer(pages, offset: 0, index: 5)
         drawNodes(enc)
     }
 
