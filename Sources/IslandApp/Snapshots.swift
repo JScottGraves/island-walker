@@ -140,6 +140,7 @@ enum Snapshots {
                                  s.shadowCasters.map { String(format: "%d/%.1fM", $0.instances, Double($0.triangles) / 1e6) }
                                      .joined(separator: " ")))
                     if s.coverBlades != (0, 0) { print("  cover blades \(s.coverBlades.0) + \(s.coverBlades.1)") }
+                    print("  ocean nodes \(s.oceanNodes)")
                     timings += String(format: "%@,%@,%.2f,%.2f,%.2f,%.2f,%d,%d,%d,%d\n", view.name, hour.map { String($0) } ?? "reference",
                                       s.gpuMilliseconds, passes[0], passes[1], passes[2], s.nodes, s.residentTiles,
                                       s.floraInstances, s.floraTriangles)

@@ -315,12 +315,14 @@ float4 finishSurface(constant Uniforms &u, texture2d<float> skyView, texture2d<f
     return float4(pbrNeutral(color * u.exposure), 1.0);
 }
 
-""" + groundCoverPreludeSource + """
+""" + oceanPreludeSource + groundCoverPreludeSource + """
 // ---- Ground textures (GroundTextures; docs/flora.md §9) ----
 // Near the camera the ground shows its community's tileable texture (litter, soil, sand,
 // moss, rock) instead of the canopy colour seen from above, fading back to it between
 // kGroundNear and kGroundFar.
 constant float kGroundNear = 150.0, kGroundFar = 300.0;
+// Coral, algae and rubble on a reef seen through clear water: dark olive brown.
+constant float3 kReef = float3(0.060, 0.056, 0.034);   // sRGB 70, 67, 51
 // Metres per repeat of the two scales the texture is laid at.
 constant float kGroundTile = 2.0, kGroundTileWide = 5.3;
 constant int kGroundLayers = 11;    // communities; bare rock follows
@@ -723,9 +725,12 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
     float3 wallAlbedo = 0.0;
     CanopyTexel crowns, clumps, average;
     if (h < 0.0) {
-        albedo = waterAlbedo(-h);
-        n = float3(0.0, 0.0, 1.0);
-        surface.z = u.seaLevel; // shadows fall on the water, not the sea floor
+        // The sea floor, seen through the water the ocean pass draws over it: sand, darker
+        // where reef stands on it (until the floor has material channels): knolls and patch
+        // reefs that rise above their surroundings. Its sun comes from the water surface
+        // above it (the prepass shows the sea there).
+        float reef = saturate(in.ridge * 3.0) * (1.0 - smoothstep(8.0, 25.0, -h));
+        albedo = mix(kSand, kReef, saturate(reef));
     } else {
         constexpr sampler linear(filter::linear, address::clamp_to_edge);
         float4 canopy = canopyMap.sample(linear, in.world.xy / u.cloudLayer.w);
@@ -878,19 +883,15 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
         color = mix(color, canopy, forest);
     }
 
-    float3 toEye = u.cameraPosition - in.world;
-    float dist = length(toEye);
-    if (h < 0.0) {
-        // Flat water mirrors the sky at the view ray's depression angle.
-        float cosView = toEye.z / max(dist, 1e-3);
-        float3 reflected = float3(-toEye.xy, toEye.z);
-        color = mix(color, skyAbove(skyView, reflected), waterReflectance(cosView, dist));
-    }
+    // Under the sea: the floor's own light, unhazed, and its depth, for the water drawn over it
+    // to look through (oceanFragment).
+    if (h < 0.0) return float4(color * u.exposure, floorAlpha(-h));
     return finishSurface(u, skyView, clouds, cloudDistance, color, in.world, in.position.xy);
 }
 
 // Depth prepass with ray-traced shadows: the surface each pixel shows (world position,
-// and its normal as a packed octahedral pair) for sunShadow. Water shows its surface.
+// and its normal as a packed octahedral pair) for sunShadow. The ocean draws over the
+// sea floor's (oceanSurface).
 // The normal's lowest bit marks tree pixels (FloraShaders), which stand above the ground
 // the horizon map describes.
 constant uint kTreeSurface = 1u;
@@ -913,10 +914,6 @@ float3 octDecode(float2 o) {
 fragment uint4 terrainSurface(VOut in [[stage_in]], constant Uniforms &u [[buffer(1)]]) {
     float3 n = normalize(in.normal);
     float3 p = in.world;
-    if (p.z < u.seaLevel) {
-        n = float3(0.0, 0.0, 1.0);
-        p.z = u.seaLevel;  // shadows fall on the water, not the sea floor
-    }
     return uint4(as_type<uint>(p.x), as_type<uint>(p.y), as_type<uint>(p.z), pack_float_to_snorm2x16(octEncode(n)) & ~(kTreeSurface | kImpostorSurface));
 }
 
@@ -1180,19 +1177,19 @@ vertex SkyOut skyVertex(uint vid [[vertex_id]]) {
 fragment float4 skyFragment(SkyOut in [[stage_in]], constant Uniforms &u [[buffer(1)]],
                             texture2d<float> skyView [[texture(0)]],
                             texture2d<float> clouds [[texture(2)]],
-                            texture2d<float> cloudDistance [[texture(3)]]) {
+                            texture2d<float> cloudDistance [[texture(3)]],
+                            constant OceanParams &ocean [[buffer(7)]],
+                            texture2d<float> environment [[texture(8)]]) {
     float4 far = u.inverseViewProjection * float4(in.ndc, 1.0, 1.0);
     float3 dir = normalize(far.xyz / far.w);
     float3 color = skyRadiance(skyView, dir);
     if (dir.z < 0.0) {
-        // Open sea beyond the heightfield, shaded like the terrain shader's distant water
-        // so the two meet without a seam.
+        // The sea past the ocean mesh (beyond the far plane, just under the horizon): the
+        // ocean's own shading with every wave turned to slope variance, so the two meet.
         float height = max(u.cameraPosition.z - u.seaLevel, 1.0);
         float dist = height / max(-dir.z, 1e-5);
-        float3 l = normalize(u.sunDirection);
-        float3 water = kDeepWater * (u.sunRadiance * max(l.z, 0.0) + skyIrradiance(u, float3(0.0, 0.0, 1.0)));
-        float cosView = -dir.z;
-        water = mix(water, skyAbove(skyView, float3(dir.xy, -dir.z)), waterReflectance(cosView, dist));
+        float3 water = oceanShade(u, ocean, environment, float3(0.0, 0.0, 1.0), float2(0.0), oceanFlatVariance(ocean),
+                                  -dir, float3(0.0), 1e5, 1.0, 0.0);
         color = mix(water, skyAbove(skyView, dir), kHazeMax * (1.0 - exp(-dist / kHazeDistance)));
     }
     // The sun's disc (0.53°), far brighter than anything else; the tone mapper clips it.
