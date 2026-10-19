@@ -537,7 +537,7 @@ fragment float4 oceanFragment(OceanOut in [[stage_in]], constant Uniforms &u [[b
     // Under more than ~120 m of water none shows; past the heightfield there is none.
     float3 floorLight = 0.0;
     float path = 1e5;
-    if (in.depth < 120.0 && (int(o.time.y) & 1) == 0) {
+    if (in.depth < 120.0) {
         float3 refracted = refract(-v, n, 1.0 / kWaterIndex);
         OceanFloor f = oceanFloor(u, t, pages, tiles, in.world, refracted, in.depth, footprint, sunLight);
         path = f.path;

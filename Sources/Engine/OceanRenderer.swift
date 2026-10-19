@@ -1,22 +1,22 @@
 #if canImport(MetalKit)
-import Foundation
 import Metal
 import simd
 import IslandCore
 
 /// The sea surface (research/ocean.md, step O2). Tessendorf FFT waves in four cascades of
 /// 256² (OceanSpectrum: a JONSWAP trade-wind sea and a swell), evolved and transformed on the
-/// GPU every frame into displacement, derivative and slope-moment maps with mips. A CDLOD
+/// GPU into displacement, derivative and slope-moment maps with mips (only the cascades some
+/// pixel used lately, the two long ones in turn). A CDLOD
 /// quadtree of grid nodes centred on the camera carries them, each level's grid fixed in
 /// the world and morphing into the next, out past the far plane. The mesh is displaced in
 /// the vertex shader, depth-tested against the terrain, and shaded with Fresnel reflection
 /// of a sky environment, Cox–Munk glint over the slope variance no normal resolves, and the
-/// sea floor seen through a Beer–Lambert water column with single scattering.
+/// sea floor (shaded here from the streamed heights, along the refracted view) seen through a
+/// Beer–Lambert water column with single scattering.
 ///
 /// Frame order (TerrainRenderer.encode): `update` before the depth prepass; `drawPrepass`
-/// after the terrain's own prepass (whose depth gives the
-/// camera's motion vectors, which the water's own then overwrite); `drawShading` last in the
-/// shading pass, shading the sea floor too.
+/// last in the depth prepass (writing the water's own motion, which motionVectors then leaves);
+/// `drawShading` last in the shading pass, where the prepass left the water nearest.
 final class OceanRenderer {
     /// OceanParams in OceanShaders.
     struct Params {
@@ -66,6 +66,9 @@ final class OceanRenderer {
     let usageBuffers: [MTLBuffer]
     /// Cascades updated last frame.
     private(set) var updatedCascades = 0
+    /// No wave moved this frame: last frame's displacement is this frame's.
+    var motionless = false
+    var environmentKey: EnvironmentKey?
     let nodeIndices: (full: MTLBuffer, half: MTLBuffer)
     let nodeBuffers: [MTLBuffer]
     var nodeBufferIndex = 0
@@ -203,7 +206,7 @@ final class OceanRenderer {
     }
 
     /// Picks this frame's sea nodes and runs the waves forward to `time` (seconds), then
-    /// rebuilds the sky environment for this sun and cloud cover.
+    /// rebuilds the sky environment if the sun, the clouds or the camera moved enough.
     func update(_ cmd: MTLCommandBuffer, uniforms: inout TerrainRenderer.Uniforms, eye: SIMD3<Double>,
                 viewProjection m: simd_float4x4, time: Double, skyView: MTLTexture, cloudMap: MTLTexture) {
         // Nodes, culled against the plain projection in camera-relative space.
@@ -248,15 +251,11 @@ final class OceanRenderer {
         }
         params.origin = (SIMD4(origins[0], origins[1], origins[2], origins[3]), SIMD4(origins[4], origins[5], origins[6], origins[7]))
         params.time.x = Float(time.truncatingRemainder(dividingBy: OceanSpectrum.repeatPeriod))
-        params.time.y = Float(TMPSKIP)
 
         let n = OceanSpectrum.resolution
-        if previousValid { current = 1 - current }
-        if TMPSKIP & 4 != 0 { previousValid = true; return }
-        guard let enc = cmd.makeComputeCommandEncoder() else { return }
-        enc.label = "ocean waves"
         // Only the cascades some pixel used two frames ago (the frame whose usage has surely
-        // come back), and of those the two long-wave ones take turns, each every other frame
+        // come back: from a summit or a ridge the short waves have faded into roughness
+        // everywhere), and of those the two long-wave ones take turns, each every other frame
         // (their waves move little in a frame). The ones left out keep their last maps. After a
         // reset all four run.
         frameIndex += 1
@@ -268,53 +267,81 @@ final class OceanRenderer {
             if !previousValid || (used && turn) { list.append(UInt32(c)) }
         }
         updatedCascades = list.count
-        if TMPSKIP & 256 != 0 { print("ocean usage \(String(usage, radix: 2)) updated \(list) all", usageBuffers.map { $0.contents().load(as: UInt32.self) }, frameIndex) }
+        // A frame that moves no wave keeps this frame's displacement as the last one too (no
+        // motion of the water's own).
+        motionless = list.isEmpty
+        if !list.isEmpty && previousValid { current = 1 - current }
+        // The sky environment only when what it shows has changed: the sun by ~0.1°, the cloud
+        // field drifted by ~10 m, or the camera moved ~50 m under the cloud base.
+        let key = EnvironmentKey(sun: SIMD3(uniforms.sunDirection), clock: Double(uniforms.cloudLayer.z),
+                                 camera: SIMD3(uniforms.cameraPosition))
+        let rebuild = environmentKey.map { !$0.matches(key) } ?? true
+        if rebuild { environmentKey = key }
         let usageBuffer = usageBuffers[frameIndex % usageBuffers.count]
-        var updated = SIMD4<UInt32>(0, 0, 0, 0)
-        for (k, c) in list.enumerated() { updated[k] = c }
-        let group = MTLSize(width: 128, height: 1, depth: 1)
-        let lines = MTLSize(width: n, height: list.count, depth: 1)
-        if TMPSKIP & 128 == 0 && !list.isEmpty {
-        enc.setComputePipelineState(rowsPipeline)
-        enc.setBytes(&params, length: MemoryLayout<Params>.stride, index: 0)
-        enc.setBuffer(amplitudes, offset: 0, index: 1)
-        enc.setBuffer(omegas, offset: 0, index: 2)
-        enc.setBuffer(work, offset: 0, index: 3)
-        enc.setBytes(&updated, length: 16, index: 4)
-        enc.dispatchThreadgroups(lines, threadsPerThreadgroup: group)
+        if !list.isEmpty || rebuild, let enc = cmd.makeComputeCommandEncoder() {
+            enc.label = "ocean waves"
+            if !list.isEmpty {
+                var updated = SIMD4<UInt32>(0, 0, 0, 0)
+                for (k, c) in list.enumerated() { updated[k] = c }
+                let group = MTLSize(width: 128, height: 1, depth: 1)
+                let lines = MTLSize(width: n, height: list.count, depth: 1)
+                enc.setComputePipelineState(rowsPipeline)
+                enc.setBytes(&params, length: MemoryLayout<Params>.stride, index: 0)
+                enc.setBuffer(amplitudes, offset: 0, index: 1)
+                enc.setBuffer(omegas, offset: 0, index: 2)
+                enc.setBuffer(work, offset: 0, index: 3)
+                enc.setBytes(&updated, length: 16, index: 4)
+                enc.dispatchThreadgroups(lines, threadsPerThreadgroup: group)
+                enc.setComputePipelineState(columnsPipeline)
+                enc.setBuffer(work, offset: 0, index: 1)
+                enc.setTextures([displacement[current], derivatives, moments], range: 0..<3)
+                enc.dispatchThreadgroups(lines, threadsPerThreadgroup: group)
+            }
+            if rebuild {
+                enc.setComputePipelineState(environmentPipeline)
+                enc.setBytes(&uniforms, length: MemoryLayout<TerrainRenderer.Uniforms>.stride, index: 0)
+                enc.setTextures([skyView, cloudMap, environment], range: 0..<3)
+                enc.dispatchThreads(MTLSize(width: environment.width, height: environment.height, depth: 1),
+                                    threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
+            }
+            enc.endEncoding()
         }
-        if TMPSKIP & 64 == 0 && !list.isEmpty {
-        enc.setComputePipelineState(columnsPipeline)
-        enc.setBuffer(work, offset: 0, index: 1)
-        enc.setTextures([displacement[current], derivatives, moments], range: 0..<3)
-        enc.dispatchThreadgroups(lines, threadsPerThreadgroup: group)
-        }
-        if TMPSKIP & 2 == 0 {
-        enc.setComputePipelineState(environmentPipeline)
-        enc.setBytes(&uniforms, length: MemoryLayout<TerrainRenderer.Uniforms>.stride, index: 0)
-        enc.setTextures([skyView, cloudMap, environment], range: 0..<3)
-        enc.dispatchThreads(MTLSize(width: environment.width, height: environment.height, depth: 1),
-                            threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
-        }
-        enc.endEncoding()
         guard let blit = cmd.makeBlitCommandEncoder() else { return }
         blit.label = "ocean mips"
         // The resting cascades' displacement carries over into this frame's map; this frame's
         // usage starts empty.
-        if previousValid {
+        if !list.isEmpty && previousValid {
             for c in 0..<OceanSpectrum.cascadeCount where !list.contains(UInt32(c)) {
                 blit.copy(from: displacement[1 - current], sourceSlice: c, sourceLevel: 0, to: displacement[current],
                           destinationSlice: c, destinationLevel: 0, sliceCount: 1, levelCount: 1)
             }
         }
         blit.fill(buffer: usageBuffer, range: 0..<4, value: 0)
-        if TMPSKIP & 32 == 0 { for t in [displacement[current], derivatives, moments, environment] { blit.generateMipmaps(for: t) } }
+        if !list.isEmpty { for t in [displacement[current], derivatives, moments] { blit.generateMipmaps(for: t) } }
+        if rebuild { blit.generateMipmaps(for: environment) }
         blit.endEncoding()
         previousValid = true
     }
 
+    /// What the sky environment was last built for.
+    struct EnvironmentKey {
+        var sun: SIMD3<Float>
+        var clock: Double
+        var camera: SIMD3<Float>
+
+        func matches(_ o: EnvironmentKey) -> Bool {
+            let turned: Float = simd_dot(simd_normalize(sun), simd_normalize(o.sun))
+            let moved: Float = simd_length(camera - o.camera)
+            // cos 0.1° ≈ 1 − 1.5e-6; trade cumulus drift ~7.5 m/s, so 1.3 s ≈ 10 m.
+            return turned > 1 - 1.5e-6 && abs(clock - o.clock) < 1.3 && moved < 50
+        }
+    }
+
     /// Forgets last frame's waves (a new view: no motion to reproject).
-    func resetHistory() { previousValid = false }
+    func resetHistory() {
+        previousValid = false
+        environmentKey = nil
+    }
 
     private func bind(_ enc: MTLRenderCommandEncoder, uniforms: inout TerrainRenderer.Uniforms) {
         enc.setVertexBytes(&uniforms, length: MemoryLayout<TerrainRenderer.Uniforms>.stride, index: 1)
@@ -340,13 +367,12 @@ final class OceanRenderer {
 
     /// Into the depth prepass (the terrain's heights already bound for the water depth).
     func drawPrepass(_ enc: MTLRenderCommandEncoder, uniforms: inout TerrainRenderer.Uniforms, motion: MTLTexture?) {
-        if TMPSKIP & 8 != 0 { return }
         enc.setRenderPipelineState(prepassPipeline)
         bind(enc, uniforms: &uniforms)
         if writesMotion, let motion {
             enc.setFragmentTexture(motion, index: 10)
             enc.setFragmentBytes(&uniforms, length: MemoryLayout<TerrainRenderer.Uniforms>.stride, index: 1)
-            enc.setVertexTexture(displacement[previousValid ? 1 - current : current], index: 5)
+            enc.setVertexTexture(displacement[previousValid && !motionless ? 1 - current : current], index: 5)
         }
         drawNodes(enc)
     }
@@ -355,7 +381,6 @@ final class OceanRenderer {
     /// nearest; the terrain's heights must be bound (TerrainRenderer.bindTerrain).
     func drawShading(_ enc: MTLRenderCommandEncoder, uniforms: inout TerrainRenderer.Uniforms,
                      terrainParams: TerrainRenderer.TerrainParams, pages: MTLBuffer, tiles: MTLTexture) {
-        if TMPSKIP & 16 != 0 { return }
         enc.setRenderPipelineState(shadePipeline)
         bind(enc, uniforms: &uniforms)
         enc.setFragmentBytes(&uniforms, length: MemoryLayout<TerrainRenderer.Uniforms>.stride, index: 1)
@@ -375,4 +400,3 @@ final class OceanRenderer {
 }
 #endif
 
-let TMPSKIP = Int(ProcessInfo.processInfo.environment["TMPSKIP"] ?? "0") ?? 0
