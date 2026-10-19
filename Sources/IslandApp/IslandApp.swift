@@ -103,7 +103,9 @@ final class Coordinator: NSObject, MTKViewDelegate {
                                            detailMaps: IslandSource.detailMaps(),
                                            fineDetail: Snapshots.option("--detail") != "off",
                                            flora: IslandSource.floraMaps(),
-                                               groundCover: GroundCoverSettings(arguments: CommandLine.arguments))
+                                           groundCover: GroundCoverSettings(arguments: CommandLine.arguments),
+                                           antialiasing: Snapshots.antialiasing())
+            renderer?.jitterSign = Snapshots.option("--jitter-sign").flatMap(Float.init) ?? 1
         } catch {
             print("renderer failed: \(error)")
             return

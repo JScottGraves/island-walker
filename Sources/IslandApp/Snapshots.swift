@@ -75,6 +75,13 @@ enum Snapshots {
         return Viewpoints.automatic(height: height, drainageArea: area, scarp: scarp)
     }
 
+    /// `--aa off` draws without antialiasing; `--aa taa` (the default) with our temporal
+    /// antialiasing; `--scale X` at X of the output size, upscaled by MetalFX.
+    static func antialiasing() -> TerrainRenderer.Antialiasing {
+        if let scale = option("--scale").flatMap(Double.init) { return .upscaled(Swift.min(Swift.max(scale, 0.5), 1)) }
+        return option("--aa") == "off" ? .off : .temporal
+    }
+
     static func run(outDir: String) {
         let out = URL(fileURLWithPath: outDir, isDirectory: true)
         do {
@@ -88,8 +95,10 @@ enum Snapshots {
                                                detailMaps: IslandSource.detailMaps(),
                                                fineDetail: option("--detail") != "off",
                                                flora: IslandSource.floraMaps(),
-                                               groundCover: GroundCoverSettings(arguments: CommandLine.arguments))
-            print("shadows: \(renderer.shadows.rawValue)")
+                                               groundCover: GroundCoverSettings(arguments: CommandLine.arguments),
+                                               antialiasing: antialiasing())
+            renderer.jitterSign = option("--jitter-sign").flatMap(Float.init) ?? 1
+            print("shadows: \(renderer.shadows.rawValue); antialiasing: \(renderer.antialiasing)")
             // Viewpoints are picked on the overview; the camera then stands on the full-detail ground.
             let height = try tiles.grid(level: tiles.overviewLevel())
             let dims = option("--size")?.split(separator: "x").compactMap { Int($0) } ?? []

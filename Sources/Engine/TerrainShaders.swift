@@ -93,10 +93,18 @@ struct Uniforms {
     float4 skySH[9];        // SunLight.skySH: sky irradiance for any normal (rgb)
     float4 cloudLayer;      // cloud base, inversion (m above sea), clock (s), domain size (m)
     float4 cloudWind;       // trade wind velocity xy (m/s), orographic coverage gain, unused
-    float4x4 previousViewProjection; // last frame's, for reprojecting the cloud history
+    float4x4 previousViewProjection; // last frame's, without its jitter (reprojection, motion)
     float4 previousCamera;  // last frame's camera position (xyz)
     float4 frame;           // render target width, height (px), frame number, history valid (0/1)
+    float4 jitter;          // this frame's sub-pixel jitter (px, y down) in viewProjection; render scale
 };
+
+// Where a clip-space position from viewProjection falls on screen without this frame's
+// jitter (UV, y down): with previousViewProjection's UV, a pixel's motion for upscaling.
+float2 unjitteredUV(constant Uniforms &u, float4 clip) {
+    float2 ndc = clip.xy / clip.w;
+    return float2(0.5 + 0.5 * ndc.x, 0.5 - 0.5 * ndc.y) + u.jitter.xy / u.frame.xy;
+}
 
 // Sky radiance along a direction, from the sky-view LUT (Atmosphere.skyView).
 float3 skyRadiance(texture2d<float> skyView, float3 dir) {
@@ -1193,5 +1201,129 @@ fragment float4 skyFragment(SkyOut in [[stage_in]], constant Uniforms &u [[buffe
     // Below the horizon the view ends on the sea; clouds in between still count.
     color = compositeClouds(u, clouds, cloudDistance, color, in.position.xy, skyViewEnd(u, dir));
     return float4(pbrNeutral(color * u.exposure), 1.0);
+}
+// Upscaling (TerrainRenderer.upscaler): each pixel's motion since the last frame, for the
+// MetalFX temporal scaler. From the pixel's depth, under this frame's jittered projection,
+// back to its camera-relative position; then where the unjittered projections of this
+// frame and the last put it, as the last frame's UV minus this frame's (y down). The scene
+// is static, so the camera's motion is all there is; the sky's depth (the far plane, 150 km
+// out) gives the rotation alone.
+struct MotionParams {
+    float4x4 inverseJittered;   // this frame's jittered clip space → camera-relative
+    float4x4 current;           // this frame's unjittered view-projection
+    float4x4 previous;          // the last frame's unjittered view-projection
+    float4 cameraStep;          // this frame's camera minus the last frame's (xyz)
+};
+
+float2 clipToUV(float4 c) {
+    float2 ndc = c.xy / max(c.w, 1e-6);
+    return float2(0.5 + 0.5 * ndc.x, 0.5 - 0.5 * ndc.y);
+}
+
+kernel void motionVectors(constant MotionParams &m [[buffer(0)]],
+                          depth2d<float, access::read> depth [[texture(0)]],
+                          texture2d<float, access::write> out [[texture(1)]],
+                          uint2 g [[thread_position_in_grid]]) {
+    uint2 size = uint2(out.get_width(), out.get_height());
+    if (any(g >= size)) return;
+    float2 uv = (float2(g) + 0.5) / float2(size);
+    float4 p = m.inverseJittered * float4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, depth.read(g), 1.0);
+    float3 rel = p.xyz / p.w;
+    float4 now = m.current * float4(rel, 1.0);
+    float4 before = m.previous * float4(rel + m.cameraStep.xyz, 1.0);
+    // Behind the last frame's camera: no history to point at.
+    float2 motion = before.w > 1e-3 ? clipToUV(before) - clipToUV(now) : float2(0.0);
+    out.write(float4(motion, 0.0, 0.0), g);
+}
+
+// The upscaled frame into the drawable (or a snapshot's target), which applies its sRGB
+// encoding on write.
+fragment float4 presentFragment(SkyOut in [[stage_in]], texture2d<float, access::read> frame [[texture(0)]]) {
+    return float4(frame.read(uint2(in.position.xy)).rgb, 1.0);
+}
+// Temporal antialiasing at the output size (TerrainRenderer.Antialiasing.temporal): the
+// jittered frame blended into the history at the place each pixel's motion says it was.
+// The history is first clipped to this frame's neighbourhood (mean ± 1.25 σ in YCoCg), so
+// what was disoccluded or changed doesn't trail, and fetched with Catmull-Rom so it stays
+// sharp. Motion comes from the nearest of five neighbours, so silhouettes move with what's
+// in front.
+float3 toYCoCg(float3 c) {
+    return float3(0.25 * c.r + 0.5 * c.g + 0.25 * c.b, 0.5 * c.r - 0.5 * c.b, -0.25 * c.r + 0.5 * c.g - 0.25 * c.b);
+}
+
+float3 fromYCoCg(float3 c) {
+    return float3(c.x + c.y - c.z, c.x + c.z, c.x - c.y - c.z);
+}
+
+float3 historyCatmullRom(texture2d<float> tex, float2 uv, float2 size) {
+    constexpr sampler s(filter::linear, address::clamp_to_edge);
+    float2 pos = uv * size;
+    float2 t1 = floor(pos - 0.5) + 0.5;
+    float2 f = pos - t1;
+    float2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+    float2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+    float2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+    float2 w3 = f * f * (-0.5 + 0.5 * f);
+    float2 w12 = w1 + w2;
+    float2 t0 = (t1 - 1.0) / size, t3 = (t1 + 2.0) / size, t12 = (t1 + w2 / w12) / size;
+    float3 r = tex.sample(s, float2(t0.x, t0.y)).rgb * (w0.x * w0.y)
+             + tex.sample(s, float2(t12.x, t0.y)).rgb * (w12.x * w0.y)
+             + tex.sample(s, float2(t3.x, t0.y)).rgb * (w3.x * w0.y)
+             + tex.sample(s, float2(t0.x, t12.y)).rgb * (w0.x * w12.y)
+             + tex.sample(s, float2(t12.x, t12.y)).rgb * (w12.x * w12.y)
+             + tex.sample(s, float2(t3.x, t12.y)).rgb * (w3.x * w12.y)
+             + tex.sample(s, float2(t0.x, t3.y)).rgb * (w0.x * w3.y)
+             + tex.sample(s, float2(t12.x, t3.y)).rgb * (w12.x * w3.y)
+             + tex.sample(s, float2(t3.x, t3.y)).rgb * (w3.x * w3.y);
+    return max(r, 0.0);
+}
+
+// Share of this frame in the blend: about the last ten frames count when still; more of
+// this frame the faster a pixel moves (up to half at 25 px a frame), since every frame of
+// resampled history blurs it a little more.
+constant float kTaaBlend = 0.1;
+
+kernel void taaResolve(constant float &historyValid [[buffer(0)]],
+                       texture2d<float, access::read> current [[texture(0)]],
+                       texture2d<float, access::read> motion [[texture(1)]],
+                       depth2d<float, access::read> depth [[texture(2)]],
+                       texture2d<float> history [[texture(3)]],
+                       texture2d<float, access::write> out [[texture(4)]],
+                       uint2 g [[thread_position_in_grid]]) {
+    uint2 size = uint2(out.get_width(), out.get_height());
+    if (any(g >= size)) return;
+    int2 last = int2(size) - 1;
+    float3 c = current.read(g).rgb;
+    float3 m1 = 0.0, m2 = 0.0;
+    float nearest = 2.0;
+    int2 nearestPixel = int2(g);
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            int2 q = clamp(int2(g) + int2(dx, dy), int2(0), last);
+            float3 v = toYCoCg(current.read(uint2(q)).rgb);
+            m1 += v;
+            m2 += v * v;
+            if (dx == 0 || dy == 0) {
+                float z = depth.read(uint2(q));
+                if (z < nearest) { nearest = z; nearestPixel = q; }
+            }
+        }
+    }
+    if (historyValid < 0.5) {
+        out.write(float4(c, 1.0), g);
+        return;
+    }
+    float2 moved = motion.read(uint2(nearestPixel)).xy;
+    float2 uv = (float2(g) + 0.5) / float2(size) + moved;
+    if (any(uv < 0.0) || any(uv > 1.0)) {
+        out.write(float4(c, 1.0), g);
+        return;
+    }
+    m1 /= 9.0;
+    float3 sigma = sqrt(max(m2 / 9.0 - m1 * m1, 0.0));
+    float3 h = toYCoCg(historyCatmullRom(history, uv, float2(size)));
+    h = clamp(h, m1 - 1.25 * sigma, m1 + 1.25 * sigma);
+    float blend = mix(kTaaBlend, 0.5, saturate(length(moved * float2(size)) / 25.0));
+    out.write(float4(mix(fromYCoCg(h), c, blend), 1.0), g);
 }
 """
