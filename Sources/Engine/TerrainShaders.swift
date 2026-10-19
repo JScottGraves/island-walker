@@ -179,6 +179,10 @@ vertex VOut terrainVertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     float3 world = float3(xy, h);
     // Camera-relative: subtract before projecting so precision stays high near the viewer.
     o.position = u.viewProjection * float4(world - u.cameraPosition, 1.0);
+    // The sea floor sits a hair further back in depth (an NDC offset worth ~1 mm at 100 m and
+    // ~40 m at 8 km): a few kilometres out, depth steps grow coarser than the shallows are
+    // deep, and the floor would otherwise poke through the water drawn over it.
+    if (world.z < u.seaLevel) o.position.z += 2e-7 * o.position.w;
     o.world = world;
     o.normal = normalize(float3(-hx, -hy, 2.0 * spacing));
     constexpr sampler linear(filter::linear, address::clamp_to_edge);

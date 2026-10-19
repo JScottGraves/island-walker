@@ -20,7 +20,8 @@ import IslandGen
 /// above the ground instead of 1.7 (over the canopy, for distant views). `--camera X,Y,YAW,PITCH` (metres,
 /// degrees; yaw clockwise from north, pitch up) adds a view named camN, or NAME=X,Y,YAW,PITCH
 /// one named NAME; repeat it for more. A fifth value stands that view's camera that many metres
-/// above the ground instead (a lookout platform above the trees). `--views a,b` renders only the views named.
+/// above the ground instead (a lookout platform above the trees). `--views a,b` renders only the views
+/// named. `--ocean-views` adds the sea test views of the real Oahu import (`oceanViews`).
 /// Each view's GPU frame time is printed and written to timings.csv.
 enum Snapshots {
     static func option(_ name: String) -> String? {
@@ -52,6 +53,21 @@ enum Snapshots {
                     v.count == 5 ? v[4] : nil)
         }
     }
+
+    /// Sea test views on the real Oahu bundle (islandgen --import of the 8192² DEM centred at
+    /// 21.47 N, 157.97 W): X, Y metres in its domain, yaw and pitch in degrees, eye above ground.
+    static let oceanViews: [(name: String, x: Double, y: Double, yaw: Double, pitch: Double, eye: Double)] = [
+        // Nuʻuanu Pali lookout (21.367 N, 157.793 W), over the forest, north over Kāneʻohe Bay.
+        ("pali-lookout", 58352, 28596, 12, -4, 32),
+        // Makapuʻu Point's summit (198 m), north along the windward coast.
+        ("makapuu", 72871, 22129, 345, -7, 1.7),
+        // Windward Koʻolau above Kahaluʻu (~505 m), out to sea over the bay.
+        ("koolau-slope", 51923, 35571, 55, -6, 32),
+        // Lanikai beach at eye height, towards the Mokulua islets.
+        ("lanikai", 66432, 31354, 75, -1, 1.7),
+        // A rocky Waiʻanae-coast shore, west into the afternoon sun.
+        ("waianae-shore", 13037, 41993, 265, -2, 1.7),
+    ]
 
     /// The automatic viewpoints (summit, ridge, coast, pali…) picked on `height`.
     static func viewpoints(_ height: Grid) -> [Viewpoints.Named] {
@@ -109,7 +125,11 @@ enum Snapshots {
             let day = option("--day").flatMap { Int($0) } ?? SunPath.defaultDay
             let hours = option("--time")?.split(separator: ",").compactMap { Double($0) } ?? []
             let only = option("--views")?.split(separator: ",").map(String.init)
-            let views = viewpoints(height).map { (name: $0.name, camera: $0.camera, eye: Double?.none) } + cameras()
+            let sea = CommandLine.arguments.contains("--ocean-views") ? oceanViews.map {
+                (name: $0.name, camera: GroundView.Camera(x: $0.x, y: $0.y, z: 0, yaw: $0.yaw * .pi / 180, pitch: $0.pitch * .pi / 180),
+                 eye: Optional($0.eye))
+            } : []
+            let views = viewpoints(height).map { (name: $0.name, camera: $0.camera, eye: Double?.none) } + cameras() + sea
             for view in views where only?.contains(view.name) ?? true {
                 var c = view.camera
                 renderer.prepareGround(x: c.x, y: c.y)
