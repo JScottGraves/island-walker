@@ -1267,7 +1267,9 @@ float3 historyCatmullRom(texture2d<float> tex, float2 uv, float2 size) {
     return max(r, 0.0);
 }
 
-// Share of this frame in the blend: about the last ten frames count.
+// Share of this frame in the blend: about the last ten frames count when still; more of
+// this frame the faster a pixel moves (up to half at 25 px a frame), since every frame of
+// resampled history blurs it a little more.
 constant float kTaaBlend = 0.1;
 
 kernel void taaResolve(constant float &historyValid [[buffer(0)]],
@@ -1300,7 +1302,8 @@ kernel void taaResolve(constant float &historyValid [[buffer(0)]],
         out.write(float4(c, 1.0), g);
         return;
     }
-    float2 uv = (float2(g) + 0.5) / float2(size) + motion.read(uint2(nearestPixel)).xy;
+    float2 step = motion.read(uint2(nearestPixel)).xy;
+    float2 uv = (float2(g) + 0.5) / float2(size) + step;
     if (any(uv < 0.0) || any(uv > 1.0)) {
         out.write(float4(c, 1.0), g);
         return;
@@ -1309,6 +1312,7 @@ kernel void taaResolve(constant float &historyValid [[buffer(0)]],
     float3 sigma = sqrt(max(m2 / 9.0 - m1 * m1, 0.0));
     float3 h = toYCoCg(historyCatmullRom(history, uv, float2(size)));
     h = clamp(h, m1 - 1.25 * sigma, m1 + 1.25 * sigma);
-    out.write(float4(mix(fromYCoCg(h), c, kTaaBlend), 1.0), g);
+    float blend = mix(kTaaBlend, 0.5, saturate(length(step * float2(size)) / 25.0));
+    out.write(float4(mix(fromYCoCg(h), c, blend), 1.0), g);
 }
 """
