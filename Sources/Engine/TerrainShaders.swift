@@ -315,12 +315,14 @@ float4 finishSurface(constant Uniforms &u, texture2d<float> skyView, texture2d<f
     return float4(pbrNeutral(color * u.exposure), 1.0);
 }
 
-""" + groundCoverPreludeSource + """
+""" + oceanPreludeSource + groundCoverPreludeSource + """
 // ---- Ground textures (GroundTextures; docs/flora.md §9) ----
 // Near the camera the ground shows its community's tileable texture (litter, soil, sand,
 // moss, rock) instead of the canopy colour seen from above, fading back to it between
 // kGroundNear and kGroundFar.
 constant float kGroundNear = 150.0, kGroundFar = 300.0;
+// Coral, algae and rubble on a reef seen through clear water: dark olive brown.
+constant float3 kReef = float3(0.060, 0.056, 0.034);   // sRGB 70, 67, 51
 // Metres per repeat of the two scales the texture is laid at.
 constant float kGroundTile = 2.0, kGroundTileWide = 5.3;
 constant int kGroundLayers = 11;    // communities; bare rock follows
@@ -723,9 +725,9 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
     float3 wallAlbedo = 0.0;
     CanopyTexel crowns, clumps, average;
     if (h < 0.0) {
-        albedo = waterAlbedo(-h);
-        n = float3(0.0, 0.0, 1.0);
-        surface.z = u.seaLevel; // shadows fall on the water, not the sea floor
+        // The sea floor: the water shades it itself (oceanFloor), so it only shows here where
+        // it peeks out at the waterline.
+        albedo = kSand;
     } else {
         constexpr sampler linear(filter::linear, address::clamp_to_edge);
         float4 canopy = canopyMap.sample(linear, in.world.xy / u.cloudLayer.w);
@@ -878,19 +880,12 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
         color = mix(color, canopy, forest);
     }
 
-    float3 toEye = u.cameraPosition - in.world;
-    float dist = length(toEye);
-    if (h < 0.0) {
-        // Flat water mirrors the sky at the view ray's depression angle.
-        float cosView = toEye.z / max(dist, 1e-3);
-        float3 reflected = float3(-toEye.xy, toEye.z);
-        color = mix(color, skyAbove(skyView, reflected), waterReflectance(cosView, dist));
-    }
     return finishSurface(u, skyView, clouds, cloudDistance, color, in.world, in.position.xy);
 }
 
 // Depth prepass with ray-traced shadows: the surface each pixel shows (world position,
-// and its normal as a packed octahedral pair) for sunShadow. Water shows its surface.
+// and its normal as a packed octahedral pair) for sunShadow. The ocean draws over the
+// sea floor's (oceanSurface).
 // The normal's lowest bit marks tree pixels (FloraShaders), which stand above the ground
 // the horizon map describes.
 constant uint kTreeSurface = 1u;
@@ -913,10 +908,6 @@ float3 octDecode(float2 o) {
 fragment uint4 terrainSurface(VOut in [[stage_in]], constant Uniforms &u [[buffer(1)]]) {
     float3 n = normalize(in.normal);
     float3 p = in.world;
-    if (p.z < u.seaLevel) {
-        n = float3(0.0, 0.0, 1.0);
-        p.z = u.seaLevel;  // shadows fall on the water, not the sea floor
-    }
     return uint4(as_type<uint>(p.x), as_type<uint>(p.y), as_type<uint>(p.z), pack_float_to_snorm2x16(octEncode(n)) & ~(kTreeSurface | kImpostorSurface));
 }
 
@@ -1180,19 +1171,19 @@ vertex SkyOut skyVertex(uint vid [[vertex_id]]) {
 fragment float4 skyFragment(SkyOut in [[stage_in]], constant Uniforms &u [[buffer(1)]],
                             texture2d<float> skyView [[texture(0)]],
                             texture2d<float> clouds [[texture(2)]],
-                            texture2d<float> cloudDistance [[texture(3)]]) {
+                            texture2d<float> cloudDistance [[texture(3)]],
+                            constant OceanParams &ocean [[buffer(7)]],
+                            texture2d<float> environment [[texture(8)]]) {
     float4 far = u.inverseViewProjection * float4(in.ndc, 1.0, 1.0);
     float3 dir = normalize(far.xyz / far.w);
     float3 color = skyRadiance(skyView, dir);
     if (dir.z < 0.0) {
-        // Open sea beyond the heightfield, shaded like the terrain shader's distant water
-        // so the two meet without a seam.
+        // The sea past the ocean mesh (beyond the far plane, just under the horizon): the
+        // ocean's own shading with every wave turned to slope variance, so the two meet.
         float height = max(u.cameraPosition.z - u.seaLevel, 1.0);
         float dist = height / max(-dir.z, 1e-5);
-        float3 l = normalize(u.sunDirection);
-        float3 water = kDeepWater * (u.sunRadiance * max(l.z, 0.0) + skyIrradiance(u, float3(0.0, 0.0, 1.0)));
-        float cosView = -dir.z;
-        water = mix(water, skyAbove(skyView, float3(dir.xy, -dir.z)), waterReflectance(cosView, dist));
+        float3 water = oceanShade(u, ocean, environment, float3(0.0, 0.0, 1.0), float2(0.0), oceanFlatVariance(ocean),
+                                  -dir, float3(0.0), 1e5, 1.0, 0.0);
         color = mix(water, skyAbove(skyView, dir), kHazeMax * (1.0 - exp(-dist / kHazeDistance)));
     }
     // The sun's disc (0.53°), far brighter than anything else; the tone mapper clips it.
@@ -1212,8 +1203,20 @@ struct MotionParams {
     float4x4 inverseJittered;   // this frame's jittered clip space → camera-relative
     float4x4 current;           // this frame's unjittered view-projection
     float4x4 previous;          // the last frame's unjittered view-projection
-    float4 cameraStep;          // this frame's camera minus the last frame's (xyz)
+    float4 cameraStep;          // this frame's camera minus the last frame's (xyz), frame parity (w)
 };
+
+// Motion carries the frame's parity in the lowest bit of y's half float, so the camera's motion
+// can tell the pixels geometry moving on its own already wrote this frame (the sea's prepass)
+// from last frame's leftovers.
+float motionWithParity(float y, uint parity) {
+    ushort bits = as_type<ushort>(half(y));
+    return float(as_type<half>(ushort((bits & 0xFFFEu) | parity)));
+}
+
+bool motionWrittenThisFrame(float y, uint parity) {
+    return (as_type<ushort>(half(y)) & 1u) == parity;
+}
 
 float2 clipToUV(float4 c) {
     float2 ndc = c.xy / max(c.w, 1e-6);
@@ -1222,10 +1225,13 @@ float2 clipToUV(float4 c) {
 
 kernel void motionVectors(constant MotionParams &m [[buffer(0)]],
                           depth2d<float, access::read> depth [[texture(0)]],
-                          texture2d<float, access::write> out [[texture(1)]],
+                          texture2d<float, access::read_write> out [[texture(1)]],
                           uint2 g [[thread_position_in_grid]]) {
     uint2 size = uint2(out.get_width(), out.get_height());
     if (any(g >= size)) return;
+    // Geometry that moves on its own (the sea) wrote its motion in the prepass.
+    uint parity = uint(m.cameraStep.w);
+    if (motionWrittenThisFrame(out.read(g).y, parity)) return;
     float2 uv = (float2(g) + 0.5) / float2(size);
     float4 p = m.inverseJittered * float4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, depth.read(g), 1.0);
     float3 rel = p.xyz / p.w;
@@ -1233,7 +1239,7 @@ kernel void motionVectors(constant MotionParams &m [[buffer(0)]],
     float4 before = m.previous * float4(rel + m.cameraStep.xyz, 1.0);
     // Behind the last frame's camera: no history to point at.
     float2 motion = before.w > 1e-3 ? clipToUV(before) - clipToUV(now) : float2(0.0);
-    out.write(float4(motion, 0.0, 0.0), g);
+    out.write(float4(motion.x, motionWithParity(motion.y, parity), 0.0, 0.0), g);
 }
 
 // The upscaled frame into the drawable (or a snapshot's target), which applies its sRGB

@@ -162,12 +162,10 @@ final class IslandCoreTests: XCTestCase {
         // band against the sky just above the horizon.
         let water = Look.lit(albedo: Look.deepWater, normalZ: 1, nDotL: Look.sunDirection.z, sunVisibility: 1, skyVisibility: 1)
         let cosView = 0.01
-        let sea = water.mix(Look.skyColor(sinElevation: cosView), Look.waterReflectance(cosView: cosView, distance: 40_000))
+        let sea = water.mix(Look.skyColor(sinElevation: cosView), Look.waterReflectance(cosView: cosView))
         let sky = Look.skyColor(sinElevation: 0)
         XCTAssertGreaterThan(sea.b, 0.8 * sky.b)
-        XCTAssertLessThan(Look.waterReflectance(cosView: 1, distance: 500), 0.03)
-        // A bay a couple of kilometres off, seen from a ridge, keeps mostly its own colour.
-        XCTAssertLessThan(Look.waterReflectance(cosView: 0.1, distance: 2000), 0.3)
+        XCTAssertLessThan(Look.waterReflectance(cosView: 1), 0.03)
     }
 
     func testSteepPaliStaysGreen() {

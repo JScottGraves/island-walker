@@ -19,7 +19,9 @@ import IslandGen
 /// `--cover-range M` and `--cover-density X` tune them. `--eye H` stands the camera H metres
 /// above the ground instead of 1.7 (over the canopy, for distant views). `--camera X,Y,YAW,PITCH` (metres,
 /// degrees; yaw clockwise from north, pitch up) adds a view named camN, or NAME=X,Y,YAW,PITCH
-/// one named NAME; repeat it for more. `--views a,b` renders only the views named.
+/// one named NAME; repeat it for more. A fifth value stands that view's camera that many metres
+/// above the ground instead (a lookout platform above the trees). `--views a,b` renders only the views
+/// named. `--ocean-views` adds the sea test views of the real Oahu import (`oceanViews`).
 /// Each view's GPU frame time is printed and written to timings.csv.
 enum Snapshots {
     static func option(_ name: String) -> String? {
@@ -35,7 +37,7 @@ enum Snapshots {
     }
 
     /// Views given with `--camera [NAME=]X,Y,YAW,PITCH`.
-    static func cameras() -> [(name: String, camera: GroundView.Camera)] {
+    static func cameras() -> [(name: String, camera: GroundView.Camera, eye: Double?)] {
         options("--camera").enumerated().compactMap { k, value in
             var name = "cam\(k + 1)", spec = Substring(value)
             if let eq = value.firstIndex(of: "=") {
@@ -43,13 +45,29 @@ enum Snapshots {
                 spec = value[value.index(after: eq)...]
             }
             let v = spec.split(separator: ",").compactMap { Double($0) }
-            guard v.count == 4 else {
-                print("ignoring --camera \(value): expected X,Y,YAW,PITCH")
+            guard v.count == 4 || v.count == 5 else {
+                print("ignoring --camera \(value): expected X,Y,YAW,PITCH[,EYE]")
                 return nil
             }
-            return (name, GroundView.Camera(x: v[0], y: v[1], z: 0, yaw: v[2] * .pi / 180, pitch: v[3] * .pi / 180))
+            return (name, GroundView.Camera(x: v[0], y: v[1], z: 0, yaw: v[2] * .pi / 180, pitch: v[3] * .pi / 180),
+                    v.count == 5 ? v[4] : nil)
         }
     }
+
+    /// Sea test views on the real Oahu bundle (islandgen --import of the 8192² DEM centred at
+    /// 21.47 N, 157.97 W): X, Y metres in its domain, yaw and pitch in degrees, eye above ground.
+    static let oceanViews: [(name: String, x: Double, y: Double, yaw: Double, pitch: Double, eye: Double)] = [
+        // Nuʻuanu Pali lookout (21.367 N, 157.793 W), over the forest, north over Kāneʻohe Bay.
+        ("pali-lookout", 58352, 28596, 12, -4, 32),
+        // Makapuʻu Point's summit (198 m), north along the windward coast.
+        ("makapuu", 72871, 22129, 345, -7, 1.7),
+        // Windward Koʻolau above Kahaluʻu (~505 m), out to sea over the bay.
+        ("koolau-slope", 51923, 35571, 55, -6, 32),
+        // Lanikai beach at eye height, towards the Mokulua islets.
+        ("lanikai", 66432, 31354, 75, -1, 1.7),
+        // A rocky Waiʻanae-coast shore, west into the afternoon sun.
+        ("waianae-shore", 13037, 41993, 265, -2, 1.7),
+    ]
 
     /// The automatic viewpoints (summit, ridge, coast, pali…) picked on `height`.
     static func viewpoints(_ height: Grid) -> [Viewpoints.Named] {
@@ -107,11 +125,15 @@ enum Snapshots {
             let day = option("--day").flatMap { Int($0) } ?? SunPath.defaultDay
             let hours = option("--time")?.split(separator: ",").compactMap { Double($0) } ?? []
             let only = option("--views")?.split(separator: ",").map(String.init)
-            let views = viewpoints(height).map { (name: $0.name, camera: $0.camera) } + cameras()
+            let sea = CommandLine.arguments.contains("--ocean-views") ? oceanViews.map {
+                (name: $0.name, camera: GroundView.Camera(x: $0.x, y: $0.y, z: 0, yaw: $0.yaw * .pi / 180, pitch: $0.pitch * .pi / 180),
+                 eye: Optional($0.eye))
+            } : []
+            let views = viewpoints(height).map { (name: $0.name, camera: $0.camera, eye: Double?.none) } + cameras() + sea
             for view in views where only?.contains(view.name) ?? true {
                 var c = view.camera
                 renderer.prepareGround(x: c.x, y: c.y)
-                c.z = renderer.groundHeight(x: c.x, y: c.y) + (option("--eye").flatMap(Double.init) ?? 1.7)
+                c.z = renderer.groundHeight(x: c.x, y: c.y) + (view.eye ?? option("--eye").flatMap(Double.init) ?? 1.7)
                 if let degrees = option("--pitch").flatMap(Double.init) { c.pitch = -degrees * .pi / 180 }
                 let forward = SIMD3<Float>(Float(sin(c.yaw) * cos(c.pitch)), Float(cos(c.yaw) * cos(c.pitch)), Float(sin(c.pitch)))
                 // nil: the reference sun.
@@ -138,6 +160,7 @@ enum Snapshots {
                                  s.shadowCasters.map { String(format: "%d/%.1fM", $0.instances, Double($0.triangles) / 1e6) }
                                      .joined(separator: " ")))
                     if s.coverBlades != (0, 0) { print("  cover blades \(s.coverBlades.0) + \(s.coverBlades.1)") }
+                    print("  ocean nodes \(s.oceanNodes)")
                     timings += String(format: "%@,%@,%.2f,%.2f,%.2f,%.2f,%d,%d,%d,%d\n", view.name, hour.map { String($0) } ?? "reference",
                                       s.gpuMilliseconds, passes[0], passes[1], passes[2], s.nodes, s.residentTiles,
                                       s.floraInstances, s.floraTriangles)
