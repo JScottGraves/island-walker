@@ -19,7 +19,8 @@ import IslandGen
 /// `--cover-range M` and `--cover-density X` tune them. `--eye H` stands the camera H metres
 /// above the ground instead of 1.7 (over the canopy, for distant views). `--camera X,Y,YAW,PITCH` (metres,
 /// degrees; yaw clockwise from north, pitch up) adds a view named camN, or NAME=X,Y,YAW,PITCH
-/// one named NAME; repeat it for more. `--views a,b` renders only the views named.
+/// one named NAME; repeat it for more. A fifth value stands that view's camera that many metres
+/// above the ground instead (a lookout platform above the trees). `--views a,b` renders only the views named.
 /// Each view's GPU frame time is printed and written to timings.csv.
 enum Snapshots {
     static func option(_ name: String) -> String? {
@@ -35,7 +36,7 @@ enum Snapshots {
     }
 
     /// Views given with `--camera [NAME=]X,Y,YAW,PITCH`.
-    static func cameras() -> [(name: String, camera: GroundView.Camera)] {
+    static func cameras() -> [(name: String, camera: GroundView.Camera, eye: Double?)] {
         options("--camera").enumerated().compactMap { k, value in
             var name = "cam\(k + 1)", spec = Substring(value)
             if let eq = value.firstIndex(of: "=") {
@@ -43,11 +44,12 @@ enum Snapshots {
                 spec = value[value.index(after: eq)...]
             }
             let v = spec.split(separator: ",").compactMap { Double($0) }
-            guard v.count == 4 else {
-                print("ignoring --camera \(value): expected X,Y,YAW,PITCH")
+            guard v.count == 4 || v.count == 5 else {
+                print("ignoring --camera \(value): expected X,Y,YAW,PITCH[,EYE]")
                 return nil
             }
-            return (name, GroundView.Camera(x: v[0], y: v[1], z: 0, yaw: v[2] * .pi / 180, pitch: v[3] * .pi / 180))
+            return (name, GroundView.Camera(x: v[0], y: v[1], z: 0, yaw: v[2] * .pi / 180, pitch: v[3] * .pi / 180),
+                    v.count == 5 ? v[4] : nil)
         }
     }
 
@@ -107,11 +109,11 @@ enum Snapshots {
             let day = option("--day").flatMap { Int($0) } ?? SunPath.defaultDay
             let hours = option("--time")?.split(separator: ",").compactMap { Double($0) } ?? []
             let only = option("--views")?.split(separator: ",").map(String.init)
-            let views = viewpoints(height).map { (name: $0.name, camera: $0.camera) } + cameras()
+            let views = viewpoints(height).map { (name: $0.name, camera: $0.camera, eye: Double?.none) } + cameras()
             for view in views where only?.contains(view.name) ?? true {
                 var c = view.camera
                 renderer.prepareGround(x: c.x, y: c.y)
-                c.z = renderer.groundHeight(x: c.x, y: c.y) + (option("--eye").flatMap(Double.init) ?? 1.7)
+                c.z = renderer.groundHeight(x: c.x, y: c.y) + (view.eye ?? option("--eye").flatMap(Double.init) ?? 1.7)
                 if let degrees = option("--pitch").flatMap(Double.init) { c.pitch = -degrees * .pi / 180 }
                 let forward = SIMD3<Float>(Float(sin(c.yaw) * cos(c.pitch)), Float(cos(c.yaw) * cos(c.pitch)), Float(sin(c.pitch)))
                 // nil: the reference sun.

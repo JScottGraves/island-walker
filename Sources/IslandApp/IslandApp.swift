@@ -116,7 +116,7 @@ final class Coordinator: NSObject, MTKViewDelegate {
         // `--camera X,Y,YAW,PITCH` or `--view coast` (or summit, ridge, pali…) starts there,
         // facing that way; otherwise at the highest point so the whole island is in view.
         let named = Snapshots.option("--view").flatMap { name in Snapshots.viewpoints(overview).first { $0.name == name } }
-        if let view = Snapshots.cameras().first ?? named.map({ (name: $0.name, camera: $0.camera) }) {
+        if let view = Snapshots.cameras().first ?? named.map({ (name: $0.name, camera: $0.camera, eye: Double?.none) }) {
             renderer?.prepareGround(x: view.camera.x, y: view.camera.y)
             var w = Walker(x: view.camera.x, y: view.camera.y, ground: ground)
             w.yaw = view.camera.yaw
