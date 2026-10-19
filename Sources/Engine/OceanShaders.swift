@@ -305,6 +305,16 @@ struct OceanMotionOut {
     float4 before;          // where last frame's surface put this point, in last frame's clip space
 };
 
+// The water's clip position, pulled a hair towards the eye in depth (an NDC offset worth
+// ~1 mm at 100 m and tens of metres at 8 km). A few kilometres out depth steps grow coarser
+// than the shallows are deep, and interpolation error of a step would let the sea floor poke
+// through; land that low by the shore is under a pixel at that range.
+float4 oceanClip(constant Uniforms &u, float3 world) {
+    float4 clip = u.viewProjection * float4(world - u.cameraPosition, 1.0);
+    clip.z -= 2e-7 * clip.w;
+    return clip;
+}
+
 // Metres per pixel at `distance` (60° vertical field of view).
 float oceanFootprint(constant Uniforms &u, float distance) {
     return distance * 1.1547 / u.frame.y;
@@ -375,7 +385,7 @@ vertex OceanOut oceanVertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     float3 d = oceanDisplacement(o, displacement, p);
     OceanOut out;
     out.world = float3(p.plane + d.xy, u.seaLevel + d.z);
-    out.position = u.viewProjection * float4(out.world - u.cameraPosition, 1.0);
+    out.position = oceanClip(u, out.world);
     out.plane = p.plane;
     out.depth = p.depth;
     out.crest = d.z;
@@ -400,7 +410,7 @@ vertex OceanMotionOut oceanMotionVertex(uint vid [[vertex_id]], uint iid [[insta
     float3 before = float3(p.plane + d0.xy, u.seaLevel + d0.z);
     OceanMotionOut out;
     out.world = world;
-    out.position = u.viewProjection * float4(world - u.cameraPosition, 1.0);
+    out.position = oceanClip(u, world);
     out.now = out.position;
     out.before = u.previousViewProjection * float4(before - u.previousCamera.xyz, 1.0);
     return out;

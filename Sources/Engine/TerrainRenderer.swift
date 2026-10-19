@@ -88,7 +88,9 @@ public final class TerrainRenderer {
     let depthPipeline: MTLRenderPipelineState
     let prepassDepthState: MTLDepthStencilState
     let skyDepthState: MTLDepthStencilState
-    /// The sea in the shading pass: in front of the floor, and in front of its own folds.
+    /// The sea, in the prepass (writing) and the shading pass: winning ties with the floor, which
+    /// a few kilometres out, where depth steps grow coarser than the shallows are deep, rounds
+    /// to the water's depth (never nearer).
     let seaDepthState: MTLDepthStencilState
     let depthFormat: MTLPixelFormat
     let cloudMarch: MTLComputePipelineState
@@ -327,7 +329,7 @@ public final class TerrainRenderer {
         guard let sds = device.makeDepthStencilState(descriptor: skyDepthDesc) else { throw RendererError.setup("sky depth state") }
         skyDepthState = sds
         let seaDepthDesc = MTLDepthStencilDescriptor()
-        seaDepthDesc.depthCompareFunction = .less
+        seaDepthDesc.depthCompareFunction = .lessEqual
         seaDepthDesc.isDepthWriteEnabled = true
         guard let seaDepth = device.makeDepthStencilState(descriptor: seaDepthDesc) else { throw RendererError.setup("sea depth state") }
         seaDepthState = seaDepth
@@ -993,7 +995,7 @@ public final class TerrainRenderer {
         }
         guard let sea = cmd.makeRenderCommandEncoder(descriptor: seaPass) else { return }
         sea.label = "ocean depth"
-        sea.setDepthStencilState(prepassDepthState)
+        sea.setDepthStencilState(seaDepthState)
         sea.setCullMode(.none)
         bindTerrain(sea, frame: frameTerrain)
         ocean.drawPrepass(sea, uniforms: &u)
