@@ -1,4 +1,5 @@
 #if canImport(MetalKit)
+import Foundation
 import Metal
 import simd
 import IslandCore
@@ -43,7 +44,7 @@ final class OceanRenderer {
     let columnsPipeline: MTLComputePipelineState
     let environmentPipeline: MTLComputePipelineState
     /// Depth prepass, writing the surface for the sun rays (with ray tracing) and the water's
-    /// motion into colour 1 (with temporal antialiasing).
+    /// motion straight into the motion texture (with temporal antialiasing).
     let prepassPipeline: MTLRenderPipelineState
     let shadePipeline: MTLRenderPipelineState
     let writesMotion: Bool
@@ -60,6 +61,11 @@ final class OceanRenderer {
     var current = 0
     var previousValid = false
     var frameIndex = 0
+    /// Which cascades the water's pixels used (a bit each), one buffer per frame in flight:
+    /// cleared at the start of a frame, read back two frames later.
+    let usageBuffers: [MTLBuffer]
+    /// Cascades updated last frame.
+    private(set) var updatedCascades = 0
     let nodeIndices: (full: MTLBuffer, half: MTLBuffer)
     let nodeBuffers: [MTLBuffer]
     var nodeBufferIndex = 0
@@ -89,7 +95,6 @@ final class OceanRenderer {
         desc.depthAttachmentPixelFormat = depthFormat
         desc.vertexFunction = library.makeFunction(name: motion ? "oceanMotionVertex" : "oceanVertex")
         desc.colorAttachments[0].pixelFormat = rayTraced ? .rgba32Uint : .invalid
-        desc.colorAttachments[1].pixelFormat = motion ? .rg16Float : .invalid
         switch (rayTraced, motion) {
         case (true, true): desc.fragmentFunction = library.makeFunction(name: "oceanSurfaceMotion")
         case (false, true): desc.fragmentFunction = library.makeFunction(name: "oceanMotion")
@@ -100,7 +105,6 @@ final class OceanRenderer {
         desc.vertexFunction = library.makeFunction(name: "oceanVertex")
         desc.fragmentFunction = try library.makeFunction(name: "oceanFragment", constantValues: constants)
         desc.colorAttachments[0].pixelFormat = colorFormat
-        desc.colorAttachments[1].pixelFormat = .invalid
         shadePipeline = try device.makeRenderPipelineState(descriptor: desc)
 
         // Initial amplitudes and frequencies of every cascade, once.
@@ -163,6 +167,11 @@ final class OceanRenderer {
             throw RendererError.setup("ocean grids")
         }
         nodeIndices = (full, half)
+        usageBuffers = try (0..<3).map { _ in
+            guard let b = device.makeBuffer(length: 16, options: .storageModeShared) else { throw RendererError.setup("ocean usage") }
+            b.contents().storeBytes(of: UInt32(0xF), as: UInt32.self)
+            return b
+        }
         nodeBuffers = try (0..<3).map { _ in
             guard let b = device.makeBuffer(length: OceanRenderer.maxNodes * MemoryLayout<TerrainRenderer.NodeInstance>.stride,
                                             options: .storageModeShared) else { throw RendererError.setup("ocean nodes") }
@@ -239,19 +248,33 @@ final class OceanRenderer {
         }
         params.origin = (SIMD4(origins[0], origins[1], origins[2], origins[3]), SIMD4(origins[4], origins[5], origins[6], origins[7]))
         params.time.x = Float(time.truncatingRemainder(dividingBy: OceanSpectrum.repeatPeriod))
+        params.time.y = Float(TMPSKIP)
 
         let n = OceanSpectrum.resolution
         if previousValid { current = 1 - current }
+        if TMPSKIP & 4 != 0 { previousValid = true; return }
         guard let enc = cmd.makeComputeCommandEncoder() else { return }
         enc.label = "ocean waves"
-        // The two long-wave cascades take turns: each runs every other frame (their waves move
-        // little in a frame); the short ones every frame. The one left out keeps last frame's maps.
-        // After a reset all four run.
+        // Only the cascades some pixel used two frames ago (the frame whose usage has surely
+        // come back), and of those the two long-wave ones take turns, each every other frame
+        // (their waves move little in a frame). The ones left out keep their last maps. After a
+        // reset all four run.
         frameIndex += 1
-        let skipped = frameIndex % 2 == 0 ? 1 : 0
-        var updated = previousValid ? SIMD4<UInt32>(UInt32(1 - skipped), 2, 3, 0) : SIMD4<UInt32>(0, 1, 2, 3)
+        let usage: UInt32 = usageBuffers[(frameIndex + 1) % usageBuffers.count].contents().load(as: UInt32.self)
+        var list: [UInt32] = []
+        for c in 0..<OceanSpectrum.cascadeCount {
+            let used: Bool = usage & (UInt32(1) << UInt32(c)) != 0
+            let turn: Bool = c > 1 || c == frameIndex % 2
+            if !previousValid || (used && turn) { list.append(UInt32(c)) }
+        }
+        updatedCascades = list.count
+        if TMPSKIP & 256 != 0 { print("ocean usage \(String(usage, radix: 2)) updated \(list) all", usageBuffers.map { $0.contents().load(as: UInt32.self) }, frameIndex) }
+        let usageBuffer = usageBuffers[frameIndex % usageBuffers.count]
+        var updated = SIMD4<UInt32>(0, 0, 0, 0)
+        for (k, c) in list.enumerated() { updated[k] = c }
         let group = MTLSize(width: 128, height: 1, depth: 1)
-        let lines = MTLSize(width: n, height: previousValid ? 3 : 4, depth: 1)
+        let lines = MTLSize(width: n, height: list.count, depth: 1)
+        if TMPSKIP & 128 == 0 && !list.isEmpty {
         enc.setComputePipelineState(rowsPipeline)
         enc.setBytes(&params, length: MemoryLayout<Params>.stride, index: 0)
         enc.setBuffer(amplitudes, offset: 0, index: 1)
@@ -259,24 +282,33 @@ final class OceanRenderer {
         enc.setBuffer(work, offset: 0, index: 3)
         enc.setBytes(&updated, length: 16, index: 4)
         enc.dispatchThreadgroups(lines, threadsPerThreadgroup: group)
+        }
+        if TMPSKIP & 64 == 0 && !list.isEmpty {
         enc.setComputePipelineState(columnsPipeline)
         enc.setBuffer(work, offset: 0, index: 1)
         enc.setTextures([displacement[current], derivatives, moments], range: 0..<3)
         enc.dispatchThreadgroups(lines, threadsPerThreadgroup: group)
+        }
+        if TMPSKIP & 2 == 0 {
         enc.setComputePipelineState(environmentPipeline)
         enc.setBytes(&uniforms, length: MemoryLayout<TerrainRenderer.Uniforms>.stride, index: 0)
         enc.setTextures([skyView, cloudMap, environment], range: 0..<3)
         enc.dispatchThreads(MTLSize(width: environment.width, height: environment.height, depth: 1),
                             threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
+        }
         enc.endEncoding()
         guard let blit = cmd.makeBlitCommandEncoder() else { return }
         blit.label = "ocean mips"
-        // The resting cascade's displacement carries over into this frame's map.
+        // The resting cascades' displacement carries over into this frame's map; this frame's
+        // usage starts empty.
         if previousValid {
-            blit.copy(from: displacement[1 - current], sourceSlice: skipped, sourceLevel: 0, to: displacement[current],
-                      destinationSlice: skipped, destinationLevel: 0, sliceCount: 1, levelCount: 1)
+            for c in 0..<OceanSpectrum.cascadeCount where !list.contains(UInt32(c)) {
+                blit.copy(from: displacement[1 - current], sourceSlice: c, sourceLevel: 0, to: displacement[current],
+                          destinationSlice: c, destinationLevel: 0, sliceCount: 1, levelCount: 1)
+            }
         }
-        for t in [displacement[current], derivatives, moments, environment] { blit.generateMipmaps(for: t) }
+        blit.fill(buffer: usageBuffer, range: 0..<4, value: 0)
+        if TMPSKIP & 32 == 0 { for t in [displacement[current], derivatives, moments, environment] { blit.generateMipmaps(for: t) } }
         blit.endEncoding()
         previousValid = true
     }
@@ -307,10 +339,12 @@ final class OceanRenderer {
     }
 
     /// Into the depth prepass (the terrain's heights already bound for the water depth).
-    func drawPrepass(_ enc: MTLRenderCommandEncoder, uniforms: inout TerrainRenderer.Uniforms) {
+    func drawPrepass(_ enc: MTLRenderCommandEncoder, uniforms: inout TerrainRenderer.Uniforms, motion: MTLTexture?) {
+        if TMPSKIP & 8 != 0 { return }
         enc.setRenderPipelineState(prepassPipeline)
         bind(enc, uniforms: &uniforms)
-        if writesMotion {
+        if writesMotion, let motion {
+            enc.setFragmentTexture(motion, index: 10)
             enc.setFragmentBytes(&uniforms, length: MemoryLayout<TerrainRenderer.Uniforms>.stride, index: 1)
             enc.setVertexTexture(displacement[previousValid ? 1 - current : current], index: 5)
         }
@@ -321,10 +355,12 @@ final class OceanRenderer {
     /// nearest; the terrain's heights must be bound (TerrainRenderer.bindTerrain).
     func drawShading(_ enc: MTLRenderCommandEncoder, uniforms: inout TerrainRenderer.Uniforms,
                      terrainParams: TerrainRenderer.TerrainParams, pages: MTLBuffer, tiles: MTLTexture) {
+        if TMPSKIP & 16 != 0 { return }
         enc.setRenderPipelineState(shadePipeline)
         bind(enc, uniforms: &uniforms)
         enc.setFragmentBytes(&uniforms, length: MemoryLayout<TerrainRenderer.Uniforms>.stride, index: 1)
         enc.setFragmentTextures([derivatives, moments, environment, tiles], range: 6..<10)
+        enc.setFragmentBuffer(usageBuffers[frameIndex % usageBuffers.count], offset: 0, index: 8)
         var t = terrainParams
         enc.setFragmentBytes(&t, length: MemoryLayout<TerrainRenderer.TerrainParams>.stride, index: 3)
         enc.setFragmentBuffer(pages, offset: 0, index: 5)
@@ -338,3 +374,5 @@ final class OceanRenderer {
     }
 }
 #endif
+
+let TMPSKIP = Int(ProcessInfo.processInfo.environment["TMPSKIP"] ?? "0") ?? 0

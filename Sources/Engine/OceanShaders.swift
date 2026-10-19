@@ -408,11 +408,12 @@ vertex OceanMotionOut oceanMotionVertex(uint vid [[vertex_id]], uint iid [[insta
 }
 
 // Depth prepass: the water's surface for sunShadow (with ray tracing) and its own motion
-// over the camera's for temporal antialiasing (the camera's motion is written first, from
-// the depth without the sea).
-float4 oceanMotionVector(constant Uniforms &u, OceanMotionOut in) {
-    float2 motion = in.before.w > 1e-3 ? clipToUV(in.before) - unjitteredUV(u, in.now) : float2(0.0);
-    return float4(motion, 0.0, 0.0);
+// for temporal antialiasing, written straight into the motion texture (with this frame's
+// parity, so motionVectors leaves it) by the water that passes the depth test: drawn after
+// everything else in the prepass, that is the water left in view.
+void oceanWriteMotion(constant Uniforms &u, OceanMotionOut in, texture2d<float, access::write> motion) {
+    float2 m = in.before.w > 1e-3 ? clipToUV(in.before) - unjitteredUV(u, in.now) : float2(0.0);
+    motion.write(float4(m.x, motionWithParity(m.y, uint(u.frame.z) & 1u), 0.0, 0.0), uint2(in.position.xy));
 }
 
 uint4 oceanSurfaceTexel(float3 p) {
@@ -420,26 +421,17 @@ uint4 oceanSurfaceTexel(float3 p) {
                  pack_float_to_snorm2x16(octEncode(float3(0.0, 0.0, 1.0))) & ~(kTreeSurface | kImpostorSurface));
 }
 
-struct OceanPrepassOut {
-    uint4 surface [[color(0)]];
-    float4 motion [[color(1)]];
-};
-
-fragment OceanPrepassOut oceanSurfaceMotion(OceanMotionOut in [[stage_in]], constant Uniforms &u [[buffer(1)]]) {
-    OceanPrepassOut out;
-    out.surface = oceanSurfaceTexel(in.world);
-    out.motion = oceanMotionVector(u, in);
-    return out;
+[[early_fragment_tests]]
+fragment uint4 oceanSurfaceMotion(OceanMotionOut in [[stage_in]], constant Uniforms &u [[buffer(1)]],
+                                  texture2d<float, access::write> motion [[texture(10)]]) {
+    oceanWriteMotion(u, in, motion);
+    return oceanSurfaceTexel(in.world);
 }
 
-struct OceanMotionOnly {
-    float4 motion [[color(1)]];
-};
-
-fragment OceanMotionOnly oceanMotion(OceanMotionOut in [[stage_in]], constant Uniforms &u [[buffer(1)]]) {
-    OceanMotionOnly out;
-    out.motion = oceanMotionVector(u, in);
-    return out;
+[[early_fragment_tests]]
+fragment void oceanMotion(OceanMotionOut in [[stage_in]], constant Uniforms &u [[buffer(1)]],
+                          texture2d<float, access::write> motion [[texture(10)]]) {
+    oceanWriteMotion(u, in, motion);
 }
 
 fragment uint4 oceanSurface(OceanOut in [[stage_in]]) {
@@ -484,7 +476,10 @@ OceanFloor oceanFloor(constant Uniforms &u, constant TerrainParams &t, const dev
 // The water's colour, drawn over the shaded scene in the same pass (after the terrain, trees
 // and ground cover). Normals and their filtered variance from the cascades' derivative and
 // moment maps (each faded out to pure variance as it drops below the pixel); the sea floor
-// beneath (oceanFloor), seen through the water column; then haze and clouds.
+// beneath (oceanFloor), seen through the water column; then haze and clouds. Records which
+// cascades it used in `used` (a bit each, once per SIMD group and only when new), so the
+// renderer can skip the ones no pixel needs (the short waves seen from a summit).
+[[early_fragment_tests]]
 fragment float4 oceanFragment(OceanOut in [[stage_in]], constant Uniforms &u [[buffer(1)]],
                               constant OceanParams &o [[buffer(7)]],
                               texture2d<float> skyView [[texture(0)]],
@@ -497,7 +492,8 @@ fragment float4 oceanFragment(OceanOut in [[stage_in]], constant Uniforms &u [[b
                               texture2d<float> environment [[texture(8)]],
                               constant TerrainParams &t [[buffer(3)]],
                               const device int *pages [[buffer(5)]],
-                              texture2d_array<ushort, access::read> tiles [[texture(9)]]) {
+                              texture2d_array<ushort, access::read> tiles [[texture(9)]],
+                              device atomic_uint *used [[buffer(8)]]) {
     constexpr sampler aniso(filter::linear, mip_filter::linear, address::repeat, max_anisotropy(4));
     float3 toEye = u.cameraPosition - in.world;
     float dist = length(toEye);
@@ -505,12 +501,14 @@ fragment float4 oceanFragment(OceanOut in [[stage_in]], constant Uniforms &u [[b
     float footprint = oceanFootprint(u, dist) / max(abs(v.z), 0.05);
     float2 slope = 0.0, stretch = 0.0;
     float3 variance = oceanRemainder(o);
+    uint mask = 0u;
     for (int c = 0; c < 4; c++) {
         float atten = oceanDepthFactor(o.meanK[c], in.depth);
         float3 whole = float3(o.slopeXX[c], o.slopeYY[c], o.slopeXY[c]) * (atten * atten);
         // Past ~7 mips the map is its own mean: just variance.
         float mip = log2(max(footprint * float(kOceanN) * o.invPatch[c], 1.0));
         float w = 1.0 - smoothstep(5.0, 7.0, mip);
+        if (w > 0.0) mask |= 1u << uint(c);
         if (w <= 0.0) {
             variance += whole;
             continue;
@@ -524,6 +522,10 @@ fragment float4 oceanFragment(OceanOut in [[stage_in]], constant Uniforms &u [[b
         filtered.z = mo.z - dv.x * dv.y;
         variance += w * w * filtered + (1.0 - w * w) * whole;
     }
+    uint group = simd_or(mask);
+    if (simd_is_first() && (atomic_load_explicit(used, memory_order_relaxed) & group) != group) {
+        atomic_fetch_or_explicit(used, group, memory_order_relaxed);
+    }
     float2 s = slope / max(1.0 + stretch, 0.2);
     float3 n = normalize(float3(-s, 1.0));
     float3 l = normalize(u.sunDirection);
@@ -535,7 +537,7 @@ fragment float4 oceanFragment(OceanOut in [[stage_in]], constant Uniforms &u [[b
     // Under more than ~120 m of water none shows; past the heightfield there is none.
     float3 floorLight = 0.0;
     float path = 1e5;
-    if (in.depth < 120.0) {
+    if (in.depth < 120.0 && (int(o.time.y) & 1) == 0) {
         float3 refracted = refract(-v, n, 1.0 / kWaterIndex);
         OceanFloor f = oceanFloor(u, t, pages, tiles, in.world, refracted, in.depth, footprint, sunLight);
         path = f.path;

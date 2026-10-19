@@ -951,44 +951,25 @@ public final class TerrainRenderer {
         drawTerrain(enc, frame: frameTerrain)
         flora?.drawPrepass(enc)
         groundCover?.drawPrepass(enc)
+        // Then the sea, in the same depth and surface buffers, so sun rays, clouds, motion and
+        // haze all see the water (and the terrain under it is never shaded: the water shades its
+        // floor). It writes its own motion straight into `motion`, the camera's fills in the rest.
+        enc.setDepthStencilState(seaDepthState)
+        bindTerrain(enc, frame: frameTerrain)
+        ocean.drawPrepass(enc, uniforms: &u, motion: targets.motion)
         enc.endEncoding()
-        // The camera's motion for every pixel, from the depth without the sea; then the sea in
-        // the same depth and surface buffers, so sun rays, clouds, motion and haze all see the
-        // water (and the terrain under it is never shaded: the water shades its floor).
+        // The camera's motion wherever nothing wrote its own this frame (motionWithParity).
         if let motionPipeline, let motion = targets.motion, let enc = cmd.makeComputeCommandEncoder() {
             enc.label = "motion"
             var m = MotionParams(inverseJittered: drawViewProjection.inverse, current: viewProjection,
                                  previous: historyValid ? previousViewProjection : viewProjection,
-                                 cameraStep: SIMD4(historyValid ? u.cameraPosition - previousCamera : .zero, 0))
+                                 cameraStep: SIMD4(historyValid ? u.cameraPosition - previousCamera : .zero, Float(frameNumber % 4096 & 1)))
             enc.setComputePipelineState(motionPipeline)
             enc.setBytes(&m, length: MemoryLayout<MotionParams>.stride, index: 0)
             enc.setTextures([targets.depth, motion], range: 0..<2)
             enc.dispatchThreads(MTLSize(width: width, height: height, depth: 1), threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
             enc.endEncoding()
-            // The sea's waves then write their own motion over this in its prepass (ground
-            // cover's wind would go there too).
         }
-        let seaPass = MTLRenderPassDescriptor()
-        seaPass.depthAttachment.texture = targets.depth
-        seaPass.depthAttachment.loadAction = .load
-        seaPass.depthAttachment.storeAction = .store
-        if let surface = targets.surface {
-            seaPass.colorAttachments[0].texture = surface
-            seaPass.colorAttachments[0].loadAction = .load
-            seaPass.colorAttachments[0].storeAction = .store
-        }
-        if let motion = targets.motion {
-            seaPass.colorAttachments[1].texture = motion
-            seaPass.colorAttachments[1].loadAction = .load
-            seaPass.colorAttachments[1].storeAction = .store
-        }
-        guard let sea = cmd.makeRenderCommandEncoder(descriptor: seaPass) else { return }
-        sea.label = "ocean depth"
-        sea.setDepthStencilState(seaDepthState)
-        sea.setCullMode(.none)
-        bindTerrain(sea, frame: frameTerrain)
-        ocean.drawPrepass(sea, uniforms: &u)
-        sea.endEncoding()
         flora?.buildHzb(cmd, depth: targets.depth, viewProjection: viewProjection, eye: eye, forward: forward)
         // 2. The cloud shadow map, then clouds at reduced resolution, marched up to that depth
         // and blended into the history.
