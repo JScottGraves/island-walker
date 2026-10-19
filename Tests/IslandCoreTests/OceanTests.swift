@@ -137,3 +137,29 @@ final class OceanTests: XCTestCase {
         XCTAssertLessThanOrEqual(tree.lodCount, 16)
     }
 }
+
+final class TerrainOcclusionTests: XCTestCase {
+    /// A 10 km square at 10 m cells: flat sea floor with a 300 m wall along x = 5 km.
+    func walled() -> Grid {
+        var g = Grid(width: 1000, height: 1000, cellSize: 10)
+        for j in 0..<1000 { for i in 0..<1000 { g[i, j] = (495..<505).contains(i) ? 300 : -5 } }
+        return g
+    }
+
+    func testWallHidesTheSeaBehindIt() {
+        let o = TerrainOcclusion(height: walled())
+        // Eye 2 m up at x = 2 km: the sea beyond the wall at x = 8 km is hidden, the sea in front isn't.
+        let eye = SIMD3<Double>(2000, 5000, 2)
+        XCTAssertTrue(o.hides(eye: eye, points: [SIMD3(8000, 5000, 0), SIMD3(8000, 4000, 0), SIMD3(9000, 6000, 0)]))
+        XCTAssertFalse(o.hides(eye: eye, points: [SIMD3(3000, 5000, 0)]))
+        // One point in view is enough to keep the node.
+        XCTAssertFalse(o.hides(eye: eye, points: [SIMD3(8000, 5000, 0), SIMD3(3000, 5000, 0)]))
+        // From high above the wall, the sea beyond is in view.
+        XCTAssertFalse(o.hides(eye: SIMD3(2000, 5000, 2000), points: [SIMD3(8000, 5000, 0)]))
+    }
+
+    func testOutsideTheHeightfieldNothingHides() {
+        let o = TerrainOcclusion(height: walled())
+        XCTAssertFalse(o.hides(eye: SIMD3(-5000, 5000, 2), points: [SIMD3(-9000, 5000, 0)]))
+    }
+}

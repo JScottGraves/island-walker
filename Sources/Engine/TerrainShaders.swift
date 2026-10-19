@@ -725,12 +725,9 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
     float3 wallAlbedo = 0.0;
     CanopyTexel crowns, clumps, average;
     if (h < 0.0) {
-        // The sea floor, seen through the water the ocean pass draws over it: sand, darker
-        // where reef stands on it (until the floor has material channels): knolls and patch
-        // reefs that rise above their surroundings. Its sun comes from the water surface
-        // above it (the prepass shows the sea there).
-        float reef = saturate(in.ridge * 3.0) * (1.0 - smoothstep(8.0, 25.0, -h));
-        albedo = mix(kSand, kReef, saturate(reef));
+        // The sea floor: the water shades it itself (oceanFloor), so it only shows here where
+        // it peeks out at the waterline.
+        albedo = kSand;
     } else {
         constexpr sampler linear(filter::linear, address::clamp_to_edge);
         float4 canopy = canopyMap.sample(linear, in.world.xy / u.cloudLayer.w);
@@ -883,9 +880,6 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
         color = mix(color, canopy, forest);
     }
 
-    // Under the sea: the floor's own light, unhazed, and its depth, for the water drawn over it
-    // to look through (oceanFragment).
-    if (h < 0.0) return float4(color * u.exposure, floorAlpha(-h));
     return finishSurface(u, skyView, clouds, cloudDistance, color, in.world, in.position.xy);
 }
 
@@ -1209,8 +1203,20 @@ struct MotionParams {
     float4x4 inverseJittered;   // this frame's jittered clip space → camera-relative
     float4x4 current;           // this frame's unjittered view-projection
     float4x4 previous;          // the last frame's unjittered view-projection
-    float4 cameraStep;          // this frame's camera minus the last frame's (xyz)
+    float4 cameraStep;          // this frame's camera minus the last frame's (xyz), frame parity (w)
 };
+
+// Motion carries the frame's parity in the lowest bit of y's half float, so the camera's motion
+// can tell the pixels geometry moving on its own already wrote this frame (the sea's prepass)
+// from last frame's leftovers.
+float motionWithParity(float y, uint parity) {
+    ushort bits = as_type<ushort>(half(y));
+    return float(as_type<half>(ushort((bits & 0xFFFEu) | parity)));
+}
+
+bool motionWrittenThisFrame(float y, uint parity) {
+    return (as_type<ushort>(half(y)) & 1u) == parity;
+}
 
 float2 clipToUV(float4 c) {
     float2 ndc = c.xy / max(c.w, 1e-6);
@@ -1219,10 +1225,13 @@ float2 clipToUV(float4 c) {
 
 kernel void motionVectors(constant MotionParams &m [[buffer(0)]],
                           depth2d<float, access::read> depth [[texture(0)]],
-                          texture2d<float, access::write> out [[texture(1)]],
+                          texture2d<float, access::read_write> out [[texture(1)]],
                           uint2 g [[thread_position_in_grid]]) {
     uint2 size = uint2(out.get_width(), out.get_height());
     if (any(g >= size)) return;
+    // Geometry that moves on its own (the sea) wrote its motion in the prepass.
+    uint parity = uint(m.cameraStep.w);
+    if (motionWrittenThisFrame(out.read(g).y, parity)) return;
     float2 uv = (float2(g) + 0.5) / float2(size);
     float4 p = m.inverseJittered * float4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, depth.read(g), 1.0);
     float3 rel = p.xyz / p.w;
@@ -1230,7 +1239,7 @@ kernel void motionVectors(constant MotionParams &m [[buffer(0)]],
     float4 before = m.previous * float4(rel + m.cameraStep.xyz, 1.0);
     // Behind the last frame's camera: no history to point at.
     float2 motion = before.w > 1e-3 ? clipToUV(before) - clipToUV(now) : float2(0.0);
-    out.write(float4(motion, 0.0, 0.0), g);
+    out.write(float4(motion.x, motionWithParity(motion.y, parity), 0.0, 0.0), g);
 }
 
 // The upscaled frame into the drawable (or a snapshot's target), which applies its sRGB
