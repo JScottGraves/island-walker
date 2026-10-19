@@ -177,6 +177,9 @@ kernel void coverGenerate(constant Uniforms &u [[buffer(0)]],
                          levelHeight(t, pages, tiles, 0, p + float2(0.0, e)) - levelHeight(t, pages, tiles, 0, p - float2(0.0, e))) / (2.0 * e);
     float slope = length(grad);
     density *= 1.0 - smoothstep(0.7 * sa.x, sa.x, slope);
+    // Nothing grows on the beach face the waves run up (the swash; terrainFragment): bare below
+    // ~1.5 m above the sea, thinning in up to 2.5 m.
+    density *= smoothstep(1.5, 2.5, levelHeight(t, pages, tiles, 0, p) - f.lods.z);
     // Wetter communities nearby help the forest sedge.
     float wet = b.y + b.z + a.z + c.x;  // wet forest, riparian, marsh, bog
     if (species == 3) density *= 0.7 + 0.3 * saturate(2.0 * wet);
