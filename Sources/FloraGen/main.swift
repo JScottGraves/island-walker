@@ -55,7 +55,8 @@ func printSites(_ path: String) throws {
         return try bundle.grid(name, level: level)
     }
     let height = try map("height")
-    for name in ["biome-wet-forest", "biome-riparian", "biome-mesic-forest", "biome-dry-forest", "biome-strand", "biome-montane"] {
+    for name in ["biome-wet-forest", "biome-riparian", "biome-mesic-forest", "biome-dry-forest", "biome-strand", "biome-montane",
+                 "biome-marsh", "biome-rocky-shore"] {
         guard let w = try? map(name) else { continue }
         let scale = height.width / w.width
         var best = (score: -1.0, i: 0, j: 0, gx: 0.0, gy: 0.0)
@@ -68,7 +69,7 @@ func printSites(_ path: String) throws {
                 let slope = (gx * gx + gy * gy).squareRoot()
                 // Purity over a block (5×5, or 1 cell for the narrow strand and stream bands),
                 // on ground a person could stand on.
-                let r = name == "biome-strand" || name == "biome-riparian" ? 0 : 2
+                let r = ["biome-strand", "biome-riparian", "biome-marsh", "biome-rocky-shore"].contains(name) ? 0 : 2
                 var purity = 1.0
                 for dj in -r...r { for di in -r...r { purity = Swift.min(purity, Double(w[i + di, j + dj])) } }
                 let score = purity * (1 - Swift.min(1, slope / 0.35))
