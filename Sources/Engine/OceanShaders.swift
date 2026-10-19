@@ -310,13 +310,13 @@ float oceanFootprint(constant Uniforms &u, float distance) {
     return distance * 1.1547 / u.frame.y;
 }
 
-// Water depth under xy from the finest streamed heights resident there (a coarser level would
-// read a reef flat by the shore as deep water and leave it full-sized troughs that dip below
-// the floor); off the heightfield, the open ocean.
+// Water depth under xy from the streamed heights at a level as coarse as the grid; off the
+// heightfield, the open ocean.
 float oceanWaterDepth(constant Uniforms &u, constant TerrainParams &t, const device int *pages,
-                      texture2d_array<ushort, access::read> tiles, float2 xy) {
+                      texture2d_array<ushort, access::read> tiles, float2 xy, float spacing) {
     if (any(xy < 0.0) || any(xy > float2(t.domainSize))) return 4000.0;
-    return u.seaLevel - levelHeight(t, pages, tiles, 0, xy);
+    int level = clamp(int(floor(log2(max(spacing / t.cellMetres, 1.0)))), 0, t.levels - 1);
+    return u.seaLevel - levelHeight(t, pages, tiles, level, xy);
 }
 
 struct OceanPoint {
@@ -339,7 +339,7 @@ OceanPoint oceanPoint(constant Uniforms &u, constant OceanParams &o, constant Te
     xy -= fmod(g, 2.0) * spacing * morph;
     OceanPoint p;
     p.plane = xy;
-    p.depth = oceanWaterDepth(u, t, pages, tiles, xy);
+    p.depth = oceanWaterDepth(u, t, pages, tiles, xy, spacing);
     float footprint = oceanFootprint(u, distance(float3(xy, u.seaLevel), u.cameraPosition));
     p.filter = max(spacing * (1.0 + morph), footprint);
     return p;
