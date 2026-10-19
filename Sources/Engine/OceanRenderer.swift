@@ -453,6 +453,8 @@ final class OceanRenderer {
     func bindSky(_ enc: MTLRenderCommandEncoder) {
         enc.setFragmentBytes(&params, length: MemoryLayout<Params>.stride, index: 7)
         enc.setFragmentTexture(environment, index: 8)
+        // The terrain's swash (swashSand) reads the shore too.
+        enc.setFragmentTexture(shore, index: 9)
     }
 }
 #endif

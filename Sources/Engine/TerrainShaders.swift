@@ -429,6 +429,7 @@ float3 groundTexture(texture2d_array<float> albedo, texture2d_array<float> norma
     return colour;
 }
 
+""" + swashShaderSource + """
 // ---- Far forest (docs/flora.md §11) ----
 // Beyond the trees drawn one by one the ground shows its plant cover as a canopy seen from
 // above, not as paint. Up to a couple of kilometres, where crowns are still a few pixels
@@ -706,7 +707,9 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
                                 texture2d<float> groundWeights1 [[texture(15)]],
                                 texture2d<float> groundWeights2 [[texture(16)]],
                                 constant float2 &floraRange [[buffer(2)]],
-                                constant float4 &coverRange [[buffer(3)]]) {
+                                constant float4 &coverRange [[buffer(3)]],
+                                constant OceanParams &ocean [[buffer(7)]],
+                                texture2d<float> shore [[texture(9)]]) {
     float3 n = normalize(in.normal);
     float slope = 1.0 - n.z;
     float h = in.world.z - u.seaLevel;
@@ -844,6 +847,33 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
         sunCover = underCanopy * smoothstep(floraRange.y - kTreeShadowFade, floraRange.y, d);
     }
 
+    // Swash (swashSand): the sheet of water running up the sand and draining back, sand it
+    // covered lately darker, foam stranded along the highest line. Beyond ~150 m a pixel spans
+    // many swashes: an even wet band with a thin white line at its top.
+    float stranded = 0.0, sheet = 0.0, lace = 0.0;
+    if (h < 2.0) {
+        constexpr sampler bilinear(filter::linear, address::clamp_to_edge);
+        float4 shoreTexel = shore.sample(bilinear, in.world.xy / u.cloudLayer.w);
+        if (shoreTexel.r > -kSwashReach && shoreTexel.r < 40.0) {
+            float hs = surfHeight(ocean, shoreTexel);
+            float d = distance(u.cameraPosition, in.world);
+            float far = smoothstep(150.0, 300.0, d);
+            float4 sand = far < 1.0 ? swashSand(ocean, hs, in.world.xy, h, ocean.time.x) : float4(0.0);
+            float band = swashRunup(ocean, hs, in.world.xy, 0.0) / 0.55;    // the highest typical run-up
+            float meanWet = 1.0 - smoothstep(0.5 * band, band, h);
+            float wet = mix(sand.x, 0.7 * meanWet, far);
+            // Wet sand: darker, a little more saturated.
+            albedo *= mix(float3(1.0), float3(0.58, 0.56, 0.52), wet);
+            sheet = (1.0 - far) * smoothstep(0.0, 0.03, sand.z);
+            // A ragged band of bubbles a metre or so wide along the uprush's edge.
+            float rag = groundNoise(in.world.xy / 1.3 + 6.1);
+            lace = (1.0 - far) * sand.w * (1.0 - smoothstep(0.0, 0.03 + 0.06 * rag, sand.z)) * sheet;
+            float strands = smoothstep(0.35, 0.7, groundNoise(in.world.xy / 0.6 + 8.1));
+            stranded = 0.8 * sand.y * strands * (1.0 - far) + 0.35 * far * (1.0 - smoothstep(0.0, 0.03, abs(h - band)));
+            if (sheet > 0.0) n = normalize(mix(n, float3(0.0, 0.0, 1.0), sheet));
+        }
+    }
+
     float skyVisibility = saturate(in.light.x);
     float nDotL = saturate(dot(n, l));
     // Cloud shadows drifting over the terrain; under thick cloud no ray is worth tracing.
@@ -880,6 +910,26 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
         color = mix(color, canopy, forest);
     }
 
+    if (sheet > 0.0) {
+        // Through a few centimetres of water: a faint green-blue tint, the sky reflected off the
+        // film (Fresnel), and the sun's glint on its ripples.
+        float3 v = normalize(u.cameraPosition - in.world);
+        float3 film = float3(0.0, 0.0, 1.0);
+        float nv = saturate(dot(film, v));
+        float fresnel = waterFresnel(nv);
+        float3 under = color * float3(0.82, 0.92, 0.9);
+        float3 sky = skyAbove(skyView, reflect(-v, film));
+        float3 hv = normalize(l + v);
+        float glint = pow(saturate(dot(hv, film)), 400.0) * 40.0 * fresnel;
+        float3 water = under * (1.0 - fresnel) + sky * fresnel + u.sunRadiance * (glint * sunVisibility);
+        color = mix(color, water, sheet);
+    }
+    float bubbles = smoothstep(0.3, 0.6, groundNoise(in.world.xy / 0.35 + 3.3));
+    float foamy = max(stranded, lace * (0.35 + 0.65 * bubbles));
+    if (foamy > 0.0) {
+        float3 white = 0.85 * (u.sunRadiance * (saturate(l.z) * sunVisibility) + skyIrradiance(u, float3(0.0, 0.0, 1.0)));
+        color = mix(color, white, saturate(foamy));
+    }
     return finishSurface(u, skyView, clouds, cloudDistance, color, in.world, in.position.xy);
 }
 

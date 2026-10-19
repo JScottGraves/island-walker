@@ -160,6 +160,82 @@ float3 oceanFlatVariance(constant OceanParams &o) {
 
 """
 
+let swashShaderSource = """
+// ---- Swash (research/ocean.md, step O4): water running up the sand ----
+// Each wave that reaches the shore runs up the beach as a thin sheet, slows, stops at its
+// run-up, and drains back, over ~65% of the swell's period, timed by the same wave clock as the
+// surf (OceanShaders' surfFoam). The terrain draws it over the sand (terrainFragment): the sheet
+// (wet sand through a few centimetres of water, a sky sheen and glint, foam lace along the
+// uprush's edge), sand the waves covered lately darker, foam stranded along the highest line.
+
+// Beach slope for the run-up (Hawaiian sand beaches ~1:20), share of the period a swash
+// lasts, and how far inland of the smoothed shoreline it is looked for (m).
+constant float kSwashBeta = 0.05;
+constant float kSwashShare = 0.65;
+constant float kSwashReach = 80.0;
+
+// Significant height reaching a shore point, from the shore texture (exposure in g, b).
+float surfHeight(constant OceanParams &o, float4 shore) {
+    return sqrt(o.surf.x * o.surf.x * shore.b * shore.b + o.surf.y * o.surf.y * shore.g * shore.g);
+}
+
+// Height (m above the sea) wave n runs up to at xy: ~0.4 of Stockdon et al.'s 2% run-up (a
+// typical wave's) for waves of height hs and the swell's period on kSwashBeta, varying wave to wave
+// in sections along the shore, with cusps every few metres.
+float swashRunup(constant OceanParams &o, float hs, float2 xy, float n) {
+    float l0 = 9.81 * o.surf.z * o.surf.z / 6.2831853;
+    float s = sqrt(max(hs, 0.05) * l0);
+    float r2 = 1.1 * (0.35 * kSwashBeta * s + 0.5 * s * sqrt(0.563 * kSwashBeta * kSwashBeta + 0.004));
+    float wave = 0.55 + 0.45 * groundNoise(xy / 120.0 + n * 1.37);
+    float cusps = 1.0 + 0.3 * (groundNoise(xy / 6.0 + n * 0.53) - 0.5);
+    return 0.38 * r2 * wave * cusps;
+}
+
+// Where in its swash the wave at xy is (0…1 of the period since it reached the shore), and
+// which wave (n).
+float swashPhase(constant OceanParams &o, float2 xy, float time, thread float &n) {
+    float c = time / o.surf.z + 0.08 * groundNoise(xy / 160.0);
+    n = floor(c);
+    return c - n;
+}
+
+// Height the sheet's leading edge has reached now: up fast and decelerating, back slower
+// (ballistic), 0 between swashes. Also the wave's run-up and its phase.
+float swashFront(constant OceanParams &o, float hs, float2 xy, float time, thread float &runup, thread float &phase) {
+    float n;
+    phase = swashPhase(o, xy, time, n);
+    runup = swashRunup(o, hs, xy, n);
+    float x = phase / kSwashShare;
+    return phase < kSwashShare ? runup * 4.0 * x * (1.0 - x) : 0.0;
+}
+
+// Sand `h` metres above the sea: (x) how wet the last few swashes left it (drying over ~20 s),
+// (y) the foam they stranded along their highest line (fading over a few seconds), (z) metres
+// of the current sheet's height above it (≤ 0 where it hasn't reached), (w) 1 on the uprush.
+float4 swashSand(constant OceanParams &o, float hs, float2 xy, float h, float time) {
+    float n;
+    float phase = swashPhase(o, xy, time, n);
+    float wet = 0.0, foam = 0.0;
+    float runup0 = swashRunup(o, hs, xy, n);
+    float x0 = phase / kSwashShare;
+    float front = phase < kSwashShare ? runup0 * 4.0 * x0 * (1.0 - x0) : 0.0;
+    for (int k = 0; k < 4; k++) {
+        float runup = swashRunup(o, hs, xy, n - float(k));
+        float since = (phase + float(k) - 0.5 * kSwashShare) * o.surf.z;   // s since its highest
+        float reach = runup;
+        if (k == 0 && since < 0.0) {
+            float x = phase / kSwashShare;
+            reach = runup * 4.0 * x * (1.0 - x);
+        }
+        float covered = 1.0 - smoothstep(reach - 0.04, reach + 0.02, h);
+        wet = max(wet, covered * exp(-max(since, 0.0) / 20.0));
+        if (since > 0.0) foam = max(foam, (1.0 - smoothstep(0.0, 0.012, abs(h - runup))) * exp(-since / 4.0));
+    }
+    return float4(wet, foam, (front - h) / max(runup0, 0.05), phase < 0.5 * kSwashShare ? 1.0 : 0.0);
+}
+
+"""
+
 let oceanShaderSource = """
 // ---- Ocean: spectrum, FFT, displacement maps (OceanRenderer.update) ----
 constant uint kOceanN = 256;
