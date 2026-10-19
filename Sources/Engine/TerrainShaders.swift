@@ -1302,8 +1302,8 @@ kernel void taaResolve(constant float &historyValid [[buffer(0)]],
         out.write(float4(c, 1.0), g);
         return;
     }
-    float2 step = motion.read(uint2(nearestPixel)).xy;
-    float2 uv = (float2(g) + 0.5) / float2(size) + step;
+    float2 moved = motion.read(uint2(nearestPixel)).xy;
+    float2 uv = (float2(g) + 0.5) / float2(size) + moved;
     if (any(uv < 0.0) || any(uv > 1.0)) {
         out.write(float4(c, 1.0), g);
         return;
@@ -1312,7 +1312,7 @@ kernel void taaResolve(constant float &historyValid [[buffer(0)]],
     float3 sigma = sqrt(max(m2 / 9.0 - m1 * m1, 0.0));
     float3 h = toYCoCg(historyCatmullRom(history, uv, float2(size)));
     h = clamp(h, m1 - 1.25 * sigma, m1 + 1.25 * sigma);
-    float blend = mix(kTaaBlend, 0.5, saturate(length(step * float2(size)) / 25.0));
+    float blend = mix(kTaaBlend, 0.5, saturate(length(moved * float2(size)) / 25.0));
     out.write(float4(mix(fromYCoCg(h), c, blend), 1.0), g);
 }
 """
