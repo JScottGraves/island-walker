@@ -315,6 +315,7 @@ float4 finishSurface(constant Uniforms &u, texture2d<float> skyView, texture2d<f
     return float4(pbrNeutral(color * u.exposure), 1.0);
 }
 
+""" + groundCoverPreludeSource + """
 // ---- Ground textures (GroundTextures; docs/flora.md §9) ----
 // Near the camera the ground shows its community's tileable texture (litter, soil, sand,
 // moss, rock) instead of the canopy colour seen from above, fading back to it between
@@ -702,7 +703,8 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
                                 texture2d<float> groundWeights0 [[texture(14)]],
                                 texture2d<float> groundWeights1 [[texture(15)]],
                                 texture2d<float> groundWeights2 [[texture(16)]],
-                                constant float2 &floraRange [[buffer(2)]]) {
+                                constant float2 &floraRange [[buffer(2)]],
+                                constant float4 &coverRange [[buffer(3)]]) {
     float3 n = normalize(in.normal);
     float slope = 1.0 - n.z;
     float h = in.world.z - u.seaLevel;
@@ -739,6 +741,15 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
             float3 textured = n;
             float3 ground = groundTexture(groundAlbedo, groundNormal, groundWeights0, groundWeights1, groundWeights2,
                                           in.world.xy, 1.0 / u.cloudLayer.w, h, slope, textured);
+            // Where the ground cover thins out with distance (coverRange: its full-density
+            // distance, its end, 1 if drawn), the texture takes the cover's colour, so the
+            // edge of the blades doesn't show.
+            if (coverRange.z > 0.0) {
+                float4 tint = coverFarTint(in.world.xy, groundWeights0.sample(linear, in.world.xy / u.cloudLayer.w),
+                                           groundWeights1.sample(linear, in.world.xy / u.cloudLayer.w),
+                                           groundWeights2.sample(linear, in.world.xy / u.cloudLayer.w));
+                ground = mix(ground, tint.rgb, tint.a * smoothstep(0.7 * coverRange.x, coverRange.y, d));
+            }
             albedo = mix(albedo, ground, near);
             n = normalize(mix(n, textured, near));
         }

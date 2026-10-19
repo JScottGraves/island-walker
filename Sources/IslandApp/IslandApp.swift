@@ -15,7 +15,8 @@ import Walker
 // [ and ] move the time of day, T lets time run (an hour every 20 s). `--time 16.5` starts at
 // 16:30 local solar time, `--day N` picks the day of year, `--shadows horizon` skips ray tracing,
 // `--view coast` starts at that snapshot viewpoint (summit, ridge, coast, pali), `--camera X,Y,YAW,PITCH`
-// (metres, degrees) at that spot, and `--flora off` draws no trees.
+// (metres, degrees) at that spot, and `--flora off` draws no trees. `--cover off` draws no grasses and
+// sedges; `--cover-range M` (default 50) and `--cover-density X` (default 1) tune them.
 
 @main
 struct IslandApp: App {
@@ -101,7 +102,9 @@ final class Coordinator: NSObject, MTKViewDelegate {
                                            shadows: requested, clouds: clouds,
                                            detailMaps: IslandSource.detailMaps(),
                                            fineDetail: Snapshots.option("--detail") != "off",
-                                           flora: IslandSource.floraMaps(), antialiasing: Snapshots.antialiasing())
+                                           flora: IslandSource.floraMaps(),
+                                           groundCover: GroundCoverSettings(arguments: CommandLine.arguments),
+                                           antialiasing: Snapshots.antialiasing())
             renderer?.jitterSign = Snapshots.option("--jitter-sign").flatMap(Float.init) ?? 1
         } catch {
             print("renderer failed: \(error)")

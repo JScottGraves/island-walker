@@ -15,7 +15,8 @@ import IslandGen
 /// of ray-traced shadows. `--size 2560x1440` sets the resolution (default 1280x720).
 /// `--detail off` draws only the bundle's own grid, without the generated fine detail;
 /// `--pitch DEG` looks that far below the horizon from every viewpoint (ground close-ups).
-/// `--flora off` draws no trees (for A/B timing). `--eye H` stands the camera H metres
+/// `--flora off` draws no trees (for A/B timing); `--cover off` no grasses and sedges,
+/// `--cover-range M` and `--cover-density X` tune them. `--eye H` stands the camera H metres
 /// above the ground instead of 1.7 (over the canopy, for distant views). `--camera X,Y,YAW,PITCH` (metres,
 /// degrees; yaw clockwise from north, pitch up) adds a view named camN, or NAME=X,Y,YAW,PITCH
 /// one named NAME; repeat it for more. `--views a,b` renders only the views named.
@@ -93,7 +94,9 @@ enum Snapshots {
                                                shadows: requested, clouds: clouds,
                                                detailMaps: IslandSource.detailMaps(),
                                                fineDetail: option("--detail") != "off",
-                                               flora: IslandSource.floraMaps(), antialiasing: antialiasing())
+                                               flora: IslandSource.floraMaps(),
+                                               groundCover: GroundCoverSettings(arguments: CommandLine.arguments),
+                                               antialiasing: antialiasing())
             renderer.jitterSign = option("--jitter-sign").flatMap(Float.init) ?? 1
             print("shadows: \(renderer.shadows.rawValue); antialiasing: \(renderer.antialiasing)")
             // Viewpoints are picked on the overview; the camera then stands on the full-detail ground.
@@ -134,6 +137,7 @@ enum Snapshots {
                                  s.floraInstances, Double(s.floraTriangles) / 1e6,
                                  s.shadowCasters.map { String(format: "%d/%.1fM", $0.instances, Double($0.triangles) / 1e6) }
                                      .joined(separator: " ")))
+                    if s.coverBlades != (0, 0) { print("  cover blades \(s.coverBlades.0) + \(s.coverBlades.1)") }
                     timings += String(format: "%@,%@,%.2f,%.2f,%.2f,%.2f,%d,%d,%d,%d\n", view.name, hour.map { String($0) } ?? "reference",
                                       s.gpuMilliseconds, passes[0], passes[1], passes[2], s.nodes, s.residentTiles,
                                       s.floraInstances, s.floraTriangles)
