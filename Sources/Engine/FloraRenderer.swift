@@ -98,7 +98,7 @@ final class FloraRenderer {
     var hzbLevels: [MTLTexture] = []
     let hzbFirst: MTLComputePipelineState
     let hzbDown: MTLComputePipelineState
-    var hzbInfo: (viewProjection: simd_float4x4, eye: SIMD3<Double>, forward: SIMD3<Float>, scaleY: Float)?
+    var hzbState: (viewProjection: simd_float4x4, eye: SIMD3<Double>, forward: SIMD3<Float>, scaleY: Float)?
     var lastScatter: Double?
     var fixedFrameTime: Double?
     var canopyRange: Float = 600
@@ -703,6 +703,22 @@ final class FloraRenderer {
 
     /// Builds this frame's instances: clears the bucket counts, scatters both layers and
     /// writes the indirect draw arguments. Specimen sheets write theirs once instead.
+    /// Last frame's pyramid as the shaders' FloraHzb, unless the camera has moved 2 m or
+    /// turned 3° since (then all zero: nothing is occluded). Shared with the ground cover.
+    func hzbInfo(eye: SIMD3<Double>, forward: SIMD3<Float>) -> [SIMD4<Float>] {
+        var info = [SIMD4<Float>](repeating: .zero, count: 6)
+        if let h = hzbState, let hzb, simd_distance(h.eye, eye) < 2,
+           simd_dot(simd_normalize(h.forward), simd_normalize(forward)) > 0.9986 {
+            info[0] = h.viewProjection.columns.0
+            info[1] = h.viewProjection.columns.1
+            info[2] = h.viewProjection.columns.2
+            info[3] = h.viewProjection.columns.3
+            info[4] = SIMD4(Float(h.eye.x), Float(h.eye.y), Float(h.eye.z), 1)
+            info[5] = SIMD4(Float(hzb.width), Float(hzb.height), Float(hzb.mipmapLevelCount), h.scaleY)
+        }
+        return info
+    }
+
     /// Builds the pyramid from this frame's depth prepass, for next frame's scatter.
     func buildHzb(_ cmd: MTLCommandBuffer, depth: MTLTexture, viewProjection: simd_float4x4, eye: SIMD3<Double>,
                   forward: SIMD3<Float>) {
@@ -717,7 +733,7 @@ final class FloraRenderer {
                 (0..<t.mipmapLevelCount).compactMap { t.makeTextureView(pixelFormat: .r32Float, textureType: .type2D,
                                                                          levels: $0..<($0 + 1), slices: 0..<1) }
             } ?? []
-            hzbInfo = nil
+            hzbState = nil
         }
         guard let hzb, hzbLevels.count == hzb.mipmapLevelCount, let enc = cmd.makeComputeCommandEncoder() else { return }
         enc.label = "tree occlusion pyramid"
@@ -735,7 +751,7 @@ final class FloraRenderer {
         }
         enc.endEncoding()
         // The lens's y scale (TerrainRenderer's 60° field of view), for sizing plants on screen.
-        hzbInfo = (viewProjection, eye, forward, Float(1 / tan(Double.pi / 6)))
+        hzbState = (viewProjection, eye, forward, Float(1 / tan(Double.pi / 6)))
     }
 
     func scatter(_ cmd: MTLCommandBuffer, uniforms: inout TerrainRenderer.Uniforms, eye: SIMD3<Double>,
@@ -767,17 +783,7 @@ final class FloraRenderer {
         enc.setBuffer(instances, offset: 0, index: 6)
         enc.setBuffer(lodKeys, offset: 0, index: 10)
         enc.setBuffer(lodValues, offset: 0, index: 11)
-        // Last frame's pyramid, unless the camera has moved 2 m or turned 3° since.
-        var info = [SIMD4<Float>](repeating: .zero, count: 6)
-        if let h = hzbInfo, let hzb, simd_distance(h.eye, eye) < 2,
-           simd_dot(simd_normalize(h.forward), simd_normalize(forward)) > 0.9986 {
-            info[0] = h.viewProjection.columns.0
-            info[1] = h.viewProjection.columns.1
-            info[2] = h.viewProjection.columns.2
-            info[3] = h.viewProjection.columns.3
-            info[4] = SIMD4(Float(h.eye.x), Float(h.eye.y), Float(h.eye.z), 1)
-            info[5] = SIMD4(Float(hzb.width), Float(hzb.height), Float(hzb.mipmapLevelCount), h.scaleY)
-        }
+        var info = hzbInfo(eye: eye, forward: forward)
         enc.setBytes(&info, length: info.count * 16, index: 12)
         enc.setTexture(hzb ?? biomes[0], index: 5)
         enc.setTexture(tiles, index: 0)

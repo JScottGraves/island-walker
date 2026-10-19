@@ -124,6 +124,8 @@ public final class TerrainRenderer {
     let maxHeight: Float
     /// Native trees and shrubs (nil when drawn without them).
     let flora: FloraRenderer?
+    /// Grasses and sedges near the walker (nil with `--cover off` or without community maps).
+    let groundCover: GroundCoverRenderer?
     /// What the last frame drew and how much is still loading, for the debug overlay.
     public private(set) var stats = Stats()
     public struct Stats: Sendable {
@@ -138,6 +140,8 @@ public final class TerrainRenderer {
         /// `snapshot` only: tree instances drawn (cross-fading ones twice) and their triangles.
         public var floraInstances = 0
         public var floraTriangles = 0
+        /// `snapshot` only: ground-cover blades drawn (LOD0, LOD1).
+        public var coverBlades = (0, 0)
         /// `snapshot` only: trees drawn into each shadow map, and their triangles.
         public var shadowCasters: [(instances: Int, triangles: Int)] = []
     }
@@ -178,7 +182,7 @@ public final class TerrainRenderer {
     public init(device: MTLDevice, colorFormat: MTLPixelFormat, depthFormat: MTLPixelFormat,
                 terrain: TerrainTiles, shadows requested: Shadows = .rayTraced, clouds: Grid? = nil,
                 detailMaps: DetailMaps? = nil, fineDetail: Bool = true, flora floraMaps: FloraMaps? = nil,
-                floraSpecimens: Bool = false) throws {
+                floraSpecimens: Bool = false, groundCover coverSettings: GroundCover.Settings = .init()) throws {
         self.device = device
         guard let queue = device.makeCommandQueue() else { throw RendererError.setup("command queue") }
         self.queue = queue
@@ -191,7 +195,8 @@ public final class TerrainRenderer {
         self.shadows = shadows
         let options = MTLCompileOptions()
         options.preserveInvariance = true  // the depth prepass and shading pass must agree
-        let library = try device.makeLibrary(source: terrainShaderSource + floraShaderSource, options: options)
+        let library = try device.makeLibrary(source: terrainShaderSource + floraShaderSource + groundCoverShaderSource,
+                                             options: options)
         let constants = MTLFunctionConstantValues()
         var rayTraced = shadows == .rayTraced
         constants.setConstantValue(&rayTraced, type: .bool, index: 0)
@@ -284,6 +289,10 @@ public final class TerrainRenderer {
                                 maps: floraMaps,
                                 seed: TerrainDetail.seed(of: overview), seaLevel: terrain.seaLevel,
                                 domainSize: Float(terrain.domainMetres))
+            : nil
+        groundCover = coverSettings.enabled && !(detailMaps?.communities.isEmpty ?? true) && !floraSpecimens
+            ? try GroundCoverRenderer(device: device, library: library, constants: constants, colorFormat: colorFormat,
+                                      depthFormat: depthFormat, rayTraced: shadows == .rayTraced, settings: coverSettings)
             : nil
         // Rings two node sizes wide: three drew 40% more triangles, mostly a few pixels across
         // far away (shading 3 ms slower at 1440p), with no relief visible in the difference.
@@ -598,6 +607,7 @@ public final class TerrainRenderer {
             stats.floraInstances = counts.instances
             stats.floraTriangles = counts.triangles
             stats.shadowCasters = flora?.casterCounts() ?? []
+            stats.coverBlades = groundCover?.lastDrawn ?? (0, 0)
         }
         let passes = (0..<3).compactMap { _ in queue.makeCommandBuffer() }
         if passes.count == 3 {
@@ -785,6 +795,10 @@ public final class TerrainRenderer {
         detail.update(cmd, eye: eye, streamer: streamer, terrainParams: terrainParams, pages: frameTerrain.pages)
         flora?.scatter(cmd, uniforms: &u, eye: eye, forward: forward, viewProjection: viewProjection, terrainParams: terrainParams,
                        detail: detail, pages: frameTerrain.pages, tiles: streamer.tiles)
+        groundCover?.update(cmd, uniforms: &u, eye: eye, viewProjection: viewProjection, renderHeight: height,
+                            groundHeight: groundHeight(x: eye.x, y: eye.y), terrainParams: terrainParams, detail: detail,
+                            pages: frameTerrain.pages, tiles: streamer.tiles, weights: groundWeights, canopyCover: canopyCover,
+                            flora: flora, forward: forward)
         flora?.renderShadows(cmd, uniforms: &u, eye: eye, forward: forward, sun: SIMD3(d.x, d.y, d.z),
                              aspect: Double(aspect), terrainParams: terrainParams, detail: detail,
                              pages: frameTerrain.pages, tiles: streamer.tiles)
@@ -809,6 +823,7 @@ public final class TerrainRenderer {
         bindTerrain(enc, frame: frameTerrain)
         drawTerrain(enc, frame: frameTerrain)
         flora?.drawPrepass(enc)
+        groundCover?.drawPrepass(enc)
         enc.endEncoding()
         flora?.buildHzb(cmd, depth: targets.depth, viewProjection: viewProjection, eye: eye, forward: forward)
 
@@ -887,8 +902,11 @@ public final class TerrainRenderer {
         shade.setFragmentTextures([groundAlbedo, groundNormal] + groundWeights, range: 12..<17)
         var floraRange = SIMD2<Float>(flora?.canopyRange ?? 0, flora?.casters != nil ? flora?.shadowRange ?? 0 : 0)
         shade.setFragmentBytes(&floraRange, length: 8, index: 2)
+        var coverRange = groundCover?.terrainRange ?? .zero
+        shade.setFragmentBytes(&coverRange, length: 16, index: 3)
         drawTerrain(shade, frame: frameTerrain)
         flora?.drawShading(shade, skyVisibility: skyVisibility, horizons: horizons)
+        groundCover?.drawShading(shade, skyVisibility: skyVisibility, horizons: horizons)
         shade.endEncoding()
 
         historyIndex = next
