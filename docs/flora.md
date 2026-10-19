@@ -717,3 +717,96 @@ terrain far away. Built here in that order of value.
   Pass 1 takes the mean of its traced 2×2 neighbours on the same surface instead of
   tracing again, which keeps the cost flat (worst single run 24.0 ms, seed 42 summit 07:00).
 
+
+## 12. Ground cover (GC1)
+
+Native grasses and sedges drawn as blades near the walker (research/ground-cover.md §5.1).
+`GroundCover` (Flora) holds the species and the community table; `GroundCoverRenderer` and
+`GroundCoverShaders` draw them, separate from the trees but sharing their world hash,
+community weights and occlusion pyramid.
+
+- **Species** (one or two per community, pre-contact Oʻahu, no lawn grass):
+
+  | Species | Where | Blades |
+  |---|---|---|
+  | ʻakiʻaki (*Sporobolus virginicus*) | strand (dense runs), rocky shore (sparser) | short (0.15–0.35 m), wiry, grey-green |
+  | kawelu (*Eragrostis variabilis*) | dry forest: sparse bunches on mostly bare red soil | tall (0.45–0.95 m), arching, straw-green |
+  | makaloa (*Cyperus laevigatus*) | marsh | upright round stems 0.4–1.4 m, facing the camera |
+  | ʻuki (*Machaerina angustifolia*) | mesic, wet and cloud forest, riparian, bog, montane: tussocks | stiff sword leaves 0.4–1.1 m |
+
+  Nothing grows on the cliff community or on slopes over a species' limit (≤ 55°).
+- **Generation, once per tile**: the ground is cut into 8 m tiles, and a toroidal cache
+  holds every tile within range plus one.
+  - A tile entering the ring is generated once and kept: 64² jittered candidates per
+    tile, each a blade or none.
+  - A candidate is kept by the community's density × a slope window (the 10 m data) ×
+    wetness (ʻuki) × canopy shade (`canopyCover`, by the species' tolerance) × patches of
+    value noise a few to tens of metres across.
+  - Voronoi clumps of the species' spacing share a lean and a height; bunch species (kawelu,
+    ʻuki) keep only blades near a clump's centre, fanning out from it.
+  - Stems of trees and shrubs are kept clear: `coverNearStem` repeats the tree scatter's
+    cell hash, community and density pick for the cells around.
+- **Every frame** (`coverCull`): every kept blade within range, in view (unjittered
+  frustum) and not hidden by last frame's depth pyramid (`FloraRenderer.hzbInfo`) is put
+  on the ground the terrain draws there (`floraGround`, the same as the trunks).
+  - Full density to half the range (25 m), then thinned by each blade's hash rank and
+    shrunk, with none past the range (50 m).
+  - All of it fades out once the camera stands 6–25 m above the ground (flying).
+  - LOD0 (5 segments) within 12 m, LOD1 (3) beyond, in two indirect draws.
+- **Blades** (`coverVertex`): quadratic Béziers pulled from the vertex id as triangle strips.
+  - Each kept blade is drawn as a tuft of leaves (4 near, 2 far) fanning round its facing:
+    leaf counts multiply only the cheap vertex work, not the cull.
+  - Widths taper (round makaloa stems face the camera), and stay at least a pixel wide.
+  - They lean with the ground's normal and are pushed by `tradeWindGust`: the trade wind
+    (cloudWind) times two octaves of gust noise travelling downwind. A pure function of
+    position and clock, so trees can share it, and a previous position for motion
+    vectors is the same call at the previous clock.
+- **Passes**: blades go in the depth prepass right after the trees, writing the surface
+  buffer with the tree bit. So `sunShadow` treats them like ground (within a metre of the
+  mesh) and gives them terrain rays and the tree cascades. They're shaded with equal depth
+  after the trees with `litSurface` and `finishSurface`:
+  - colour from root to tip, one leaf in six straw-dry;
+  - the root blended into the ground's normal, with occlusion darkening the base;
+  - the normal halfway to the ground's, so the cover is lit as a layer;
+  - sun through the blades looking towards a low sun.
+
+  No cast shadows.
+- **Far match**: the ground texture (§9) takes the cover's colour by its coverage
+  (`coverFarTint`, the same patches) from 70% of the full-density distance out, so the edge
+  of the blades doesn't show.
+- **Flags** (app and snapshots): `--cover off`, `--cover-range M` (default 50; full density
+  to half of it), `--cover-density X` (default 1).
+- **Not yet** (GC2–GC4): per-blade motion vectors (the hook is the explicit clock in
+  `tradeWindGust`), contact shadows, trails, darkening of the ground under dense cover.
+
+- **Cost**: 2560×1440 GPU ms, median of 5, the cover views (strand, marsh, dry and mesic
+  sites from `floragen --sites`, at eye height) and the usual worst views, cover on and off.
+
+  | View | Hour | Cover off | Cover on | Δ |
+  |---|---|---|---|---|
+  | Oʻahu dry | 07:00 | 11.77 | 12.22 | +0.45 |
+  | Oʻahu dry | 12:00 | 11.65 | 12.09 | +0.44 |
+  | Oʻahu marsh | 07:00 | 13.11 | 13.40 | +0.29 |
+  | Oʻahu marsh | 12:00 | 12.64 | 12.96 | +0.32 |
+  | Oʻahu mesic | 07:00 | 14.73 | 15.25 | +0.52 |
+  | Oʻahu mesic | 12:00 | 14.39 | 14.81 | +0.42 |
+  | Oʻahu pali | 07:00 | 17.12 | 17.92 | +0.80 |
+  | Oʻahu pali | 12:00 | 12.42 | 12.78 | +0.36 |
+  | Oʻahu ridge | 07:00 | 17.82 | 18.16 | +0.34 |
+  | Oʻahu ridge | 12:00 | 15.10 | 15.14 | +0.04 |
+  | Oʻahu strand | 07:00 | 10.99 | 12.96 | +1.97 |
+  | Oʻahu strand | 12:00 | 10.87 | 12.81 | +1.94 |
+  | seed 42 dry | 07:00 | 14.67 | 15.10 | +0.43 |
+  | seed 42 dry | 12:00 | 13.01 | 13.46 | +0.45 |
+  | seed 42 marsh | 07:00 | 13.90 | 14.53 | +0.63 |
+  | seed 42 marsh | 12:00 | 13.40 | 13.99 | +0.59 |
+  | seed 42 mesic | 07:00 | 15.05 | 15.52 | +0.47 |
+  | seed 42 mesic | 12:00 | 14.65 | 15.09 | +0.44 |
+  | seed 42 strand | 07:00 | 12.87 | 14.51 | +1.64 |
+  | seed 42 strand | 12:00 | 12.47 | 14.11 | +1.64 |
+  | seed 42 summit | 07:00 | 22.23 | 22.72 | +0.49 |
+  | seed 42 summit | 12:00 | 14.01 | 14.49 | +0.48 |
+
+  - Typical views pay 0.3–0.6 ms. The strands, which have the densest cover in the widest
+    open view, pay 1.6–2.0 ms, within the 2 ms limit.
+  - The worst frame is seed 42's summit at 07:00 at 22.72 ms, within the 25 ms budget.
