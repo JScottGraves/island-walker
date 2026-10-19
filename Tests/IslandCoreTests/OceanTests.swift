@@ -163,3 +163,60 @@ final class TerrainOcclusionTests: XCTestCase {
         XCTAssertFalse(o.hides(eye: SIMD3(-5000, 5000, 2), points: [SIMD3(-9000, 5000, 0)]))
     }
 }
+
+final class ShoreTests: XCTestCase {
+    func testSignedDistanceToTheShore() {
+        // Land west of x = 300 m (cells 0..<30 at 10 m), sea east of it.
+        var g = Grid(width: 100, height: 40, cellSize: 10)
+        for j in 0..<40 { for i in 0..<100 { g[i, j] = i < 30 ? 5 : -3 } }
+        let d = ShoreDistance.signed(height: g, seaLevel: 0)
+        // Distances between cell centres across the shoreline (half a cell either side of it).
+        XCTAssertEqual(Double(d[30, 20]), 5, accuracy: 0.01)
+        XCTAssertEqual(Double(d[80, 20]), 505, accuracy: 0.01)
+        XCTAssertEqual(Double(d[29, 20]), -5, accuracy: 0.01)
+        XCTAssertEqual(Double(d[0, 5]), -295, accuracy: 0.01)
+        // Diagonal: an island cell at the centre of open sea.
+        var s = Grid(width: 41, height: 41, cellSize: 10)
+        for j in 0..<41 { for i in 0..<41 { s[i, j] = (i == 20 && j == 20) ? 5 : -10 } }
+        let e = ShoreDistance.signed(height: s, seaLevel: 0)
+        XCTAssertEqual(Double(e[23, 24]), 50 - 5, accuracy: 0.01)
+    }
+
+    func testSystemsKnowTheirHeights() {
+        let o = OceanSpectrum()
+        XCTAssertEqual(o.swell.measuredSignificantHeight, 1.2, accuracy: 0.02)
+        XCTAssertGreaterThan(o.windSea.measuredSignificantHeight, 1.2)
+        XCTAssertLessThan(o.windSea.measuredSignificantHeight, 2.4)
+    }
+}
+
+final class ExposureTests: XCTestCase {
+    func testLandAndReefsUpstreamShelter() {
+        // 80 m cells: open sea, a reef 1 m deep across x = 4 km, land west of x = 1 km.
+        var g = Grid(width: 100, height: 20, cellSize: 80)
+        for j in 0..<20 { for i in 0..<100 { g[i, j] = i < 12 ? 10 : ((49..<52).contains(i) ? -1 : -20) } }
+        // Waves from the east (they come from +x).
+        let e = ShoreDistance.exposure(height: g, seaLevel: 0, from: SIMD2(1, 0))
+        XCTAssertEqual(Double(e[80, 10]), 1, accuracy: 1e-6)       // open sea
+        XCTAssertLessThan(Double(e[47, 10]), 0.3)                    // just behind the reef
+        XCTAssertEqual(Double(e[60, 10]), 1, accuracy: 1e-6)       // in front of it
+        // Waves from the west: the land shelters the water just east of it.
+        let w = ShoreDistance.exposure(height: g, seaLevel: 0, from: SIMD2(-1, 0))
+        XCTAssertEqual(Double(w[13, 10]), 0, accuracy: 1e-6)
+    }
+}
+
+final class SmoothingTests: XCTestCase {
+    func testSmoothingKeepsRampsAndRoundsCorners() {
+        // A linear ramp stays a ramp; a corner gets rounded.
+        var g = Grid(width: 20, height: 20, cellSize: 10)
+        for j in 0..<20 { for i in 0..<20 { g[i, j] = Float(i * 10) } }
+        let s = ShoreDistance.smoothed(g, passes: 3)
+        XCTAssertEqual(Double(s[10, 10]), 100, accuracy: 1e-3)
+        var c = Grid(width: 20, height: 20, cellSize: 10)
+        for j in 0..<20 { for i in 0..<20 { c[i, j] = Float(min(i, j) * 10) } }
+        let r = ShoreDistance.smoothed(c, passes: 3)
+        XCTAssertLessThan(Double(r[10, 10]), 100)
+        XCTAssertGreaterThan(Double(r[10, 10]), 80)
+    }
+}

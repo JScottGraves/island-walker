@@ -50,6 +50,18 @@ public struct OceanSpectrum: Sendable {
             return 9.77 * pow(x, mu)
         }
 
+        /// 4√m0, from the spectrum itself.
+        public var measuredSignificantHeight: Double {
+            var m0 = 0.0
+            let dw = 0.0005
+            var w = 0.02
+            while w < 30 {
+                m0 += density(omega: w) * dw
+                w += dw
+            }
+            return 4 * m0.squareRoot()
+        }
+
         /// A fetch-limited trade-wind sea (Horvath eqs. 29–30).
         public static func windSea(speed u: Double, fetch f: Double, towards direction: Double) -> System {
             let g = OceanSpectrum.gravity
