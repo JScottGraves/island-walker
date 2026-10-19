@@ -471,8 +471,10 @@ struct OceanFloor {
 
 OceanFloor oceanFloor(constant Uniforms &u, constant TerrainParams &t, const device int *pages,
                       texture2d_array<ushort, access::read> tiles, float3 p, float3 dir, float depth,
-                      float footprint, float sunLight, float4 shape) {
-    int level = clamp(int(floor(log2(max(footprint / t.cellMetres, 1.0)))), 0, t.levels - 1);
+                      float footprint, float sunLight, float cloudSun, float4 shape) {
+    // Heights two levels finer than the pixel: a level as coarse as the pixel blends the land
+    // into the floor along a shore and lifts the channels beside it.
+    int level = clamp(int(floor(log2(max(footprint / t.cellMetres, 1.0)))) - 2, 0, t.levels - 1);
     float down = max(-dir.z, 0.05);
     float below = max(depth + (p.z - u.seaLevel), 0.0);
     float2 xy = p.xy + dir.xy * (below / down);
@@ -489,7 +491,7 @@ OceanFloor oceanFloor(constant Uniforms &u, constant TerrainParams &t, const dev
     float reef = saturate(ridge * 3.0) * (1.0 - smoothstep(8.0, 25.0, u.seaLevel - h));
     float3 albedo = mix(kSand, kReef, reef) * (0.88 + 0.24 * groundNoise(xy / 3.7 + 5.0));
     float3 l = normalize(u.sunDirection);
-    f.light = litSurface(u, albedo, n, saturate(dot(n, l)), sunLight, 1.0, 1.0, 1.0);
+    f.light = litSurface(u, albedo, n, saturate(dot(n, l)), sunLight, 1.0, 1.0, cloudSun);
     return f;
 }
 
@@ -550,7 +552,8 @@ fragment float4 oceanFragment(OceanOut in [[stage_in]], constant Uniforms &u [[b
     float3 n = normalize(float3(-s, 1.0));
     float3 l = normalize(u.sunDirection);
 
-    float sunLight = cloudSunlight(u, cloudShadows, in.world);
+    float cloudSun = cloudSunlight(u, cloudShadows, in.world);
+    float sunLight = cloudSun;
     if (kRayTraced) sunLight *= tracedSunAt(tracedSun, uint2(in.position.xy));
 
     // The floor along the refracted view: its light dimmed on the way down to it and back up.
@@ -559,7 +562,7 @@ fragment float4 oceanFragment(OceanOut in [[stage_in]], constant Uniforms &u [[b
     float path = 1e5;
     if (in.depth < 120.0) {
         float3 refracted = refract(-v, n, 1.0 / kWaterIndex);
-        OceanFloor f = oceanFloor(u, t, pages, tiles, in.world, refracted, in.depth, footprint, sunLight, in.floorShape);
+        OceanFloor f = oceanFloor(u, t, pages, tiles, in.world, refracted, in.depth, footprint, sunLight, cloudSun, in.floorShape);
         path = f.path;
         float sunCos = sqrt(max(1.0 - (1.0 - l.z * l.z) / (kWaterIndex * kWaterIndex), 0.05));
         float3 kd = (o.absorption.rgb + 0.5 * o.scattering.rgb + 0.02 * o.scattering.w) / sunCos;
