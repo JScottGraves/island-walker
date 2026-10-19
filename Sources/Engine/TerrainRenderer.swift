@@ -59,15 +59,30 @@ public final class TerrainRenderer {
     let queue: MTLCommandQueue
     let pipeline: MTLRenderPipelineState
     let skyPipeline: MTLRenderPipelineState
-    /// Upscaling: frames are drawn at `renderScale` of the output size with a sub-pixel
-    /// jitter, and MetalFX's temporal scaler accumulates them to the output size, which also
-    /// anti-aliases. nil draws straight into the output at its own size.
-    public let renderScale: Double?
-    /// Colour format the frame is drawn in: the output's, or half floats for the scaler.
+    /// How edges are smoothed. Both temporal modes draw each frame with a sub-pixel jitter
+    /// and accumulate frames along each pixel's motion.
+    public enum Antialiasing: Equatable, Sendable {
+        /// Drawn straight into the output.
+        case off
+        /// Our own resolve at the output size (`taaResolve`): about half a millisecond.
+        case temporal
+        /// Drawn at this fraction of the output size and upscaled by MetalFX's temporal
+        /// scaler. On an M3 at 2560×1440 the scaler costs 7–12 ms, more than drawing
+        /// at 0.75 saves, so it stays for larger outputs and comparisons.
+        case upscaled(Double)
+    }
+    public let antialiasing: Antialiasing
+    /// Fraction of the output size frames are drawn at.
+    public var renderScale: Double {
+        if case .upscaled(let s) = antialiasing { return s }
+        return 1
+    }
+    /// Colour format the frame is drawn in: the output's, or half floats to accumulate.
     let shadeFormat: MTLPixelFormat
     let motionPipeline: MTLComputePipelineState?
     let presentPipeline: MTLRenderPipelineState?
-    /// The jitter's sign as handed to the scaler (1 or -1), for checking the convention.
+    let taaPipeline: MTLComputePipelineState?
+    /// The jitter's sign as handed to MetalFX (1 or -1), for checking its convention.
     public var jitterSign: Float = 1
     let depthState: MTLDepthStencilState
     let depthPipeline: MTLRenderPipelineState
@@ -91,9 +106,11 @@ public final class TerrainRenderer {
         /// Drawn size (the output's scaled by `renderScale`) and output size.
         let width: Int, height: Int
         let outputWidth: Int, outputHeight: Int
-        /// With upscaling: the drawn frame, each pixel's motion, the scaler and its output.
+        /// With temporal antialiasing: the drawn frame and each pixel's motion; then either
+        /// the scaler and its output or the two histories our resolve ping-pongs between.
         let color: MTLTexture?, motion: MTLTexture?, upscaled: MTLTexture?
         let scaler: MTLFXTemporalScaler?
+        let resolved: [MTLTexture]
         let depth: MTLTexture
         /// With ray tracing: each pixel's surface position and normal, and its sun visibility.
         let surface: MTLTexture?, sun: MTLTexture?
@@ -195,11 +212,13 @@ public final class TerrainRenderer {
     public init(device: MTLDevice, colorFormat: MTLPixelFormat, depthFormat: MTLPixelFormat,
                 terrain: TerrainTiles, shadows requested: Shadows = .rayTraced, clouds: Grid? = nil,
                 detailMaps: DetailMaps? = nil, fineDetail: Bool = true, flora floraMaps: FloraMaps? = nil,
-                floraSpecimens: Bool = false, renderScale: Double? = nil) throws {
+                floraSpecimens: Bool = false, antialiasing requestedAA: Antialiasing = .off) throws {
         self.device = device
-        let upscaling = renderScale != nil && MTLFXTemporalScalerDescriptor.supportsDevice(device)
-        self.renderScale = upscaling ? renderScale : nil
-        let shadeFormat: MTLPixelFormat = upscaling ? .rgba16Float : colorFormat
+        var antialiasing = requestedAA
+        if case .upscaled = antialiasing, !MTLFXTemporalScalerDescriptor.supportsDevice(device) { antialiasing = .temporal }
+        self.antialiasing = antialiasing
+        let temporal = antialiasing != .off
+        let shadeFormat: MTLPixelFormat = temporal ? .rgba16Float : colorFormat
         self.shadeFormat = shadeFormat
         guard let queue = device.makeCommandQueue() else { throw RendererError.setup("command queue") }
         self.queue = queue
@@ -244,9 +263,11 @@ public final class TerrainRenderer {
         desc.vertexFunction = library.makeFunction(name: "skyVertex")
         desc.fragmentFunction = library.makeFunction(name: "skyFragment")
         skyPipeline = try device.makeRenderPipelineState(descriptor: desc)
-        if upscaling {
-            guard let motion = library.makeFunction(name: "motionVectors") else { throw RendererError.setup("motion vectors") }
+        if temporal {
+            guard let motion = library.makeFunction(name: "motionVectors"),
+                  let resolve = library.makeFunction(name: "taaResolve") else { throw RendererError.setup("motion vectors") }
             motionPipeline = try device.makeComputePipelineState(function: motion)
+            taaPipeline = antialiasing == .temporal ? try device.makeComputePipelineState(function: resolve) : nil
             desc.colorAttachments[0].pixelFormat = colorFormat
             desc.depthAttachmentPixelFormat = .invalid
             desc.fragmentFunction = library.makeFunction(name: "presentFragment")
@@ -254,6 +275,7 @@ public final class TerrainRenderer {
         } else {
             motionPipeline = nil
             presentPipeline = nil
+            taaPipeline = nil
         }
         guard let march = library.makeFunction(name: "cloudMarch"),
               let resolve = library.makeFunction(name: "cloudResolve"),
@@ -655,12 +677,25 @@ public final class TerrainRenderer {
     }
 
     func makeTargets(outputWidth: Int, outputHeight: Int) -> Targets? {
-        let drawScale = renderScale ?? 1
+        let drawScale = renderScale
         let width = Swift.max(1, Int((Double(outputWidth) * drawScale).rounded()))
         let height = Swift.max(1, Int((Double(outputHeight) * drawScale).rounded()))
         var color: MTLTexture?, motion: MTLTexture?, upscaled: MTLTexture?, scaler: MTLFXTemporalScaler?
+        var resolved: [MTLTexture] = []
         var depthUsage: MTLTextureUsage = [.renderTarget, .shaderRead]
-        if renderScale != nil {
+        func texture(_ format: MTLPixelFormat, _ w: Int, _ h: Int, _ usage: MTLTextureUsage) -> MTLTexture? {
+            let t = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: format, width: w, height: h, mipmapped: false)
+            t.usage = usage
+            t.storageMode = .private
+            return device.makeTexture(descriptor: t)
+        }
+        if antialiasing == .temporal {
+            color = texture(shadeFormat, width, height, [.renderTarget, .shaderRead])
+            motion = texture(.rg16Float, width, height, [.shaderRead, .shaderWrite])
+            resolved = (0..<2).compactMap { _ in texture(shadeFormat, width, height, [.shaderRead, .shaderWrite]) }
+            if color == nil || motion == nil || resolved.count < 2 { return nil }
+        }
+        if case .upscaled = antialiasing {
             let d = MTLFXTemporalScalerDescriptor()
             d.inputWidth = width
             d.inputHeight = height
@@ -674,12 +709,6 @@ public final class TerrainRenderer {
             guard let s = d.makeTemporalScaler(device: device) else { return nil }
             scaler = s
             depthUsage.formUnion(s.depthTextureUsage)
-            func texture(_ format: MTLPixelFormat, _ w: Int, _ h: Int, _ usage: MTLTextureUsage) -> MTLTexture? {
-                let t = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: format, width: w, height: h, mipmapped: false)
-                t.usage = usage
-                t.storageMode = .private
-                return device.makeTexture(descriptor: t)
-            }
             color = texture(shadeFormat, width, height, s.colorTextureUsage.union(.renderTarget))
             motion = texture(.rg16Float, width, height, s.motionTextureUsage.union(.shaderWrite))
             upscaled = texture(shadeFormat, outputWidth, outputHeight, s.outputTextureUsage.union(.shaderRead))
@@ -716,7 +745,7 @@ public final class TerrainRenderer {
               let h0 = reduced(.rgba16Float), let h1 = reduced(.rgba16Float),
               let d0 = reduced(.rg32Float), let d1 = reduced(.rg32Float) else { return nil }
         return Targets(width: width, height: height, outputWidth: outputWidth, outputHeight: outputHeight,
-                       color: color, motion: motion, upscaled: upscaled, scaler: scaler, depth: depth, surface: surface, sun: sun,
+                       color: color, motion: motion, upscaled: upscaled, scaler: scaler, resolved: resolved, depth: depth, surface: surface, sun: sun,
                        clouds: clouds, cloudDistance: cloudDistance, history: [h0, h1], historyDistance: [d0, d1])
     }
 
@@ -825,7 +854,7 @@ public final class TerrainRenderer {
         let viewProjection = proj * Matrix.lookDirection(forward)
         var jittered = proj
         var jitter = SIMD2<Float>(0, 0)
-        if targets.scaler != nil {
+        if antialiasing != .off {
             jitter = SIMD2(TerrainRenderer.halton(frameNumber % 8 + 1, 2), TerrainRenderer.halton(frameNumber % 8 + 1, 3)) - 0.5
             jittered.columns.2.x += 2 * jitter.x / Float(width)
             jittered.columns.2.y -= 2 * jitter.y / Float(height)
@@ -852,7 +881,7 @@ public final class TerrainRenderer {
             previousViewProjection: previousViewProjection,
             previousCamera: SIMD4(previousCamera, 0),
             frame: SIMD4(Float(width), Float(height), Float(frameNumber % 4096), historyValid ? 1 : 0),
-            jitter: SIMD4(jitter.x, jitter.y, Float(renderScale ?? 1), 0))
+            jitter: SIMD4(jitter.x, jitter.y, Float(renderScale), 0))
         let skyView = skyViews[skyViewIndex]
         let frameTerrain = prepareTerrain(eye: eye, viewProjection: viewProjection, synchronously: synchronousStreaming)
         // 0. Fine detail for the ground the camera has moved over, then this frame's trees on it
@@ -988,8 +1017,10 @@ public final class TerrainRenderer {
             scaler.outputTexture = upscaled
             scaler.inputContentWidth = width
             scaler.inputContentHeight = height
-            scaler.jitterOffsetX = jitterSign * jitter.x
-            scaler.jitterOffsetY = jitterSign * jitter.y
+            // MetalFX takes the offset the other way round from ours (checked against native
+            // renders: 3 dB closer this way).
+            scaler.jitterOffsetX = -jitterSign * jitter.x
+            scaler.jitterOffsetY = -jitterSign * jitter.y
             scaler.motionVectorScaleX = Float(width)
             scaler.motionVectorScaleY = Float(height)
             scaler.isDepthReversed = false
@@ -1003,6 +1034,27 @@ public final class TerrainRenderer {
             enc.label = "present"
             enc.setRenderPipelineState(presentPipeline)
             enc.setFragmentTexture(upscaled, index: 0)
+            enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+            enc.endEncoding()
+        } else if let taaPipeline, let drawn = targets.color, let motion = targets.motion, let presentPipeline,
+                  let resolve = shadeCmd.makeComputeCommandEncoder() {
+            // 5. Or our own resolve: this frame blended into the history along each pixel's motion.
+            let history = targets.resolved[historyIndex], output = targets.resolved[1 - historyIndex]
+            resolve.label = "taa"
+            resolve.setComputePipelineState(taaPipeline)
+            var valid: Float = historyValid ? 1 : 0
+            resolve.setBytes(&valid, length: 4, index: 0)
+            resolve.setTextures([drawn, motion, targets.depth, history, output], range: 0..<5)
+            resolve.dispatchThreads(MTLSize(width: width, height: height, depth: 1), threadsPerThreadgroup: group)
+            resolve.endEncoding()
+            let present = MTLRenderPassDescriptor()
+            present.colorAttachments[0].texture = color
+            present.colorAttachments[0].loadAction = .dontCare
+            present.colorAttachments[0].storeAction = .store
+            guard let enc = shadeCmd.makeRenderCommandEncoder(descriptor: present) else { return }
+            enc.label = "present"
+            enc.setRenderPipelineState(presentPipeline)
+            enc.setFragmentTexture(output, index: 0)
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
             enc.endEncoding()
         }

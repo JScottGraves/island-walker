@@ -1230,4 +1230,85 @@ kernel void motionVectors(constant MotionParams &m [[buffer(0)]],
 fragment float4 presentFragment(SkyOut in [[stage_in]], texture2d<float, access::read> frame [[texture(0)]]) {
     return float4(frame.read(uint2(in.position.xy)).rgb, 1.0);
 }
+// Temporal antialiasing at the output size (TerrainRenderer.Antialiasing.temporal): the
+// jittered frame blended into the history at the place each pixel's motion says it was.
+// The history is first clipped to this frame's neighbourhood (mean ± 1.25 σ in YCoCg), so
+// what was disoccluded or changed doesn't trail, and fetched with Catmull-Rom so it stays
+// sharp. Motion comes from the nearest of five neighbours, so silhouettes move with what's
+// in front.
+float3 toYCoCg(float3 c) {
+    return float3(0.25 * c.r + 0.5 * c.g + 0.25 * c.b, 0.5 * c.r - 0.5 * c.b, -0.25 * c.r + 0.5 * c.g - 0.25 * c.b);
+}
+
+float3 fromYCoCg(float3 c) {
+    return float3(c.x + c.y - c.z, c.x + c.z, c.x - c.y - c.z);
+}
+
+float3 historyCatmullRom(texture2d<float> tex, float2 uv, float2 size) {
+    constexpr sampler s(filter::linear, address::clamp_to_edge);
+    float2 pos = uv * size;
+    float2 t1 = floor(pos - 0.5) + 0.5;
+    float2 f = pos - t1;
+    float2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+    float2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+    float2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+    float2 w3 = f * f * (-0.5 + 0.5 * f);
+    float2 w12 = w1 + w2;
+    float2 t0 = (t1 - 1.0) / size, t3 = (t1 + 2.0) / size, t12 = (t1 + w2 / w12) / size;
+    float3 r = tex.sample(s, float2(t0.x, t0.y)).rgb * (w0.x * w0.y)
+             + tex.sample(s, float2(t12.x, t0.y)).rgb * (w12.x * w0.y)
+             + tex.sample(s, float2(t3.x, t0.y)).rgb * (w3.x * w0.y)
+             + tex.sample(s, float2(t0.x, t12.y)).rgb * (w0.x * w12.y)
+             + tex.sample(s, float2(t12.x, t12.y)).rgb * (w12.x * w12.y)
+             + tex.sample(s, float2(t3.x, t12.y)).rgb * (w3.x * w12.y)
+             + tex.sample(s, float2(t0.x, t3.y)).rgb * (w0.x * w3.y)
+             + tex.sample(s, float2(t12.x, t3.y)).rgb * (w12.x * w3.y)
+             + tex.sample(s, float2(t3.x, t3.y)).rgb * (w3.x * w3.y);
+    return max(r, 0.0);
+}
+
+// Share of this frame in the blend: about the last ten frames count.
+constant float kTaaBlend = 0.1;
+
+kernel void taaResolve(constant float &historyValid [[buffer(0)]],
+                       texture2d<float, access::read> current [[texture(0)]],
+                       texture2d<float, access::read> motion [[texture(1)]],
+                       depth2d<float, access::read> depth [[texture(2)]],
+                       texture2d<float> history [[texture(3)]],
+                       texture2d<float, access::write> out [[texture(4)]],
+                       uint2 g [[thread_position_in_grid]]) {
+    uint2 size = uint2(out.get_width(), out.get_height());
+    if (any(g >= size)) return;
+    int2 last = int2(size) - 1;
+    float3 c = current.read(g).rgb;
+    float3 m1 = 0.0, m2 = 0.0;
+    float nearest = 2.0;
+    int2 nearestPixel = int2(g);
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            int2 q = clamp(int2(g) + int2(dx, dy), int2(0), last);
+            float3 v = toYCoCg(current.read(uint2(q)).rgb);
+            m1 += v;
+            m2 += v * v;
+            if (dx == 0 || dy == 0) {
+                float z = depth.read(uint2(q));
+                if (z < nearest) { nearest = z; nearestPixel = q; }
+            }
+        }
+    }
+    if (historyValid < 0.5) {
+        out.write(float4(c, 1.0), g);
+        return;
+    }
+    float2 uv = (float2(g) + 0.5) / float2(size) + motion.read(uint2(nearestPixel)).xy;
+    if (any(uv < 0.0) || any(uv > 1.0)) {
+        out.write(float4(c, 1.0), g);
+        return;
+    }
+    m1 /= 9.0;
+    float3 sigma = sqrt(max(m2 / 9.0 - m1 * m1, 0.0));
+    float3 h = toYCoCg(historyCatmullRom(history, uv, float2(size)));
+    h = clamp(h, m1 - 1.25 * sigma, m1 + 1.25 * sigma);
+    out.write(float4(mix(fromYCoCg(h), c, kTaaBlend), 1.0), g);
+}
 """

@@ -74,11 +74,11 @@ enum Snapshots {
         return Viewpoints.automatic(height: height, drainageArea: area, scarp: scarp)
     }
 
-    /// `--scale X`: draw at X of the output size and upscale with MetalFX (1 for temporal
-    /// anti-aliasing alone); `--scale off` draws at the output size without it. Default 0.75.
-    static func renderScale() -> Double? {
-        guard let value = option("--scale") else { return 0.75 }
-        return value == "off" ? nil : Double(value).map { Swift.min(Swift.max($0, 0.5), 1) }
+    /// `--aa off` draws without antialiasing; `--aa taa` (the default) with our temporal
+    /// antialiasing; `--scale X` at X of the output size, upscaled by MetalFX.
+    static func antialiasing() -> TerrainRenderer.Antialiasing {
+        if let scale = option("--scale").flatMap(Double.init) { return .upscaled(Swift.min(Swift.max(scale, 0.5), 1)) }
+        return option("--aa") == "off" ? .off : .temporal
     }
 
     static func run(outDir: String) {
@@ -93,9 +93,9 @@ enum Snapshots {
                                                shadows: requested, clouds: clouds,
                                                detailMaps: IslandSource.detailMaps(),
                                                fineDetail: option("--detail") != "off",
-                                               flora: IslandSource.floraMaps(), renderScale: renderScale())
+                                               flora: IslandSource.floraMaps(), antialiasing: antialiasing())
             renderer.jitterSign = option("--jitter-sign").flatMap(Float.init) ?? 1
-            print("shadows: \(renderer.shadows.rawValue); render scale: \(renderer.renderScale.map { String($0) } ?? "off")")
+            print("shadows: \(renderer.shadows.rawValue); antialiasing: \(renderer.antialiasing)")
             // Viewpoints are picked on the overview; the camera then stands on the full-detail ground.
             let height = try tiles.grid(level: tiles.overviewLevel())
             let dims = option("--size")?.split(separator: "x").compactMap { Int($0) } ?? []
