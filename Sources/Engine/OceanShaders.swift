@@ -755,7 +755,7 @@ fragment float4 oceanFragment(OceanOut in [[stage_in]], constant Uniforms &u [[b
 
     // The floor along the refracted view: its light dimmed on the way down to it and back up.
     // Under more than ~120 m of water none shows; past the heightfield there is none.
-    float3 floorLight = 0.0;
+    float3 floorLight = 0.0, floorBare = 0.0;
     float path = 1e5;
     // The water's depth here from the floor's own heights (the vertices' is coarser, and near
     // the shore reads part land), for the surf.
@@ -765,12 +765,16 @@ fragment float4 oceanFragment(OceanOut in [[stage_in]], constant Uniforms &u [[b
         OceanFloor f = oceanFloor(u, t, pages, tiles, in.world, refracted, in.depth, footprint, sunLight, cloudSun, in.floorShape);
         path = f.path;
         waterDepth = f.below;
+        floorBare = f.light;
         float sunCos = sqrt(max(1.0 - (1.0 - l.z * l.z) / (kWaterIndex * kWaterIndex), 0.05));
         float3 kd = (o.absorption.rgb + 0.5 * o.scattering.rgb + 0.02 * o.scattering.w) / sunCos;
         float3 c = o.absorption.rgb + o.scattering.rgb + o.scattering.w;
         floorLight = f.light * exp(-kd * f.below - c * path);
     }
     float3 color = oceanShade(u, o, environment, n, -n.xy / n.z, variance, v, floorLight, path, sunLight, in.crest);
+    // Over its last few centimetres the water is a film on the wet sand, as the swash's sheet on
+    // the beach beside it (terrainFragment): no step in colour at the waterline.
+    if (in.depth < 120.0) color = mix(floorBare, color, smoothstep(0.0, 0.12, waterDepth));
     // Foam over the shallows (its own white: albedo ~0.8, lit by sun and sky, in the sun's and
     // the clouds' shadows), hiding the glint and the water beneath where it's dense.
     if (in.surf.x > 0.02 || waterDepth < 0.12) {

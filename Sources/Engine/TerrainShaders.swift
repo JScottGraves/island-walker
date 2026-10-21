@@ -865,11 +865,10 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
             float far = smoothstep(150.0, 300.0, d);
             float4 sand = far < 1.0 ? swashSand(ocean, hs, in.world.xy, h, ocean.time.x) : float4(0.0);
             float band = swashRunup(ocean, hs, in.world.xy, 0.0) / 0.55;    // the highest typical run-up
-            // A swash runs a few metres up a sloping beach, not across a flat: how far inland of
-            // the waterline this is (h over the slope's tangent; 1 - n.z ≈ tan²/2), the sheet
-            // spent by ~10–25 m.
-            float tangent = sqrt(2.0 * max(slope, 0.0));
-            float reach = 1.0 - smoothstep(10.0, 25.0, max(h, 0.0) / max(tangent, 1e-3));
+            // A swash runs a few metres up a sloping beach, not across a flat near sea level: spent
+            // by a few tens of metres inland of the (smoothed, overview-scale) shoreline. Not from
+            // the slope: per triangle, that would show the mesh's facets.
+            float reach = 1.0 - smoothstep(25.0, 60.0, -shoreTexel.r);
             // What the waves wash is bare sediment (no litter, no cover) on gentle slopes,
             // the same sand the water shows beneath it (oceanFloor).
             float washed = reach * (1.0 - smoothstep(0.5 * band, band + 0.3, h)) * (1.0 - smoothstep(0.1, 0.25, slope));
@@ -881,8 +880,10 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
             // A ragged band of bubbles a metre or so wide along the uprush's edge.
             float rag = groundNoise(in.world.xy / 1.3 + 6.1);
             lace = (1.0 - far) * sand.w * (1.0 - smoothstep(0.0, 0.03 + 0.06 * rag, sand.z)) * sheet;
-            float strands = smoothstep(0.35, 0.7, groundNoise(in.world.xy / 0.6 + 8.1));
-            stranded = reach * (0.8 * sand.y * strands * (1.0 - far) + 0.35 * far * (1.0 - smoothstep(0.0, 0.03, abs(h - band))));
+            // Strands 0.6 m across, faded to their mean (~0.4) before a pixel spans them, so they
+            // don't alias into blocks; the far line soft, as the mesh's heights are there.
+            float strands = mix(smoothstep(0.35, 0.7, groundNoise(in.world.xy / 0.6 + 8.1)), 0.4, smoothstep(40.0, 120.0, d));
+            stranded = reach * (0.8 * sand.y * strands * (1.0 - far) + 0.2 * far * (1.0 - smoothstep(0.0, 0.08, abs(h - band))));
             if (sheet > 0.0) n = normalize(mix(n, float3(0.0, 0.0, 1.0), sheet));
         }
     }
