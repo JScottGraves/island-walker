@@ -855,15 +855,18 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
     // Swash (swashSand): the sheet of water running up the sand and draining back, sand it
     // covered lately darker, foam stranded along the highest line. Beyond ~150 m a pixel spans
     // many swashes: an even wet band with a thin white line at its top.
-    float stranded = 0.0, sheet = 0.0, lace = 0.0;
+    float stranded = 0.0, sheet = 0.0, lace = 0.0, sheetDepth = 0.0;
+    float2 sheetRipple = 0.0;
     if (h < 2.0) {
         constexpr sampler bilinear(filter::linear, address::clamp_to_edge);
-        float4 shoreTexel = shore.sample(bilinear, in.world.xy / u.cloudLayer.w);
+        float4 shoreTexel = shoreAt(shore, in.world.xy / u.cloudLayer.w);
         if (shoreTexel.r > -kSwashReach && shoreTexel.r < 40.0) {
             float hs = surfHeight(ocean, shoreTexel);
             float d = distance(u.cameraPosition, in.world);
             float far = smoothstep(150.0, 300.0, d);
-            float4 sand = far < 1.0 ? swashSand(ocean, hs, in.world.xy, h, ocean.time.x) : float4(0.0);
+            float front = 0.0, runup = 0.0;
+            float4 sand = far < 1.0 ? swashSand(ocean, hs, in.world.xy, shoreTexel.r, h, ocean.time.x, front, runup)
+                                    : float4(0.0);
             float band = swashRunup(ocean, hs, in.world.xy, 0.0) / 0.55;    // the highest typical run-up
             // A swash runs a few metres up a sloping beach, not across a flat near sea level: spent
             // by a few tens of metres inland of the (smoothed, overview-scale) shoreline. Not from
@@ -876,15 +879,24 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
             float meanWet = 1.0 - smoothstep(0.5 * band, band, h);
             float wet = reach * mix(sand.x, 0.7 * meanWet, far);
             albedo *= mix(float3(1.0), kWetSand, wet);
-            sheet = reach * (1.0 - far) * smoothstep(0.0, 0.03, sand.z);
-            // A ragged band of bubbles a metre or so wide along the uprush's edge.
-            float rag = groundNoise(in.world.xy / 1.3 + 6.1);
-            lace = (1.0 - far) * sand.w * (1.0 - smoothstep(0.0, 0.03 + 0.06 * rag, sand.z)) * sheet;
+            // The sheet rolling up the beach and back (swashSheet): its leading bore, the foam it
+            // carries, its thickness and moving ripples, up-beach along the smoothed shore field.
+            float e = 60.0 / u.cloudLayer.w;
+            float2 uv = in.world.xy / u.cloudLayer.w;
+            float2 grad = float2(shoreAt(shore, uv + float2(e, 0.0)).r - shoreAt(shore, uv - float2(e, 0.0)).r,
+                                 shoreAt(shore, uv + float2(0.0, e)).r - shoreAt(shore, uv - float2(0.0, e)).r);
+            float2 up = length(grad) > 1e-4 ? -normalize(grad) : float2(0.0, 1.0);
+            float footprint = d * 1.1547 / u.frame.y;
+            float4 water = far < 1.0 ? swashSheet(ocean, hs, in.world.xy, sand.z, front, runup, sand.w, up, footprint,
+                                                  ocean.time.x, sheetRipple) : float4(0.0);
+            sheet = reach * (1.0 - far) * water.x;
+            lace = sheet * max(water.y, water.z);
+            sheetDepth = water.w;
             // Strands 0.6 m across, faded to their mean (~0.4) well before a pixel spans them, so
             // they don't alias into blotches; the far line soft, as the mesh's heights are there.
             float strands = mix(smoothstep(0.35, 0.7, groundNoise(in.world.xy / 0.6 + 8.1)), 0.4, smoothstep(15.0, 60.0, d));
             stranded = reach * (0.8 * sand.y * strands * (1.0 - far) + 0.2 * far * (1.0 - smoothstep(0.0, 0.08, abs(h - band))));
-            if (sheet > 0.0) n = normalize(mix(n, float3(0.0, 0.0, 1.0), sheet));
+
         }
     }
 
@@ -925,21 +937,22 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
     }
 
     if (sheet > 0.0) {
-        // Through a few centimetres of water: a faint green-blue tint, the sky reflected off the
-        // film (Fresnel), and the sun's glint on its ripples.
+        // The sand through a few centimetres of water: tinted and dimmed by its thickness (the
+        // sea's absorption), the sky reflected off the moving ripples (Fresnel), and the sun's
+        // glint on them.
         float3 v = normalize(u.cameraPosition - in.world);
-        float3 film = float3(0.0, 0.0, 1.0);
+        float3 film = normalize(float3(-sheetRipple, 1.0));
         float nv = saturate(dot(film, v));
         float fresnel = waterFresnel(nv);
-        float3 under = color * float3(0.82, 0.92, 0.9);
+        float3 path = ocean.absorption.rgb * (2.0 * sheetDepth / max(nv, 0.2));
+        float3 under = color * exp(-path) + float3(0.02, 0.06, 0.06) * (1.0 - exp(-8.0 * sheetDepth)) * skyIrradiance(u, film);
         float3 sky = skyAbove(skyView, reflect(-v, film));
         float3 hv = normalize(l + v);
-        float glint = pow(saturate(dot(hv, film)), 400.0) * 40.0 * fresnel;
+        float glint = pow(saturate(dot(hv, film)), 300.0) * 30.0 * fresnel;
         float3 water = under * (1.0 - fresnel) + sky * fresnel + u.sunRadiance * (glint * sunVisibility);
         color = mix(color, water, sheet);
     }
-    float bubbles = smoothstep(0.3, 0.6, groundNoise(in.world.xy / 0.35 + 3.3));
-    float foamy = max(stranded, lace * (0.35 + 0.65 * bubbles));
+    float foamy = max(stranded, lace);
     if (foamy > 0.0) {
         float3 white = 0.85 * (u.sunRadiance * (saturate(l.z) * sunVisibility) + skyIrradiance(u, float3(0.0, 0.0, 1.0)));
         color = mix(color, white, saturate(foamy));

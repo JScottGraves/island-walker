@@ -174,6 +174,21 @@ constant float kSwashBeta = 0.05;
 constant float kSwashShare = 0.65;
 constant float kSwashReach = 80.0;
 
+// Speed the surf's fronts come in at (m/s): sqrt(g h) over ~2 m (OceanShaders' surfFoam).
+constant float kSurfSpeed = 4.4;
+
+// The shore texture at uv, bilinear in full precision: the hardware's filter weights have 8
+// bits, which on this coarse texture steps the shore distance by decimetres, and the swash's
+// clock and the patterns it carries (×1/β) turn those steps into a lattice of metre-wide jumps.
+float4 shoreAt(texture2d<float> shore, float2 uv) {
+    float2 size = float2(shore.get_width(), shore.get_height());
+    float2 s = clamp(uv * size - 0.5, float2(0.0), size - 1.001);
+    float2 i = floor(s), f = s - i;
+    uint2 a = uint2(i), b = min(a + 1u, uint2(size) - 1u);
+    float4 t00 = shore.read(a), t10 = shore.read(uint2(b.x, a.y)), t01 = shore.read(uint2(a.x, b.y)), t11 = shore.read(b);
+    return mix(mix(t00, t10, f.x), mix(t01, t11, f.x), f.y);
+}
+
 // Significant height reaching a shore point, from the shore texture (exposure in g, b).
 float surfHeight(constant OceanParams &o, float4 shore) {
     return sqrt(o.surf.x * o.surf.x * shore.b * shore.b + o.surf.y * o.surf.y * shore.g * shore.g);
@@ -191,34 +206,31 @@ float swashRunup(constant OceanParams &o, float hs, float2 xy, float n) {
     return 0.38 * r2 * wave * cusps;
 }
 
-// Where in its swash the wave at xy is (0…1 of the period since it reached the shore), and
-// which wave (n).
-float swashPhase(constant OceanParams &o, float2 xy, float time, thread float &n) {
-    float c = time / o.surf.z + 0.08 * groundNoise(xy / 160.0);
+// Where in its swash the wave at xy is (0…1 of the period since its bore reached the shore),
+// and which wave (n): the surf's own clock (surfFoam), so each swash starts as the bore that
+// breaks on that stretch of shore arrives, sections peeling alike. `toShore` is the smoothed
+// shore distance there (shore texture r), held to the last few metres inland so the timing
+// doesn't run on up the beach.
+float swashPhase(constant OceanParams &o, float2 xy, float toShore, float time, thread float &n) {
+    float wave = time / o.surf.z + max(toShore, -5.0) / (kSurfSpeed * o.surf.z);
+    float index = floor(wave + 0.5);
+    float c = wave + 0.08 * groundNoise(xy / 160.0 + index * 1.37);
     n = floor(c);
     return c - n;
 }
 
-// Height the sheet's leading edge has reached now: up fast and decelerating, back slower
-// (ballistic), 0 between swashes. Also the wave's run-up and its phase.
-float swashFront(constant OceanParams &o, float hs, float2 xy, float time, thread float &runup, thread float &phase) {
-    float n;
-    phase = swashPhase(o, xy, time, n);
-    runup = swashRunup(o, hs, xy, n);
-    float x = phase / kSwashShare;
-    return phase < kSwashShare ? runup * 4.0 * x * (1.0 - x) : 0.0;
-}
-
 // Sand `h` metres above the sea: (x) how wet the last few swashes left it (drying over ~20 s),
 // (y) the foam they stranded along their highest line (fading over a few seconds), (z) metres
-// of the current sheet's height above it (≤ 0 where it hasn't reached), (w) 1 on the uprush.
-float4 swashSand(constant OceanParams &o, float hs, float2 xy, float h, float time) {
+// the current sheet's front stands above it (≤ 0 where it hasn't reached), (w) the swash's
+// phase; and through `front` and `runup0` the front's height now and this wave's run-up.
+float4 swashSand(constant OceanParams &o, float hs, float2 xy, float toShore, float h, float time,
+                 thread float &front, thread float &runup0) {
     float n;
-    float phase = swashPhase(o, xy, time, n);
+    float phase = swashPhase(o, xy, toShore, time, n);
     float wet = 0.0, foam = 0.0;
-    float runup0 = swashRunup(o, hs, xy, n);
+    runup0 = swashRunup(o, hs, xy, n);
     float x0 = phase / kSwashShare;
-    float front = phase < kSwashShare ? runup0 * 4.0 * x0 * (1.0 - x0) : 0.0;
+    front = phase < kSwashShare ? runup0 * 4.0 * x0 * (1.0 - x0) : 0.0;
     for (int k = 0; k < 4; k++) {
         float runup = swashRunup(o, hs, xy, n - float(k));
         float since = (phase + float(k) - 0.5 * kSwashShare) * o.surf.z;   // s since its highest
@@ -231,7 +243,107 @@ float4 swashSand(constant OceanParams &o, float hs, float2 xy, float h, float ti
         wet = max(wet, covered * exp(-max(since, 0.0) / 20.0));
         if (since > 0.0) foam = max(foam, (1.0 - smoothstep(0.0, 0.012, abs(h - runup))) * exp(-since / 4.0));
     }
-    return float4(wet, foam, (front - h) / max(runup0, 0.05), phase < 0.5 * kSwashShare ? 1.0 : 0.0);
+    return float4(wet, foam, front - h, phase);
+}
+
+// Value noise in 0…1 with a fully mixed hash (Murmur3's finaliser, high bits): groundNoise's
+// keeps low bits that repeat in lattice patterns once thresholded into foam.
+float swashNoise(float2 q) {
+    float2 i = floor(q), f = q - i;
+    f = f * f * (3.0 - 2.0 * f);
+    float v[4];
+    for (int k = 0; k < 4; k++) {
+        int2 c = int2(i) + int2(k & 1, k >> 1);
+        uint h = uint(c.x) * 0x85ebca6bu + uint(c.y) * 0xc2b2ae35u + 0x9e3779b9u;
+        h ^= h >> 16; h *= 0x85ebca6bu; h ^= h >> 13; h *= 0xc2b2ae35u; h ^= h >> 16;
+        v[k] = float(h >> 8) / 16777215.0;
+    }
+    return mix(mix(v[0], v[1], f.x), mix(v[2], v[3], f.x), f.y);
+}
+
+// Cells: 1 at a jittered centre per unit cell, falling to 0 a cell away (Worley, nearest).
+float foamCells(float2 q) {
+    float2 c0 = floor(q);
+    float best = 1e9;
+    for (int j = -1; j <= 1; j++) {
+        for (int i = -1; i <= 1; i++) {
+            int2 c = int2(c0) + int2(i, j);
+            uint h = uint(c.x) * 0x85ebca6bu + uint(c.y) * 0xc2b2ae35u + 0x27d4eb2fu;
+            h ^= h >> 16; h *= 0x85ebca6bu; h ^= h >> 13; h *= 0xc2b2ae35u; h ^= h >> 16;
+            float2 jitter = float2(float(h & 0xffffu), float(h >> 16)) / 65535.0;
+            float2 d = q - float2(c) - jitter;
+            best = min(best, dot(d, d));
+        }
+    }
+    return 1.0 - saturate(sqrt(best));
+}
+
+// The swash sheet's look at a sand point (terrainFragment): coverage (x), the leading bore's
+// foam (y), the foam and scum carried in the sheet (z), and its thickness in metres (w); and
+// through `ripple` a slope for the moving ripples on it. `above` is the front's height over the
+// sand (swashSand z), `phase` the swash's phase, `up` the up-beach direction, `footprint` metres
+// per pixel.
+float4 swashSheet(constant OceanParams &o, float hs, float2 xy, float above, float front, float runup, float phase,
+                  float2 up, float footprint, float time, thread float2 &ripple) {
+    ripple = 0.0;
+    float4 r = 0.0;
+    // A crisp edge, antialiased over the pixel (the front is a contour of the sand's height).
+    float aa = max(fwidth(above), 1e-4);
+    r.x = saturate(above / aa + 0.5) * (phase < kSwashShare ? 1.0 : 0.0);
+    if (r.x <= 0.0) return r;
+    float x = phase / kSwashShare;
+    // How far up the beach the water has been carried (m): the front's distance on the slope.
+    // Patterns in coordinates wrapped every 4 km (seams that far apart) and turned off the
+    // noise's lattice: at world coordinates tens of kilometres out, noise a few decimetres
+    // across loses its precision and shows its cells.
+    // The carried distance from the clock alone (the swash's phase without its arrival delay up
+    // the beach): the delay shifts the front a metre per metre up, and would squeeze the patterns.
+    float ca = time / o.surf.z + 0.08 * swashNoise(xy / 160.0);
+    float xa = fract(ca) / kSwashShare;
+    // A smooth run-up (no cusps, no wave-to-wave sections): varying over a few metres, it would
+    // shear the patterns into streaks up the beach.
+    float smoothRunup = 0.75 * swashRunup(o, hs, float2(0.0), 0.0) / max(0.55 + 0.45 * swashNoise(float2(0.0)), 0.1);
+    float travelled = (xa < 1.0 ? smoothRunup * 4.0 * xa * (1.0 - xa) : 0.0) / kSwashBeta;
+    float2 local = xy - floor(xy / 4096.0) * 4096.0;
+    float2 q = local - up * travelled;
+    q = float2(0.8 * q.x - 0.6 * q.y, 0.6 * q.x + 0.8 * q.y);
+    float2 across = float2(-up.y, up.x);
+    // The bore: white water along the leading edge, 0.5–2 m wide on the slope, strong early on
+    // the uprush and thinning as it slows.
+    float uprush = saturate(1.0 - x / 0.5);
+    float width = mix(0.5, 2.0, uprush) * kSwashBeta;
+    float rag = swashNoise(q / 1.1 + 6.1);
+    float bore = (1.0 - smoothstep(0.0, width * (0.6 + 0.8 * rag), above)) * uprush;
+    float churn = smoothstep(0.25, 0.65, swashNoise(q / 0.35 + 3.3));
+    r.y = saturate(bore * (0.55 + 0.45 * churn));
+    // Foam and scum riding in the sheet: patches carried up with it and back, thinner the
+    // further behind the bore and the later in the swash; on the backwash streaked downslope.
+    float behind = above / max(runup, 0.05);
+    float2 sq = float2(dot(q, across), dot(q, up) * mix(1.0, 0.5, smoothstep(0.4, 0.7, x)));
+    // Rounded blobs (a cell pattern, not thresholded value noise, whose bilinear lattice shows as
+    // dashes), with a little finer lace through them.
+    float blobs = smoothstep(0.45, 0.75, foamCells(sq / 1.4 + 1.9));
+    float specks = smoothstep(0.55, 0.85, foamCells(sq / 0.45 + 8.8));
+    float patches = 0.75 * blobs + 0.35 * specks * (1.0 - blobs);
+    float scum = patches * (1.0 - smoothstep(0.1, 0.6, behind)) * mix(0.75, 0.12, saturate(x));
+    r.z = mix(scum, 0.15 * mix(0.8, 0.25, x), smoothstep(0.05, 0.3, footprint));
+    // Thickness: a few centimetres behind the bore, a film near the edge and on the backwash.
+    r.w = min(above, 0.08) * mix(1.0, 0.4, smoothstep(0.5, 1.0, x));
+    // Ripples: irregular, two scales, carried with the flow and drifting on their own; gentle
+    // (slopes of a few hundredths), so the film stays glassy and its reflection only wavers.
+    float2 p = local - up * travelled;
+    p = float2(0.6 * p.x - 0.8 * p.y, 0.8 * p.x + 0.6 * p.y);
+    float2 slope = 0.0;
+    const float2 octave[2] = { float2(0.9, 0.025), float2(0.33, 0.012) };
+    for (int k = 0; k < 2; k++) {
+        float2 rq = p / octave[k].x + time * float2(0.21, -0.13) * float(k + 1) + float(k) * 17.3;
+        float e = 0.2;
+        float c0 = swashNoise(rq);
+        slope += float2(swashNoise(rq + float2(e, 0.0)) - c0, swashNoise(rq + float2(0.0, e)) - c0) / (e * octave[k].x)
+               * octave[k].y * octave[k].x * 4.0;
+    }
+    ripple = slope * (1.0 - smoothstep(0.03, 0.15, footprint));
+    return r;
 }
 
 """
@@ -464,8 +576,6 @@ float foamLace(float2 q) {
     return smoothstep(0.75, 0.95, 1.0 - abs(2.0 * groundNoise(r) - 1.0));
 }
 
-// Speed the surf's fronts come in at (m/s): sqrt(g h) over ~2 m.
-constant float kSurfSpeed = 4.4;
 
 // How hard waves of significant height `hs` (offshore, sheltered) break over `depth` metres of
 // water: depth-limited breaking where the local significant height (shrunk by depth) nears the
@@ -510,8 +620,10 @@ float4 surfSetting(constant Uniforms &u, constant OceanParams &o, constant Terra
     // Crests come in at a shallow-water speed (sqrt(g·2 m)) on the swell's period: fronts run
     // parallel to the shore at an even spacing, ~60 m.
     float travel = toShore / (kSurfSpeed * o.surf.z);
-    float lace = max(max(sea, swell), 0.35) * (1.0 - smoothstep(25.0, 60.0, -toShore));
-    return float4(breaking, local, travel, lace);
+    // None in pockets of sea a few tens of metres inland of the smoothed shoreline.
+    float inland = 1.0 - smoothstep(25.0, 60.0, -toShore);
+    float lace = max(max(sea, swell), 0.35) * inland;
+    return float4(breaking * inland, local, travel, lace);
 }
 
 
