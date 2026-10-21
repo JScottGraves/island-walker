@@ -11,7 +11,9 @@ expects), bilinear from the geographic tiles. Without bathymetry, ocean and noda
 --bathymetry takes topobathy tiles (NOAA NCEI CUDEM Hawaii, metres on LMSL). Land stays
 the land tiles' wherever they are above 0; everywhere else takes the sea tiles' depth,
 kept at least 0.2 m under the sea so the two datums can't make new land along the shore, and
-land at least 5 cm above it, so the bundle's height steps (~7 cm) can't flip either.
+land at least 5 cm above it, so the bundle's height steps (~7 cm) can't flip either; then the
+heights within ~40 m of the shoreline are blurred a little so the waterline follows the coast,
+not the cells.
 Sea cells no tile covers are filled smoothly from their neighbours. Tiles listed earlier
 win where tiles overlap, so list the finest first.
 Needs numpy and tifffile (+ imagecodecs for the LZW tiles).
@@ -92,6 +94,56 @@ def fill(grid):
     return grid
 
 
+def blur(grid, sigma):
+    """Separable Gaussian blur, `sigma` cells, edges clamped."""
+    r = int(math.ceil(3 * sigma))
+    k = np.exp(-0.5 * (np.arange(-r, r + 1) / sigma) ** 2)
+    k /= k.sum()
+    out = grid.astype(np.float32)
+    for axis in (0, 1):
+        p = np.pad(out, [(r, r) if a == axis else (0, 0) for a in (0, 1)], mode="edge")
+        n = out.shape[axis]
+        out = sum(w * np.take(p, np.arange(i, i + n), axis=axis) for i, w in enumerate(k)).astype(np.float32)
+    return out
+
+
+def smooth_shore(grid, band=4, sigma=2.0):
+    """The heights within `band` cells of the shoreline smoothed so the waterline runs along the
+    coast instead of the cells: where the land tiles and the bathymetry meet, heights jump from
+    the beach to well under the sea from one cell to the next, and the zero contour of that step
+    zigzags along a slanting coast in teeth tens of metres long. The new waterline is where the
+    blurred land share is one half (the cells' boundary, smoothed); on either side the heights
+    ramp from it to the nearby land's and sea's own (blurred) heights, so it doesn't move."""
+    land = grid > 0
+    edge = np.zeros_like(land)
+    edge[:-1] |= land[:-1] != land[1:]
+    edge[1:] |= land[:-1] != land[1:]
+    edge[:, :-1] |= land[:, :-1] != land[:, 1:]
+    edge[:, 1:] |= land[:, :-1] != land[:, 1:]
+    near = edge.copy()
+    for _ in range(band - 1):
+        grown = near.copy()
+        grown[1:] |= near[:-1]
+        grown[:-1] |= near[1:]
+        grown[:, 1:] |= near[:, :-1]
+        grown[:, :-1] |= near[:, 1:]
+        near = grown
+    share = blur(land.astype(np.float32), sigma)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        high = blur(np.where(land, grid, 0), sigma) / share                 # nearby land's height
+        low = blur(np.where(land, 0, grid), sigma) / (1 - share)           # nearby sea's depth
+    high = np.where(np.isfinite(high), np.maximum(high, 0.05), 0.05)
+    low = np.where(np.isfinite(low), np.minimum(low, -0.2), -0.2)
+    # Symmetric across the waterline (one slope both sides, or interpolation between cells would
+    # pull the crossing towards the beach's side again), each side's own heights further out.
+    m = np.abs(share - 0.5) / 0.5
+    scale = 0.5 * (high - low)
+    smoothed = np.sign(share - 0.5) * m * (scale + (np.where(share >= 0.5, high, -low) - scale) * m)
+    out = grid.copy()
+    out[near] = smoothed[near].astype(np.float32)
+    return out
+
+
 def main():
     args = sys.argv[6:]
     land_paths, sea_paths = (args[:args.index("--bathymetry")], args[args.index("--bathymetry") + 1:]) \
@@ -116,6 +168,8 @@ def main():
         # Land at least 5 cm up: a bundle's 16-bit heights step ~7 cm over this range, and land a
         # centimetre or two above the sea would otherwise round under it into a film of water.
         result[~sea] = np.maximum(result[~sea], 0.05)
+        # A smooth waterline along the coast rather than the cells (smooth_shore).
+        result = smooth_shore(result)
     else:
         result[sea] = -1.0
     result.astype("<f4").tofile(out)
