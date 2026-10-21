@@ -483,8 +483,9 @@ float surfBreaking(constant OceanParams &o, float hs, float depth) {
 // What the surf does around a water point, worked out per vertex and smooth over tens of
 // metres (so no front follows the floor's every knoll): how hard waves break here (x), the
 // local significant height (y, m), the swell periods a crest takes to reach the shore (z), and
-// how exposed the water is to either system (w); and the shoreward direction. Far from any
-// shallows (deeper than 6 m) there is none.
+// how much waterline lace waves leave (w: the water's exposure to either system, none in
+// pockets of sea a few tens of metres inland of the smoothed shoreline); and the shoreward
+// direction. Far from any shallows (deeper than 6 m) there is none.
 float4 surfSetting(constant Uniforms &u, constant OceanParams &o, constant TerrainParams &t, const device int *pages,
                    texture2d_array<ushort, access::read> tiles, texture2d<float> shore, float2 xy, float depth,
                    thread float2 &shoreward) {
@@ -509,7 +510,8 @@ float4 surfSetting(constant Uniforms &u, constant OceanParams &o, constant Terra
     // Crests come in at a shallow-water speed (sqrt(g·2 m)) on the swell's period: fronts run
     // parallel to the shore at an even spacing, ~60 m.
     float travel = toShore / (kSurfSpeed * o.surf.z);
-    return float4(breaking, local, travel, max(sea, swell));
+    float lace = max(max(sea, swell), 0.35) * (1.0 - smoothstep(25.0, 60.0, -toShore));
+    return float4(breaking, local, travel, lace);
 }
 
 
@@ -548,7 +550,7 @@ float surfFoam(constant OceanParams &o, float4 setting, float2 shoreward, float2
     float lace = 1.0 - smoothstep(0.02, 0.12, depth);
     // No breakers over the last few decimetres of water (the shallows' own depth): there the
     // front has become a sheet of swash and the waterline's lace.
-    float cover = saturate(breaking * smoothstep(0.25, 0.5, depth) * bands + lace * 0.6 * max(setting.w, 0.35));
+    float cover = saturate(breaking * smoothstep(0.25, 0.5, depth) * bands + lace * 0.6 * setting.w);
     if (cover <= 0.02) return 0.0;
     roller = breaking * on * front * (1.0 - spread);
     // Clumps a few metres across, and within them a lace of strands, drifting shoreward.
@@ -755,7 +757,7 @@ fragment float4 oceanFragment(OceanOut in [[stage_in]], constant Uniforms &u [[b
 
     // The floor along the refracted view: its light dimmed on the way down to it and back up.
     // Under more than ~120 m of water none shows; past the heightfield there is none.
-    float3 floorLight = 0.0, floorBare = 0.0;
+    float3 floorLight = 0.0;
     float path = 1e5;
     // The water's depth here from the floor's own heights (the vertices' is coarser, and near
     // the shore reads part land), for the surf.
@@ -765,17 +767,12 @@ fragment float4 oceanFragment(OceanOut in [[stage_in]], constant Uniforms &u [[b
         OceanFloor f = oceanFloor(u, t, pages, tiles, in.world, refracted, in.depth, footprint, sunLight, cloudSun, in.floorShape);
         path = f.path;
         waterDepth = f.below;
-        floorBare = f.light;
         float sunCos = sqrt(max(1.0 - (1.0 - l.z * l.z) / (kWaterIndex * kWaterIndex), 0.05));
         float3 kd = (o.absorption.rgb + 0.5 * o.scattering.rgb + 0.02 * o.scattering.w) / sunCos;
         float3 c = o.absorption.rgb + o.scattering.rgb + o.scattering.w;
         floorLight = f.light * exp(-kd * f.below - c * path);
     }
     float3 color = oceanShade(u, o, environment, n, -n.xy / n.z, variance, v, floorLight, path, sunLight, in.crest);
-    // Over its last few centimetres the water is a film on the wet sand, as the swash's sheet on
-    // the beach beside it (terrainFragment): no step in colour at the waterline.
-    // A trace of the water's own colour stays, or the edge reads as milky sand at eye height.
-    if (in.depth < 120.0) color = mix(floorBare, color, 0.3 + 0.7 * smoothstep(0.0, 0.12, waterDepth));
     // Foam over the shallows (its own white: albedo ~0.8, lit by sun and sky, in the sun's and
     // the clouds' shadows), hiding the glint and the water beneath where it's dense.
     if (in.surf.x > 0.02 || waterDepth < 0.12) {
