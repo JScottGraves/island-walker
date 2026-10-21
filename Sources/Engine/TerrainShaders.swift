@@ -323,6 +323,9 @@ float4 finishSurface(constant Uniforms &u, texture2d<float> skyView, texture2d<f
 constant float kGroundNear = 150.0, kGroundFar = 300.0;
 // Coral, algae and rubble on a reef seen through clear water: dark olive brown.
 constant float3 kReef = float3(0.060, 0.056, 0.034);   // sRGB 70, 67, 51
+// Sand soaked with water, above the waterline or under it (oceanFloor): darker, a little more
+// saturated, so the sea floor carries on from the wet beach without a step.
+constant float3 kWetSand = float3(0.58, 0.56, 0.52);
 // Metres per repeat of the two scales the texture is laid at.
 constant float kGroundTile = 2.0, kGroundTileWide = 5.3;
 constant int kGroundLayers = 11;    // communities; bare rock follows
@@ -753,7 +756,9 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
                 float4 tint = coverFarTint(in.world.xy, groundWeights0.sample(linear, in.world.xy / u.cloudLayer.w),
                                            groundWeights1.sample(linear, in.world.xy / u.cloudLayer.w),
                                            groundWeights2.sample(linear, in.world.xy / u.cloudLayer.w));
-                ground = mix(ground, tint.rgb, tint.a * smoothstep(0.7 * coverRange.x, coverRange.y, d));
+                // No cover on the beach face the waves run up (coverGenerate), so no tint there.
+                float blades = smoothstep(1.5, 2.5, h);
+                ground = mix(ground, tint.rgb, tint.a * blades * smoothstep(0.7 * coverRange.x, coverRange.y, d));
             }
             albedo = mix(albedo, ground, near);
             n = normalize(mix(n, textured, near));
@@ -860,16 +865,24 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
             float far = smoothstep(150.0, 300.0, d);
             float4 sand = far < 1.0 ? swashSand(ocean, hs, in.world.xy, h, ocean.time.x) : float4(0.0);
             float band = swashRunup(ocean, hs, in.world.xy, 0.0) / 0.55;    // the highest typical run-up
+            // A swash runs a few metres up a sloping beach, not across a flat: how far inland of
+            // the waterline this is (h over the slope's tangent; 1 - n.z ≈ tan²/2), the sheet
+            // spent by ~10–25 m.
+            float tangent = sqrt(2.0 * max(slope, 0.0));
+            float reach = 1.0 - smoothstep(10.0, 25.0, max(h, 0.0) / max(tangent, 1e-3));
+            // What the waves wash is bare sediment (no litter, no cover) on gentle slopes,
+            // the same sand the water shows beneath it (oceanFloor).
+            float washed = reach * (1.0 - smoothstep(0.5 * band, band + 0.3, h)) * (1.0 - smoothstep(0.1, 0.25, slope));
+            albedo = mix(albedo, kSand, washed);
             float meanWet = 1.0 - smoothstep(0.5 * band, band, h);
-            float wet = mix(sand.x, 0.7 * meanWet, far);
-            // Wet sand: darker, a little more saturated.
-            albedo *= mix(float3(1.0), float3(0.58, 0.56, 0.52), wet);
-            sheet = (1.0 - far) * smoothstep(0.0, 0.03, sand.z);
+            float wet = reach * mix(sand.x, 0.7 * meanWet, far);
+            albedo *= mix(float3(1.0), kWetSand, wet);
+            sheet = reach * (1.0 - far) * smoothstep(0.0, 0.03, sand.z);
             // A ragged band of bubbles a metre or so wide along the uprush's edge.
             float rag = groundNoise(in.world.xy / 1.3 + 6.1);
             lace = (1.0 - far) * sand.w * (1.0 - smoothstep(0.0, 0.03 + 0.06 * rag, sand.z)) * sheet;
             float strands = smoothstep(0.35, 0.7, groundNoise(in.world.xy / 0.6 + 8.1));
-            stranded = 0.8 * sand.y * strands * (1.0 - far) + 0.35 * far * (1.0 - smoothstep(0.0, 0.03, abs(h - band)));
+            stranded = reach * (0.8 * sand.y * strands * (1.0 - far) + 0.35 * far * (1.0 - smoothstep(0.0, 0.03, abs(h - band))));
             if (sheet > 0.0) n = normalize(mix(n, float3(0.0, 0.0, 1.0), sheet));
         }
     }

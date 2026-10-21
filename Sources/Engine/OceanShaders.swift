@@ -657,7 +657,7 @@ fragment uint4 oceanSurface(OceanOut in [[stage_in]]) {
 // The sea floor seen from the water surface at `p` along the refracted view `t`: where that ray
 // meets the floor (one refinement from the depth straight below, which is the refraction's
 // offset), its depth below the surface (`below`) and the metres travelled underwater (`path`),
-// and its light as it leaves the floor (pre-exposure): sand, darker on knolls and patch reefs
+// and its light as it leaves the floor (pre-exposure): wet sand, darker on knolls and patch reefs
 // (convex over ~20 m, as terrainVertex's ridge), lit by the sun through the surface's shadows.
 struct OceanFloor {
     float3 light;
@@ -685,7 +685,8 @@ OceanFloor oceanFloor(constant Uniforms &u, constant TerrainParams &t, const dev
     float3 n = normalize(float3(-s.xy, 1.0));
     float ridge = s.z;
     float reef = saturate(ridge * 3.0) * (1.0 - smoothstep(8.0, 25.0, u.seaLevel - h));
-    float3 albedo = mix(kSand, kReef, reef) * (0.88 + 0.24 * groundNoise(xy / 3.7 + 5.0));
+    // Sand under water is soaked, as the wet beach above the waterline is (terrainFragment).
+    float3 albedo = mix(kSand * kWetSand, kReef, reef) * (0.88 + 0.24 * groundNoise(xy / 3.7 + 5.0));
     float3 l = normalize(u.sunDirection);
     f.light = litSurface(u, albedo, n, saturate(dot(n, l)), sunLight, 1.0, 1.0, cloudSun);
     return f;
