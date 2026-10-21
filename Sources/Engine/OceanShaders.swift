@@ -774,7 +774,8 @@ fragment float4 oceanFragment(OceanOut in [[stage_in]], constant Uniforms &u [[b
     float3 color = oceanShade(u, o, environment, n, -n.xy / n.z, variance, v, floorLight, path, sunLight, in.crest);
     // Over its last few centimetres the water is a film on the wet sand, as the swash's sheet on
     // the beach beside it (terrainFragment): no step in colour at the waterline.
-    if (in.depth < 120.0) color = mix(floorBare, color, smoothstep(0.0, 0.12, waterDepth));
+    // A trace of the water's own colour stays, or the edge reads as milky sand at eye height.
+    if (in.depth < 120.0) color = mix(floorBare, color, 0.3 + 0.7 * smoothstep(0.0, 0.12, waterDepth));
     // Foam over the shallows (its own white: albedo ~0.8, lit by sun and sky, in the sun's and
     // the clouds' shadows), hiding the glint and the water beneath where it's dense.
     if (in.surf.x > 0.02 || waterDepth < 0.12) {

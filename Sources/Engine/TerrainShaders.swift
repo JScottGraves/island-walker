@@ -880,9 +880,9 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
             // A ragged band of bubbles a metre or so wide along the uprush's edge.
             float rag = groundNoise(in.world.xy / 1.3 + 6.1);
             lace = (1.0 - far) * sand.w * (1.0 - smoothstep(0.0, 0.03 + 0.06 * rag, sand.z)) * sheet;
-            // Strands 0.6 m across, faded to their mean (~0.4) before a pixel spans them, so they
-            // don't alias into blocks; the far line soft, as the mesh's heights are there.
-            float strands = mix(smoothstep(0.35, 0.7, groundNoise(in.world.xy / 0.6 + 8.1)), 0.4, smoothstep(40.0, 120.0, d));
+            // Strands 0.6 m across, faded to their mean (~0.4) well before a pixel spans them, so
+            // they don't alias into blotches; the far line soft, as the mesh's heights are there.
+            float strands = mix(smoothstep(0.35, 0.7, groundNoise(in.world.xy / 0.6 + 8.1)), 0.4, smoothstep(15.0, 60.0, d));
             stranded = reach * (0.8 * sand.y * strands * (1.0 - far) + 0.2 * far * (1.0 - smoothstep(0.0, 0.08, abs(h - band))));
             if (sheet > 0.0) n = normalize(mix(n, float3(0.0, 0.0, 1.0), sheet));
         }
