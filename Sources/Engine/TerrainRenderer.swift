@@ -158,7 +158,7 @@ public final class TerrainRenderer {
     /// Fraction of the ground the tree crowns cover (r32Float), for shading the floor under
     /// the drawn trees until they cast shadows (zero without trees).
     let canopyCover: MTLTexture
-    let seaLevel: Float
+    public let seaLevel: Float
     let maxHeight: Float
     /// Native trees and shrubs (nil when drawn without them).
     let flora: FloraRenderer?
