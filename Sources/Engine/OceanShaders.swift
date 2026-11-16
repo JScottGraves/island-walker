@@ -23,8 +23,10 @@ struct OceanParams {
     float4 scattering;      // molecular scattering per metre (rgb); w: particle scattering per metre
     float4 sss;             // subsurface tint (rgb), strength
     float4 surf;            // significant height of the wind sea (with the trade swell) and of the swell (m),
-                            // swell period (s), depth-limited Hs/h for the long waves
-    float4 surfFrom;        // where the swell comes from (xy) and the wind sea (zw), unit vectors
+                            // swell period (s), depth-limited Hs/h for the long waves (only w used now)
+    float4 surfFrom;        // where the swell comes from (xy) and the wind sea (zw), unit vectors (unused)
+    float4 waves;           // the surf's systems (the refraction texture's): trade swell and north
+                            // swell periods (s), breaker index (Hs/h), waves per set
 };
 
 constant float kWaterIndex = 1.333;
@@ -190,9 +192,6 @@ constant float kSwashBeta = 0.05;
 constant float kSwashShare = 0.65;
 constant float kSwashReach = 80.0;
 
-// Speed the surf's fronts come in at (m/s): sqrt(g h) over ~2 m (OceanShaders' surfFoam).
-constant float kSurfSpeed = 4.4;
-
 // The shore texture at uv, bilinear in full precision: the hardware's filter weights have 8
 // bits, which on this coarse texture steps the shore distance by decimetres, and the swash's
 // clock and the patterns it carries (×1/β) turn those steps into a lattice of metre-wide jumps.
@@ -205,30 +204,70 @@ float4 shoreAt(texture2d<float> shore, float2 uv) {
     return mix(mix(t00, t10, f.x), mix(t01, t11, f.x), f.y);
 }
 
-// Significant height reaching a shore point, from the shore texture (exposure in g, b).
-float surfHeight(constant OceanParams &o, float4 shore) {
-    return sqrt(o.surf.x * o.surf.x * shore.b * shore.b + o.surf.y * o.surf.y * shore.g * shore.g);
+// A wave texel unpacked: each system's arrival, each one's height (the two halfs in z).
+float4 surfWavesTexel(float4 t) {
+    half2 h = as_type<half2>(t.z);
+    return float4(t.xy, float2(h));
+}
+
+// The surf's wave texture (WaveRefraction: each system's arrival in its periods, its local
+// significant height, and the water's depth) at xy, bilinear in full precision (the arrival
+// runs to hundreds of periods): the arrivals and heights, and through `depth` the depth; with
+// the arrivals' gradient per metre through `gradient` (x's in xy, y's in zw: the bilinear's own,
+// so fronts drawn from it and their slopes agree).
+float4 surfWavesAt(texture2d<float> waves, float2 xy, float domain, thread float4 &gradient, thread float &depth) {
+    float2 size = float2(waves.get_width(), waves.get_height());
+    float2 s = clamp(xy / domain * size - 0.5, float2(0.0), size - 1.001);
+    float2 i = floor(s), f = s - i;
+    uint2 a = uint2(i), b = min(a + 1u, uint2(size) - 1u);
+    float4 r00 = waves.read(a), r10 = waves.read(uint2(b.x, a.y)), r01 = waves.read(uint2(a.x, b.y)), r11 = waves.read(b);
+    depth = mix(mix(r00.w, r10.w, f.x), mix(r01.w, r11.w, f.x), f.y);
+    float4 t00 = surfWavesTexel(r00), t10 = surfWavesTexel(r10), t01 = surfWavesTexel(r01), t11 = surfWavesTexel(r11);
+    float scale = size.x / domain;
+    gradient = float4(mix(t10.xy - t00.xy, t11.xy - t01.xy, f.y), mix(t01.xy - t00.xy, t11.xy - t10.xy, f.x)) * scale;
+    return mix(mix(t00, t10, f.x), mix(t01, t11, f.x), f.y);
+}
+
+// The sets' timing along the coast (0…1, drifting over kilometres; surfSet), worked out once
+// per vertex or pixel.
+float surfSetDrift(float2 xy) {
+    return groundNoise(xy / 3000.0 + 5.3);
+}
+
+// How big wave n of a system is within its set (0.45…1): the beat of two close periods, a set
+// every o.waves.w waves, shifted along the coast by `drift` (surfSetDrift).
+float surfSet(constant OceanParams &o, float n, float drift) {
+    return 0.45 + 0.55 * abs(cos(3.14159265 * (n + o.waves.w * drift) / o.waves.w));
+}
+
+// The swash's wave clock at a beach point (from the wave texture there): the system bringing
+// the most energy (its arrival in periods, period), and the height its bores reach the sand
+// with as Stockdon's offshore height (the bake's local height on the sand is the breakers' last,
+// depth-limited one: ×1.5, up to 2.5 m).
+float3 swashClock(constant OceanParams &o, float4 waves, thread float &hs) {
+    hs = min(1.5 * sqrt(waves.z * waves.z + waves.w * waves.w), 2.5);
+    return waves.w > waves.z ? float3(waves.y, o.waves.y, 1.0) : float3(waves.x, o.waves.x, 0.0);
 }
 
 // Height (m above the sea) wave n runs up to at xy: ~0.4 of Stockdon et al.'s 2% run-up (a
 // typical wave's) for waves of height hs and the swell's period on kSwashBeta, varying wave to wave
 // in sections along the shore, with cusps every few metres.
-float swashRunup(constant OceanParams &o, float hs, float2 xy, float n) {
-    float l0 = 9.81 * o.surf.z * o.surf.z / 6.2831853;
+float swashRunup(constant OceanParams &o, float hs, float period, float2 xy, float n, float drift) {
+    float l0 = 9.81 * period * period / 6.2831853;
     float s = sqrt(max(hs, 0.05) * l0);
     float r2 = 1.1 * (0.35 * kSwashBeta * s + 0.5 * s * sqrt(0.563 * kSwashBeta * kSwashBeta + 0.004));
     float wave = 0.55 + 0.45 * groundNoise(xy / 120.0 + n * 1.37);
     float cusps = 1.0 + 0.3 * (groundNoise(xy / 6.0 + n * 0.53) - 0.5);
-    return 0.38 * r2 * wave * cusps;
+    return 0.38 * r2 * wave * cusps * surfSet(o, n, drift);
 }
 
 // Where in its swash the wave at xy is (0…1 of the period since its bore reached the shore),
 // and which wave (n): the surf's own clock (surfFoam), so each swash starts as the bore that
-// breaks on that stretch of shore arrives, sections peeling alike. `toShore` is the smoothed
-// shore distance there (shore texture r), held to the last few metres inland so the timing
-// doesn't run on up the beach.
-float swashPhase(constant OceanParams &o, float2 xy, float toShore, float time, thread float &n) {
-    float wave = time / o.surf.z + max(toShore, -5.0) / (kSurfSpeed * o.surf.z);
+// breaks on that stretch of shore arrives, sections peeling alike. `arrival` is the crests'
+// arrival there in periods (the wave texture's, read at the waterline so the timing doesn't run
+// on up the beach).
+float swashPhase(float arrival, float period, float2 xy, float time, thread float &n) {
+    float wave = time / period - arrival;
     float index = floor(wave + 0.5);
     float c = wave + 0.08 * groundNoise(xy / 160.0 + index * 1.37);
     n = floor(c);
@@ -239,17 +278,17 @@ float swashPhase(constant OceanParams &o, float2 xy, float toShore, float time, 
 // (y) the foam they stranded along their highest line (fading over a few seconds), (z) metres
 // the current sheet's front stands above it (≤ 0 where it hasn't reached), (w) the swash's
 // phase; and through `front` and `runup0` the front's height now and this wave's run-up.
-float4 swashSand(constant OceanParams &o, float hs, float2 xy, float toShore, float h, float time,
-                 thread float &front, thread float &runup0) {
+float4 swashSand(constant OceanParams &o, float hs, float arrival, float period, float2 xy, float h, float time,
+                 float drift, thread float &front, thread float &runup0) {
     float n;
-    float phase = swashPhase(o, xy, toShore, time, n);
+    float phase = swashPhase(arrival, period, xy, time, n);
     float wet = 0.0, foam = 0.0;
-    runup0 = swashRunup(o, hs, xy, n);
+    runup0 = swashRunup(o, hs, period, xy, n, drift);
     float x0 = phase / kSwashShare;
     front = phase < kSwashShare ? runup0 * 4.0 * x0 * (1.0 - x0) : 0.0;
     for (int k = 0; k < 4; k++) {
-        float runup = swashRunup(o, hs, xy, n - float(k));
-        float since = (phase + float(k) - 0.5 * kSwashShare) * o.surf.z;   // s since its highest
+        float runup = swashRunup(o, hs, period, xy, n - float(k), drift);
+        float since = (phase + float(k) - 0.5 * kSwashShare) * period;   // s since its highest
         float reach = runup;
         if (k == 0 && since < 0.0) {
             float x = phase / kSwashShare;
@@ -299,7 +338,7 @@ float foamCells(float2 q) {
 // through `ripple` a slope for the moving ripples on it. `above` is the front's height over the
 // sand (swashSand z), `phase` the swash's phase, `up` the up-beach direction, `footprint` metres
 // per pixel.
-float4 swashSheet(constant OceanParams &o, float hs, float2 xy, float above, float front, float runup, float phase,
+float4 swashSheet(constant OceanParams &o, float hs, float period, float2 xy, float above, float front, float runup, float phase,
                   float2 up, float footprint, float time, thread float2 &ripple) {
     ripple = 0.0;
     float4 r = 0.0;
@@ -314,11 +353,11 @@ float4 swashSheet(constant OceanParams &o, float hs, float2 xy, float above, flo
     // across loses its precision and shows its cells.
     // The carried distance from the clock alone (the swash's phase without its arrival delay up
     // the beach): the delay shifts the front a metre per metre up, and would squeeze the patterns.
-    float ca = time / o.surf.z + 0.08 * swashNoise(xy / 160.0);
+    float ca = time / period + 0.08 * swashNoise(xy / 160.0);
     float xa = fract(ca) / kSwashShare;
     // A smooth run-up (no cusps, no wave-to-wave sections): varying over a few metres, it would
     // shear the patterns into streaks up the beach.
-    float smoothRunup = 0.75 * swashRunup(o, hs, float2(0.0), 0.0) / max(0.55 + 0.45 * swashNoise(float2(0.0)), 0.1);
+    float smoothRunup = 0.75 * swashRunup(o, hs, period, float2(0.0), 0.0, 0.5) / max(0.55 + 0.45 * swashNoise(float2(0.0)), 0.1);
     float travelled = (xa < 1.0 ? smoothRunup * 4.0 * xa * (1.0 - xa) : 0.0) / kSwashBeta;
     float2 local = xy - floor(xy / 4096.0) * 4096.0;
     float2 q = local - up * travelled;
@@ -496,8 +535,10 @@ struct OceanOut {
     // Near the camera, the floor's slope (xy) and convexity (z) under the vertex, valid where
     // w is 1 (oceanFloorShape); further out the fragment works them out itself.
     float4 floorShape;
-    float4 surf;            // surfSetting: breaking, wind-sea exposure, metres to shore, exposure
-    float2 shoreward;
+    float4 surf;            // surfSetting: each system's height, smoothed depth, lace
+    float4 crests;          // each system's arrival (periods) and crest spacing (m)
+    float4 heading;         // each system's direction of travel
+    float drift;            // the sets' timing (surfSetDrift)
 };
 
 struct OceanMotionOut {
@@ -574,11 +615,11 @@ float3 oceanDisplacement(constant OceanParams &o, texture2d_array<float> maps, O
 }
 
 // ---- Surf (research/ocean.md, step O4, shore foam) ----
-// Foam where waves break arriving at the shore: depth-limited breaking where the local
-// significant height (each system's, sheltered by reef or land upstream, shrunk by depth) nears
-// the depth; whitewater bands with a sharp front and a fading trail that travel shoreward at the
-// shallow-water speed on the swell's period, broken into sections along the shore; a lace of
-// residual foam at the waterline. Advected bubbles, faded to their mean coverage where a pixel
+// Foam where waves break arriving at the shore: each swell system's crests as refracted and
+// shoaled over the bathymetry (WaveRefraction, baked into the wave texture), breaking where a
+// wave's height nears the depth; whitewater bands with a sharp front and a fading trail on
+// the crests' own clock, crowding and bending as the crests do, broken into sections along the
+// shore and grouped into sets; a lace of residual foam at the waterline. Advected bubbles, faded to their mean coverage where a pixel
 // spans them.
 
 // Foam's lace: a network of thin worm-like strands (ridged value noise), 1 on a
@@ -590,97 +631,116 @@ float foamLace(float2 q) {
 }
 
 
-// How hard waves of significant height `hs` (offshore, sheltered) break over `depth` metres of
-// water: depth-limited breaking where the local significant height (shrunk by depth) nears the
-// depth. Individual waves break near H/h ≈ 0.78 and the largest are ~1.8 Hs, so the zone starts
-// around Hs/h ≈ 0.1–0.2 (the depth-limited local Hs saturates there). Breakers also need waves
-// of some size left (over ~0.2 m) and water to break in (over ~0.4 m): across flats a few
-// decimetres deep the waves have spent themselves (and the bathymetry keeps the sea at least
-// 0.2 m deep, so wide flats near shore sit at that).
-float surfBreaking(constant OceanParams &o, float hs, float depth) {
-    float h = max(depth, 0.05);
-    float local = hs * oceanDepthFactor(o.meanK.x, h);
-    return smoothstep(0.1, 0.2, local / h) * smoothstep(0.15, 0.3, local) * smoothstep(0.25, 0.5, depth);
-}
-
-// What the surf does around a water point, worked out per vertex and smooth over tens of
-// metres (so no front follows the floor's every knoll): how hard waves break here (x), the
-// local significant height (y, m), the swell periods a crest takes to reach the shore (z), and
-// how much waterline lace waves leave (w: the water's exposure to either system, none in
-// pockets of sea a few tens of metres inland of the smoothed shoreline); and the shoreward
-// direction. Far from any shallows (deeper than 6 m) there is none.
-float4 surfSetting(constant Uniforms &u, constant OceanParams &o, constant TerrainParams &t, const device int *pages,
-                   texture2d_array<ushort, access::read> tiles, texture2d<float> shore, float2 xy, float depth,
-                   thread float2 &shoreward) {
-    shoreward = float2(0.0);
-    if (depth > 6.0 || any(xy < 0.0) || any(xy > float2(t.domainSize))) return float4(0.0, 0.0, 1e4, 0.0);
+// What the surf does around a water point, worked out per vertex from the wave texture
+// (WaveRefraction: the crests refracted and shoaled over the bathymetry): the trade swell's and
+// the north swell's local significant heights (x, y, m; none in pockets of sea a few tens of
+// metres inland of the smoothed shoreline), the depth they break against (z: the water's depth
+// smoothed over ~150 m, or the local one where shallower) and how much waterline
+// lace waves leave (w); through `crests` each system's arrival (in its periods) and the spacing
+// of its crests (m), through `heading` the direction each travels, and through `drift` the
+// sets' timing (surfSetDrift). Far from any shallows
+// (deeper than 8 m, fading in from there) there is none.
+float4 surfSetting(constant Uniforms &u, constant OceanParams &o, constant TerrainParams &t, texture2d<float> shore,
+                   texture2d<float> waves, float2 xy, float depth, thread float4 &crests, thread float4 &heading,
+                   thread float &drift) {
+    crests = float4(0.0, 0.0, 1.0, 1.0);
+    heading = float4(0.0, 1.0, 0.0, 1.0);
+    drift = 0.0;
+    if (depth > 8.0 || any(xy < 0.0) || any(xy > float2(t.domainSize))) return float4(0.0, 0.0, 1e4, 0.0);
     constexpr sampler linear(filter::linear, address::clamp_to_edge);
-    float2 uv = xy / t.domainSize;
-    // Shore distance (smoothed when baked) and each system's exposure (ShoreDistance.exposure).
-    float4 setting = shore.sample(linear, uv, level(0));
-    float toShore = setting.r;
-    float e = 80.0 / t.domainSize;
-    float2 gradient = float2(shore.sample(linear, uv + float2(e, 0.0), level(0)).r - shore.sample(linear, uv - float2(e, 0.0), level(0)).r,
-                             shore.sample(linear, uv + float2(0.0, e), level(0)).r - shore.sample(linear, uv - float2(0.0, e), level(0)).r);
-    shoreward = length(gradient) > 1e-4 ? -normalize(gradient) : float2(0.0, 1.0);
-    float swell = setting.g, sea = setting.b;
-    float hs = sqrt(o.surf.x * o.surf.x * sea * sea + o.surf.y * o.surf.y * swell * swell);
-    // Depth smoothed over ~150 m (baked): the breaking zone's onset is a line along the reef or
-    // bar, not the floor's contours.
-    float h = setting.a;
-    float local = hs * oceanDepthFactor(o.meanK.x, max(h, 0.05));
-    float breaking = surfBreaking(o, hs, h);
-    // Crests come in at a shallow-water speed (sqrt(g·2 m)) on the swell's period: fronts run
-    // parallel to the shore at an even spacing, ~60 m.
-    float travel = toShore / (kSurfSpeed * o.surf.z);
-    // None in pockets of sea a few tens of metres inland of the smoothed shoreline.
-    float inland = 1.0 - smoothstep(25.0, 60.0, -toShore);
-    float lace = max(max(sea, swell), 0.35) * inland;
-    return float4(breaking * inland, local, travel, lace);
+    float4 setting = shore.sample(linear, xy / t.domainSize, level(0));
+    float4 gradient;
+    float local;
+    float4 w = surfWavesAt(waves, xy, t.domainSize, gradient, local);
+    // None in pockets of sea a few tens of metres inland of the smoothed shoreline, fading in
+    // from 8 m deep.
+    float inland = (1.0 - smoothstep(25.0, 60.0, -setting.r)) * (1.0 - smoothstep(6.0, 8.0, depth));
+    float2 g1 = float2(gradient.x, gradient.z), g2 = float2(gradient.y, gradient.w);
+    float l1 = length(g1), l2 = length(g2);
+    // Spacing between crests: the wavelength over the smoothed depth (held to WaveRefraction's
+    // 2 m, as the bake's speeds), L0·√tanh(k0·h) (Eckart). The texture's own gradient (1/|∇τ|,
+    // the same by the eikonal) steps from texel to texel, and so would the fronts' widths.
+    float2 l0 = 9.81 * o.waves.xy * o.waves.xy / 6.2831853;
+    float hc = max(setting.a, 2.0);
+    float2 spacing = l0 * sqrt(tanh(6.2831853 * hc / l0));
+    crests = float4(w.x, w.y, spacing);
+    heading = float4(l1 > 1e-5 ? g1 / l1 : float2(0.0, 1.0), l2 > 1e-5 ? g2 / l2 : float2(0.0, 1.0));
+    float hs = length(w.zw);
+    float lace = max(saturate(hs / 1.0), 0.35) * inland;
+    drift = surfSetDrift(xy);
+    // Breaking against the shallower of the smoothed depth and the bake's (~40 m): the bake held
+    // the heights to its own, and the shore break and the reef's knolls are where it is less.
+    return float4(w.z * inland, w.w * inland, min(setting.a, local), lace);
 }
 
-
-// Foam cover (0…1) at a water point `depth` metres deep, from its surf setting, with the
-// camera's `footprint` (m). Each breaking wave is a solid whitewater roller a couple of wave
-// heights wide with an irregular leading edge, in sections along the shore that peel a little,
-// trailing clumpy foam that thins into patches and lace over ~35 m behind it. Returns the
-// cover, and through `roller` how much of it is the front (brighter).
-float surfFoam(constant OceanParams &o, float4 setting, float2 shoreward, float2 xy, float depth, float footprint,
-               thread float &roller) {
-    roller = 0.0;
-    float breaking = setting.x, local = setting.y, travel = setting.z;
-    float spacing = kSurfSpeed * o.surf.z;          // metres between fronts
+// One system's breakers at xy: a wave train coming in with crests `spacing` metres apart, each
+// a solid whitewater roller a couple of wave heights wide with an irregular leading edge, in
+// sections that peel a little, trailing clumpy foam that thins over ~35 m behind it. Each wave
+// is its set's share of the local significant height `hs` (surfSet) and breaks where that
+// nears the breaker depth over the smoothed depth `h`: the sets' big waves further out, the
+// small ones only on the inside. Returns its foam cover; through `front`, how much is the roller.
+float surfBreakers(constant OceanParams &o, float arrival, float spacing, float hs, float h, float period,
+                   float2 xy, float ragged, float footprint, float drift, float weight, thread float &front) {
+    front = 0.0;
+    if (hs < 0.05 || weight <= 0.0) return 0.0;
     // Sections 50–300 m long, re-dealt every wave, peeling: each one's front lags a little
-    // towards one end. In world axes (xy is tens of kilometres: rotating it by the shoreward
+    // towards one end. In world axes (xy is tens of kilometres: rotating it by the waves'
     // direction, which varies across a triangle, would scramble every pattern).
-    float wave = o.time.x / o.surf.z + travel;
+    float wave = o.time.x / period - arrival;
     float index = floor(wave + 0.5);
-    float section = groundNoise(xy / 160.0 + index * 1.37);
+    float section = groundNoise(xy / 160.0 + index * 1.37 + period);
     float peel = 0.08 * section;
-    // The leading edge, a metre or two ragged.
-    float ragged = groundNoise(xy / 2.5 + 4.1) - 0.5;
-    float edge = 2.2 * ragged;
-    float u0 = fract(wave + peel + edge / spacing);
-    float width = clamp(3.0 * local, 3.0, 8.0) / spacing;
-    float front = 1.0 - smoothstep(0.6 * width, 1.4 * width, u0);
+    float u0 = fract(wave + peel + 2.2 * ragged / spacing);
+    float set = surfSet(o, index, drift);
+    // Waves break near H/h ≈ 0.78: a set's biggest (~1.8 Hs) from Hs/h ≈ 0.43, ~0.72 of the bake's
+    // saturated Hs/h (o.waves.z), where all of them have broken. Breakers also need waves of some
+    // size (over ~0.2 m).
+    float depthHs = o.waves.z * max(h, 0.5);
+    float breaking = smoothstep(0.75, 0.85, hs * (0.6 + 0.5 * set) / depthHs) * smoothstep(0.15, 0.3, hs * set);
+    // A solid roller 4–10 m wide.
+    float width = clamp(4.0 * hs * set, 4.0, 10.0) / spacing;
+    float f = 1.0 - smoothstep(0.6 * width, 1.4 * width, u0);
     // Dense whitewater right behind the roller, thinning into clumps over ~15 m, then a lace.
     float trail = 0.85 * exp(-u0 * spacing / 15.0) + 0.25 * exp(-u0 * spacing / 45.0);
     // Section ends ragged, not cut straight across.
     float on = smoothstep(0.3, 0.45, section + 0.15 * ragged);
-    float bands = on * max(front, trail);
-    // A pixel wider than a fraction of the spacing sees the mean whitewater over a cycle.
+    float bands = on * max(f, trail);
+    // A pixel wider than a fraction of the spacing sees the mean whitewater over a set.
     float spread = smoothstep(0.05, 0.25, footprint / spacing);
     float mean = 0.55 * (width + (0.85 * 15.0 + 0.25 * 45.0) / spacing);
-    bands = mix(bands, mean, spread);
+    float meanBreaking = smoothstep(0.75, 0.85, 0.95 * hs / depthHs) * smoothstep(0.15, 0.3, 0.75 * hs);
+    front = weight * breaking * on * f * (1.0 - spread);
+    return weight * mix(breaking * bands, meanBreaking * mean, spread);
+}
+
+// Foam cover (0…1) at a water point `depth` metres deep, from its surf setting, with the
+// camera's `footprint` (m): both systems' breakers (surfBreakers) and a lace of residual foam at
+// the waterline. Returns the cover, and through `roller` how much of it is the front (brighter).
+// Each system's share of the surf (0…1): a system under ~30% of the other's height is left out
+// (fading in to 50%), its breakers lost among the bigger ones'.
+float2 surfWeights(float4 setting) {
+    float top = max(max(setting.x, setting.y), 1e-3);
+    return smoothstep(0.3, 0.5, setting.xy / top);
+}
+
+float surfFoam(constant OceanParams &o, float4 setting, float4 crests, float2 heading, float2 xy, float depth,
+               float footprint, float drift, thread float &roller) {
+    roller = 0.0;
+    // The leading edge, a metre or two ragged.
+    float ragged = groundNoise(xy / 2.5 + 4.1) - 0.5;
+    float2 weight = surfWeights(setting);
+    float f1, f2;
+    float b1 = surfBreakers(o, crests.x, crests.z, setting.x, setting.z, o.waves.x, xy, ragged, footprint, drift, weight.x, f1);
+    float b2 = surfBreakers(o, crests.y, crests.w, setting.y, setting.z, o.waves.y, xy, ragged, footprint, drift, weight.y, f2);
     float lace = 1.0 - smoothstep(0.02, 0.12, depth);
     // No breakers over the last few decimetres of water (the shallows' own depth): there the
     // front has become a sheet of swash and the waterline's lace.
-    float cover = saturate(breaking * smoothstep(0.25, 0.5, depth) * bands + lace * 0.6 * setting.w);
+    float cover = saturate(max(b1, b2) * smoothstep(0.25, 0.5, depth) + lace * 0.6 * setting.w);
     if (cover <= 0.02) return 0.0;
-    roller = breaking * on * front * (1.0 - spread);
-    // Clumps a few metres across, and within them a lace of strands, drifting shoreward.
+    roller = max(f1, f2);
+    // Clumps a few metres across, and within them a lace of strands, drifting with the waves.
     // Thinning foam breaks into clumps, then into lace with holes.
-    float2 q = xy - shoreward * (1.0 * o.time.x);
+    float2 q = xy - heading * (1.0 * o.time.x);
     float clumps = groundNoise(q / 2.6 + 1.7);
     float body = smoothstep(1.0 - cover - 0.08, 1.0 - cover + 0.08, clumps);
     float net = mix(foamLace(q / 1.6), 0.35, smoothstep(0.05, 0.2, footprint / 1.6));
@@ -689,47 +749,59 @@ float surfFoam(constant OceanParams &o, float4 setting, float2 shoreward, float2
 }
 
 // ---- Surf waves: the swell's crests shoaling in under the breakers ----
-// Each surf front (surfFoam) rides a crest: a wave about the local significant height high, with
-// a long gentle back seaward of the front and a steep face shoreward of it, coming in with the
-// foam on the same clock and in the same sections (taller where a section breaks), faded out
-// where `filter` (m) can't resolve it. Its height (m, about the mean sea) at xy at `time`, and
-// through `slope` its gradient. None deeper than ~6 m (the cascades carry the sea there) or in
-// pockets of sea inland of the shoreline.
-float surfWave(constant OceanParams &o, float4 setting, float2 shoreward, float2 xy, float depth, float filter,
-               float time, thread float2 &slope) {
+// One system's crests (surfBreakers' clock): a wave its set's share of the local significant
+// height, with a long gentle back behind the crest and a steep face ahead of it, taller where a
+// section breaks, faded out where `filter` (m) can't resolve it. Its height (m, about the mean
+// sea) at xy at `time`, and through `slope` its gradient (`heading` the way it travels).
+float surfCrest(constant OceanParams &o, float arrival, float spacing, float2 heading, float hs, float h, float period,
+                float2 xy, float filter, float time, float drift, float weight, thread float2 &slope) {
     slope = 0.0;
-    float local = setting.y;
-    if (local <= 0.0 || o.time.z <= 0.0) return 0.0;
-    float spacing = kSurfSpeed * o.surf.z;
-    float wave = time / o.surf.z + setting.z;
+    if (hs < 0.05 || weight <= 0.0) return 0.0;
+    float wave = time / period - arrival;
     float index = floor(wave + 0.5);
-    float section = groundNoise(xy / 160.0 + index * 1.37);
-    // 0 at the front (the crest), growing seaward to 1 at the next front: the back seaward of
-    // the crest is the low u0, the face shoreward of it the u0 just under 1.
+    float section = groundNoise(xy / 160.0 + index * 1.37 + period);
+    // 0 at the crest, growing seaward to 1 at the next: the back behind the crest is the low u0,
+    // the face ahead of it the u0 just under 1.
     float u0 = fract(wave + 0.08 * section);
     float back = exp(-u0 / 0.16), face = exp(-(1.0 - u0) / 0.05);
     float f = max(back, face);
     float df = back > face ? -back / 0.16 : face / 0.05;
     float on = smoothstep(0.3, 0.45, section);
-    float h = o.time.z * 0.9 * local * mix(0.55, 1.0, on) * (0.5 + 0.5 * setting.x)
-            * (1.0 - smoothstep(4.0, 6.0, depth)) * saturate(setting.w / 0.35)
+    float set = surfSet(o, index, drift);
+    float breaking = smoothstep(0.75, 0.85, hs * (0.6 + 0.5 * set) / (o.waves.z * max(h, 0.5)));
+    float a = weight * o.time.z * 0.45 * hs * set * mix(0.55, 1.0, on) * (0.6 + 0.4 * breaking)
             // Faded where the grid (or a pixel) is too coarse for the face (~3 m).
             * (1.0 - smoothstep(0.08, 0.2, filter / spacing));
-    // u0 grows seaward (against `shoreward`) by 1/spacing per metre.
-    slope = h * df * (-shoreward / spacing);
+    // u0 grows against the heading by 1/spacing per metre.
+    slope = a * df * (-heading / spacing);
     // Less the profile's mean (∫f ≈ 0.16 + 0.05), so the sea keeps its level.
-    return h * (f - 0.21);
+    return a * (f - 0.21);
+}
+
+// Both systems' surf crests (surfCrest), none deeper than ~6 m (the cascades carry the sea
+// there) or in pockets of sea inland of the shoreline.
+float surfWave(constant OceanParams &o, float4 setting, float4 crests, float4 heading, float drift, float2 xy, float depth,
+               float filter, float time, thread float2 &slope) {
+    slope = 0.0;
+    if (setting.x + setting.y <= 0.0 || o.time.z <= 0.0) return 0.0;
+    float2 weight = surfWeights(setting);
+    float2 s1, s2;
+    float z = surfCrest(o, crests.x, crests.z, heading.xy, setting.x, setting.z, o.waves.x, xy, filter, time, drift, weight.x, s1)
+            + surfCrest(o, crests.y, crests.w, heading.zw, setting.y, setting.z, o.waves.y, xy, filter, time, drift, weight.y, s2);
+    float fade = (1.0 - smoothstep(4.0, 6.0, depth)) * saturate(setting.w / 0.35);
+    slope = (s1 + s2) * fade;
+    return z * fade;
 }
 
 // The water's displacement at a sea grid point at `time`: the cascades' (from `maps`) and the
 // surf's waves, kept off the bottom: a trough can't sink through it (which would show the floor
 // dry in the swash), nor a crest heap up over the beach (water a few centimetres deep over the
 // sand). Every pass that draws the water works it out the same way.
-float3 oceanWater(constant OceanParams &o, texture2d_array<float> maps, OceanPoint p, float4 setting, float2 shoreward,
-                  float time) {
+float3 oceanWater(constant OceanParams &o, texture2d_array<float> maps, OceanPoint p, float4 setting, float4 crests,
+                  float4 heading, float drift, float time) {
     float3 d = oceanDisplacement(o, maps, p);
     float2 slope;
-    d.z += surfWave(o, setting, shoreward, p.plane, p.depth, p.filter, time, slope);
+    d.z += surfWave(o, setting, crests, heading, drift, p.plane, p.depth, p.filter, time, slope);
     d.z = clamp(d.z, -0.9 * max(p.depth, 0.0), 0.5 * max(p.depth - 0.3, 0.0));
     return d;
 }
@@ -755,11 +827,12 @@ vertex OceanOut oceanVertex(uint vid [[vertex_id]], uint iid [[instance_id]],
                             constant OceanParams &o [[buffer(7)]],
                             texture2d_array<ushort, access::read> tiles [[texture(0)]],
                             texture2d_array<float> displacement [[texture(4)]],
-                            texture2d<float> shore [[texture(6)]]) {
+                            texture2d<float> shore [[texture(6)]],
+                            texture2d<float> waves [[texture(7)]]) {
     OceanPoint p = oceanPoint(u, o, t, nodes[iid], vid, pages, tiles);
     OceanOut out;
-    out.surf = surfSetting(u, o, t, pages, tiles, shore, p.plane, p.depth, out.shoreward);
-    float3 d = oceanWater(o, displacement, p, out.surf, out.shoreward, o.time.x);
+    out.surf = surfSetting(u, o, t, shore, waves, p.plane, p.depth, out.crests, out.heading, out.drift);
+    float3 d = oceanWater(o, displacement, p, out.surf, out.crests, out.heading, out.drift, o.time.x);
     out.world = float3(p.plane + d.xy, u.seaLevel + d.z);
     out.position = oceanClip(u, out.world);
     out.plane = p.plane;
@@ -783,13 +856,15 @@ vertex OceanMotionOut oceanMotionVertex(uint vid [[vertex_id]], uint iid [[insta
                                         texture2d_array<ushort, access::read> tiles [[texture(0)]],
                                         texture2d_array<float> displacement [[texture(4)]],
                                         texture2d_array<float> previous [[texture(5)]],
-                                        texture2d<float> shore [[texture(6)]]) {
+                                        texture2d<float> shore [[texture(6)]],
+                                        texture2d<float> waves [[texture(7)]]) {
     OceanPoint p = oceanPoint(u, o, t, nodes[iid], vid, pages, tiles);
-    float2 shoreward;
-    float4 setting = surfSetting(u, o, t, pages, tiles, shore, p.plane, p.depth, shoreward);
-    float3 d = oceanWater(o, displacement, p, setting, shoreward, o.time.x);
+    float4 crests, heading;
+    float drift;
+    float4 setting = surfSetting(u, o, t, shore, waves, p.plane, p.depth, crests, heading, drift);
+    float3 d = oceanWater(o, displacement, p, setting, crests, heading, drift, o.time.x);
     float3 world = float3(p.plane + d.xy, u.seaLevel + d.z);
-    float3 d0 = oceanWater(o, previous, p, setting, shoreward, o.time.y);
+    float3 d0 = oceanWater(o, previous, p, setting, crests, heading, drift, o.time.y);
     float3 before = float3(p.plane + d0.xy, u.seaLevel + d0.z);
     OceanMotionOut out;
     out.world = world;
@@ -926,10 +1001,11 @@ fragment float4 oceanFragment(OceanOut in [[stage_in]], constant Uniforms &u [[b
     }
     float2 s = slope / max(1.0 + stretch, 0.2);
     // The surf's waves (the vertices lift the water by them, oceanWater).
-    float2 shorewardDir = length(in.shoreward) > 1e-3 ? normalize(in.shoreward) : float2(0.0, 1.0);
-    if (in.surf.y > 0.0) {
+    float4 heading = float4(length(in.heading.xy) > 1e-3 ? normalize(in.heading.xy) : float2(0.0, 1.0),
+                            length(in.heading.zw) > 1e-3 ? normalize(in.heading.zw) : float2(0.0, 1.0));
+    if (in.surf.x + in.surf.y > 0.0) {
         float2 surfSlope;
-        surfWave(o, in.surf, shorewardDir, in.plane, in.depth, oceanFootprint(u, dist), o.time.x, surfSlope);
+        surfWave(o, in.surf, in.crests, heading, in.drift, in.plane, in.depth, oceanFootprint(u, dist), o.time.x, surfSlope);
         s += surfSlope;
     }
     float3 n = normalize(float3(-s, 1.0));
@@ -959,9 +1035,10 @@ fragment float4 oceanFragment(OceanOut in [[stage_in]], constant Uniforms &u [[b
     float3 color = oceanShade(u, o, environment, n, -n.xy / n.z, variance, v, floorLight, path, sunLight, in.crest);
     // Foam over the shallows (its own white: albedo ~0.8, lit by sun and sky, in the sun's and
     // the clouds' shadows), hiding the glint and the water beneath where it's dense.
-    if (in.surf.x > 0.02 || waterDepth < 0.12) {
+    if (in.surf.x + in.surf.y > 0.05 || waterDepth < 0.12) {
         float roller;
-        float foam = surfFoam(o, in.surf, shorewardDir, in.plane, waterDepth, oceanFootprint(u, dist), roller);
+        float foam = surfFoam(o, in.surf, in.crests, in.surf.y > in.surf.x ? heading.zw : heading.xy, in.plane, waterDepth,
+                              oceanFootprint(u, dist), in.drift, roller);
         if (foam > 0.0) {
             // The roller's churned water brighter (0.88) than the foam it leaves (0.75).
             float albedo = mix(0.75, 0.88, roller);

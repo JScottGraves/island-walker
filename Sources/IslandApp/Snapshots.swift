@@ -9,7 +9,8 @@ import IslandGen
 /// Headless mode: renders the app's own Metal view of the automatic viewpoints to PNGs,
 /// so what the app draws can be checked without a window or screen-recording permission.
 ///
-/// `--time 7,10.5,16` renders each viewpoint at those local solar times (app-NAME-HHMM.png)
+/// `--time 7,10.5,16` renders each viewpoint at those local solar times (app-NAME-HHMM.png;
+/// times between whole minutes add the seconds, app-NAME-HHMM+SS.Ss.png)
 /// on `--day N` (default mid-October); without it, at the fixed reference sun older
 /// renders used (app-NAME.png). `--shadows horizon` uses the baked horizon map instead
 /// of ray-traced shadows. `--size 2560x1440` sets the resolution (default 1280x720).
@@ -151,6 +152,9 @@ enum Snapshots {
                         renderer.clock = hour * 3600
                         let minutes = Int((hour * 60).rounded())
                         name += String(format: "-%02d%02d", minutes / 60, minutes % 60)
+                        // Frames seconds apart (a sequence of the surf) get the seconds too.
+                        let seconds = hour * 3600 - Double(minutes * 60)
+                        if abs(seconds) > 0.01 { name += String(format: "%+06.1fs", seconds) }
                     } else {
                         renderer.light = .reference
                     }

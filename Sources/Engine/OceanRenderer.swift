@@ -36,6 +36,7 @@ final class OceanRenderer {
         var sss: SIMD4<Float>
         var surf: SIMD4<Float>
         var surfFrom: SIMD4<Float>
+        var waves: SIMD4<Float>
     }
 
     let spectrum: OceanSpectrum
@@ -63,9 +64,13 @@ final class OceanRenderer {
     /// The sky the sea reflects, as an upper-hemisphere octahedral map with mips.
     let environment: MTLTexture
     /// Over the domain, from the overview, for the surf: signed distance to the shoreline (m,
-    /// positive at sea), how exposed the water is to the swell and to the wind sea, and the
-    /// water's depth smoothed.
+    /// positive at sea), two channels unused (the systems' exposure before `waves` refracted
+    /// them), and the water's depth smoothed.
     let shore: MTLTexture
+    /// Over the domain, for the surf, from the next finer level: the trade swell's and the north
+    /// swell's arrival (in their periods), local significant heights (m, two halfs in one float)
+    /// and the water's depth, refracted and shoaled (WaveRefraction.surfTexels).
+    let waves: MTLTexture
     var current = 0
     var previousValid = false
     var frameIndex = 0
@@ -88,6 +93,7 @@ final class OceanRenderer {
 
     init(device: MTLDevice, library: MTLLibrary, constants: MTLFunctionConstantValues, colorFormat: MTLPixelFormat,
          depthFormat: MTLPixelFormat, rayTraced: Bool, motion: Bool, seaLevel: Float, domain: Double, overview: Grid,
+         bathymetry: Grid? = nil,
          windTowards: Double,
          queue: MTLCommandQueue) throws {
         self.seaLevel = seaLevel
@@ -99,11 +105,6 @@ final class OceanRenderer {
         self.spectrum = spectrum
         // Smoothed over ~150 m, so the surf's fronts (which follow it) curve without corners.
         let distance = ShoreDistance.smoothed(ShoreDistance.signed(height: overview, seaLevel: seaLevel), passes: 3)
-        let swellTowards = spectrum.swell.direction
-        let swellExposure = ShoreDistance.exposure(height: overview, seaLevel: seaLevel,
-                                                   from: SIMD2(-cos(swellTowards), -sin(swellTowards)))
-        let seaExposure = ShoreDistance.exposure(height: overview, seaLevel: seaLevel,
-                                                 from: SIMD2(-cos(windTowards), -sin(windTowards)))
         // Water depth smoothed over ~150 m, for where waves start to break (a line along the reef
         // or bar, not the floor's contours).
         var depth = overview
@@ -112,8 +113,6 @@ final class OceanRenderer {
         var texels = [Float](repeating: 0, count: distance.values.count * 4)
         for k in 0..<distance.values.count {
             texels[4 * k] = distance.values[k]
-            texels[4 * k + 1] = swellExposure.values[k]
-            texels[4 * k + 2] = seaExposure.values[k]
             texels[4 * k + 3] = depth.values[k]
         }
         let shoreDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba32Float, width: distance.width,
@@ -126,6 +125,37 @@ final class OceanRenderer {
                                  withBytes: raw.baseAddress!, bytesPerRow: distance.width * 16)
         }
         shore = shoreTexture
+        // Refraction and shoaling of the trade swell (with the wind sea riding on it) and the
+        // north swell over the bathymetry (WaveRefraction): their crests' arrival and heights.
+        let bakeStart = Date()
+        let tradeHeight = (pow(spectrum.windSea.measuredSignificantHeight, 2)
+                           + pow(spectrum.tradeSwell.measuredSignificantHeight, 2)).squareRoot()
+        let tradePeriod = 2 * Double.pi / spectrum.tradeSwell.peakOmega, swellPeriod = 2 * Double.pi / spectrum.swell.peakOmega
+        let floor = bathymetry ?? overview
+        let waveTexels = WaveRefraction.surfTexels(
+            height: floor, seaLevel: seaLevel,
+            systems: (.init(period: tradePeriod, towards: spectrum.tradeSwell.direction, height: tradeHeight),
+                      .init(period: swellPeriod, towards: spectrum.swell.direction,
+                            height: spectrum.swell.measuredSignificantHeight)))
+        print(String(format: "surf refraction: %.2f s for %d² cells", Date().timeIntervalSince(bakeStart), floor.width))
+        if let dir = ProcessInfo.processInfo.environment["ISLAND_WAVE_DUMP"] {
+            // Raw float32 fields for the debug images: the heights, then the wave texels.
+            let url = URL(fileURLWithPath: dir)
+            try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+            try? floor.values.withUnsafeBytes { Data($0) }.write(to: url.appendingPathComponent("height.f32"))
+            try? waveTexels.withUnsafeBytes { Data($0) }.write(to: url.appendingPathComponent("waves.f32"))
+            try? distance.values.withUnsafeBytes { Data($0) }.write(to: url.appendingPathComponent("shore.f32"))
+        }
+        let wavesDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba32Float, width: floor.width,
+                                                                 height: floor.height, mipmapped: false)
+        wavesDesc.usage = [.shaderRead]
+        wavesDesc.storageMode = .shared
+        guard let wavesTexture = device.makeTexture(descriptor: wavesDesc) else { throw RendererError.setup("surf waves") }
+        waveTexels.withUnsafeBytes { raw in
+            wavesTexture.replace(region: MTLRegionMake2D(0, 0, floor.width, floor.height), mipmapLevel: 0,
+                                 withBytes: raw.baseAddress!, bytesPerRow: floor.width * 16)
+        }
+        waves = wavesTexture
         tree = OceanQuadtree(quads: OceanRenderer.nodeQuads, cellMetres: 0.5, centre: (domain / 2, domain / 2),
                              reach: domain / 2 + 160_000, rangeFactor: 2)
         func kernel(_ name: String) throws -> MTLComputePipelineState {
@@ -245,14 +275,15 @@ final class OceanRenderer {
             absorption: SIMD4(0.45, 0.064, 0.017, 0),
             scattering: SIMD4(0.0008, 0.0019, 0.0045, 0.02),
             sss: SIMD4(0.05, 0.35, 0.3, 0.06),
-            // The trade swell comes in with the wind sea (the same exposure).
+            // x, y and z unused by the surf since it is refracted (`waves` instead).
             surf: SIMD4(Float((pow(spectrum.windSea.measuredSignificantHeight, 2)
                                + pow(spectrum.tradeSwell.measuredSignificantHeight, 2)).squareRoot()),
                         Float(spectrum.swell.measuredSignificantHeight),
                         Float(2 * Double.pi / spectrum.swell.peakOmega), Float(tuning["shallow"] ?? 0.6)),
-            // Waves come from the opposite of where they travel.
+            // Waves come from the opposite of where they travel (unused since the surf is refracted).
             surfFrom: SIMD4(Float(-cos(spectrum.swell.direction)), Float(-sin(spectrum.swell.direction)),
-                            Float(-cos(windTowards)), Float(-sin(windTowards))))
+                            Float(-cos(windTowards)), Float(-sin(windTowards))),
+            waves: SIMD4(Float(tradePeriod), Float(swellPeriod), Float(WaveRefraction.breakerIndex), 7))
     }
 
     /// Picks this frame's sea nodes and runs the waves forward to `time` (seconds), then
@@ -429,6 +460,7 @@ final class OceanRenderer {
         enc.setVertexTexture(displacement[current], index: 4)
         // The surf's waves lift the water near the shore, in every pass that draws it.
         enc.setVertexTexture(shore, index: 6)
+        enc.setVertexTexture(waves, index: 7)
     }
 
     private func drawNodes(_ enc: MTLRenderCommandEncoder) {
@@ -480,6 +512,7 @@ final class OceanRenderer {
         enc.setFragmentTexture(environment, index: 8)
         // The terrain's swash (swashSand) reads the shore too.
         enc.setFragmentTexture(shore, index: 9)
+        enc.setFragmentTexture(waves, index: 10)
     }
 }
 #endif
