@@ -25,18 +25,19 @@ final class OceanTests: XCTestCase {
         let hs = 4 * variance(sea).squareRoot()
         XCTAssertGreaterThan(hs, 0.8)
         XCTAssertLessThan(hs, 1.8)
-        // The trade swell: 1.5 m at 8 s, from 22.5° north of the wind.
-        XCTAssertEqual(4 * variance(ocean.tradeSwell).squareRoot(), 1.5, accuracy: 0.02)
+        // The trade swell: 2 m at 8 s, from 22.5° north of the wind.
+        XCTAssertEqual(4 * variance(ocean.tradeSwell).squareRoot(), 2, accuracy: 0.03)
         XCTAssertEqual(2 * Double.pi / ocean.tradeSwell.peakOmega, 8, accuracy: 0.01)
-        // All together a moderate trade-wind day: 2–2.6 m.
+        // All together a fresh trade-wind day: 2.4–3 m.
         let total = 4 * ocean.systems.map(variance).reduce(0, +).squareRoot()
-        XCTAssertGreaterThan(total, 2)
-        XCTAssertLessThan(total, 2.6)
+        XCTAssertGreaterThan(total, 2.4)
+        XCTAssertLessThan(total, 3)
     }
 
     func testSwellHasItsSignificantHeight() {
         let hs = 4 * variance(ocean.swell).squareRoot()
         XCTAssertEqual(hs, ocean.swell.significantHeight, accuracy: 0.01 * ocean.swell.significantHeight)
+        XCTAssertEqual(hs, 1.5, accuracy: 0.03)
         XCTAssertEqual(2 * Double.pi / ocean.swell.peakOmega, 13, accuracy: 0.01)
     }
 
@@ -122,9 +123,9 @@ final class OceanTests: XCTestCase {
     func testShallowWaterKeepsItsWaves() {
         // Deep water: untouched. Over a reef a few metres deep the long waves keep a local
         // significant height of about half the depth (depth-limited), not the TMA's fraction.
-        XCTAssertEqual(OceanSpectrum.shallowFactor(significantHeight: 2.3, depth: 100), 1)
-        XCTAssertEqual(OceanSpectrum.shallowFactor(significantHeight: 2.3, depth: 4.6), 1, accuracy: 1e-9)
-        XCTAssertEqual(2.3 * OceanSpectrum.shallowFactor(significantHeight: 2.3, depth: 2), 1, accuracy: 1e-9)
+        XCTAssertEqual(OceanSpectrum.shallowFactor(significantHeight: 2.3, depth: 100, ratio: 0.5), 1)
+        XCTAssertEqual(OceanSpectrum.shallowFactor(significantHeight: 2.3, depth: 4.6, ratio: 0.5), 1, accuracy: 1e-9)
+        XCTAssertEqual(2.3 * OceanSpectrum.shallowFactor(significantHeight: 2.3, depth: 2, ratio: 0.5), 1, accuracy: 1e-9)
         XCTAssertEqual(OceanSpectrum.shallowFactor(significantHeight: 2.3, depth: 0), 0)
         XCTAssertGreaterThan(OceanSpectrum.shallowFactor(significantHeight: 2.3, depth: 3),
                              OceanSpectrum.depthAttenuation(k: 0.08, depth: 3))
@@ -202,10 +203,10 @@ final class ShoreTests: XCTestCase {
 
     func testSystemsKnowTheirHeights() {
         let o = OceanSpectrum()
-        XCTAssertEqual(o.swell.measuredSignificantHeight, 1.2, accuracy: 0.02)
+        XCTAssertEqual(o.swell.measuredSignificantHeight, 1.5, accuracy: 0.03)
         XCTAssertGreaterThan(o.windSea.measuredSignificantHeight, 0.8)
         XCTAssertLessThan(o.windSea.measuredSignificantHeight, 1.8)
-        XCTAssertEqual(o.tradeSwell.measuredSignificantHeight, 1.5, accuracy: 0.03)
+        XCTAssertEqual(o.tradeSwell.measuredSignificantHeight, 2, accuracy: 0.04)
     }
 }
 

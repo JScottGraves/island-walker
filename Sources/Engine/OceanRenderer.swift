@@ -94,8 +94,8 @@ final class OceanRenderer {
         occlusion = TerrainOcclusion(height: overview)
         let tuning = OceanRenderer.tuning()
         let spectrum = OceanSpectrum(fetch: tuning["fetch"] ?? 40_000, windTowards: windTowards,
-                                     tradeSwellHeight: tuning["trade"] ?? 1.5, tradeSwellPeriod: tuning["tradeT"] ?? 8,
-                                     swellHeight: tuning["swell"] ?? 1.2, choppiness: tuning["chop"] ?? 1.0)
+                                     tradeSwellHeight: tuning["trade"] ?? 2, tradeSwellPeriod: tuning["tradeT"] ?? 8,
+                                     swellHeight: tuning["swell"] ?? 1.5, choppiness: tuning["chop"] ?? 1.2)
         self.spectrum = spectrum
         // Smoothed over ~150 m, so the surf's fronts (which follow it) curve without corners.
         let distance = ShoreDistance.smoothed(ShoreDistance.signed(height: overview, seaLevel: seaLevel), passes: 3)
@@ -239,7 +239,7 @@ final class OceanRenderer {
             origin: (.zero, .zero),
             morphStart: floats(tree.morphStart), morphEnd: floats(tree.morphEnd),
             grid: SIMD4(Float(tree.cellMetres), Float(tree.lodCount), Float(hs), Float(spectrum.choppiness)),
-            time: SIMD4(0, 0, Float(tuning["surfwave"] ?? 1), 0),
+            time: SIMD4(0, 0, Float(tuning["surfwave"] ?? 1.5), 0),
             // Clear oceanic water (Jerlov I): pure-water absorption (Pope & Fry 1997) with a
             // little more in the blue; Rayleigh-like molecular scattering; few particles.
             absorption: SIMD4(0.45, 0.064, 0.017, 0),
@@ -249,7 +249,7 @@ final class OceanRenderer {
             surf: SIMD4(Float((pow(spectrum.windSea.measuredSignificantHeight, 2)
                                + pow(spectrum.tradeSwell.measuredSignificantHeight, 2)).squareRoot()),
                         Float(spectrum.swell.measuredSignificantHeight),
-                        Float(2 * Double.pi / spectrum.swell.peakOmega), Float(tuning["shallow"] ?? 0.5)),
+                        Float(2 * Double.pi / spectrum.swell.peakOmega), Float(tuning["shallow"] ?? 0.6)),
             // Waves come from the opposite of where they travel.
             surfFrom: SIMD4(Float(-cos(spectrum.swell.direction)), Float(-sin(spectrum.swell.direction)),
                             Float(-cos(windTowards)), Float(-sin(windTowards))))
@@ -402,8 +402,8 @@ final class OceanRenderer {
         }
     }
 
-    /// Sea-state overrides for tuning, from the environment: ISLAND_OCEAN="trade=1.5,tradeT=8,
-    /// swell=1.2,fetch=40000,chop=1.0,shallow=0.5,surfwave=1" (trade swell height and period,
+    /// Sea-state overrides for tuning, from the environment: ISLAND_OCEAN="trade=2,tradeT=8,
+    /// swell=1.5,fetch=40000,chop=1.2,shallow=0.6,surfwave=1.5" (trade swell height and period,
     /// north swell height, local wind fetch (m), choppiness, the depth-limited Hs/h, and the
     /// surf waves' height scale). Unset keys keep the defaults.
     static func tuning() -> [String: Double] {
@@ -466,6 +466,7 @@ final class OceanRenderer {
         bind(enc, uniforms: &uniforms)
         enc.setFragmentBytes(&uniforms, length: MemoryLayout<TerrainRenderer.Uniforms>.stride, index: 1)
         enc.setFragmentTextures([derivatives, moments, environment, tiles], range: 6..<10)
+        enc.setFragmentTexture(displacement[current], index: 11)
         enc.setFragmentBuffer(usageBuffers[frameIndex % usageBuffers.count], offset: 0, index: 8)
         var t = terrainParams
         enc.setFragmentBytes(&t, length: MemoryLayout<TerrainRenderer.TerrainParams>.stride, index: 3)

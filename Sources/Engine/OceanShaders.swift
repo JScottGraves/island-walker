@@ -150,13 +150,20 @@ float3 oceanShade(constant Uniforms &u, constant OceanParams &o, texture2d<float
     float3 sky = skyIrradiance(u, float3(0.0, 0.0, 1.0));
     float3 inscatter = (bw * rayleigh + bp * hg) * (u.sunRadiance * (sunIn * sunLight))
                      + (bw + 0.02 * bp) * sky * (2.0 / 12.566371);
-    float3 below = floorLight + inscatter * column;
+    // Crests hold thin, sunlit water that scatters more towards the eye; troughs sit in the
+    // waves' shade and look deeper: the light from within the water rises and falls with the
+    // height (neutral at the mean sea), so the swell's shapes read from a distance.
+    float height = clamp(1.6 * crest / max(o.grid.z, 0.1), -1.0, 1.0);
+    float3 below = floorLight + inscatter * column * (1.0 + 0.35 * height);
     // Crests lit from behind: thin water the sun shines through, green-blue.
     float2 toSun = length(l.xy) > 1e-3 ? normalize(l.xy) : float2(1.0, 0.0);
     float2 look = length(v.xy) > 1e-3 ? -normalize(v.xy) : float2(0.0, 1.0);
     float back = pow(saturate(dot(look, toSun)), 4.0) * saturate(1.2 - l.z);
     float lift = saturate(crest / max(o.grid.z, 0.1) + 0.2);
     below += u.sunRadiance * o.sss.rgb * (o.sss.w * back * lift * sunLight * pow(1.0 - nv, 2.0));
+    // And a glow of the crests from any side, where the sun is up.
+    float glow = saturate(height) * saturate(height);
+    below += u.sunRadiance * o.sss.rgb * (0.35 * o.sss.w * glow * sunLight * saturate(l.z + 0.2));
     return color + (1.0 - fresnel) * below;
 }
 
@@ -878,6 +885,7 @@ fragment float4 oceanFragment(OceanOut in [[stage_in]], constant Uniforms &u [[b
                               texture2d_array<float> derivatives [[texture(6)]],
                               texture2d_array<float> moments [[texture(7)]],
                               texture2d<float> environment [[texture(8)]],
+                              texture2d_array<float> displacement [[texture(11)]],
                               constant TerrainParams &t [[buffer(3)]],
                               const device int *pages [[buffer(5)]],
                               texture2d_array<ushort, access::read> tiles [[texture(9)]],
@@ -888,6 +896,7 @@ fragment float4 oceanFragment(OceanOut in [[stage_in]], constant Uniforms &u [[b
     float3 v = toEye / max(dist, 1e-3);
     float footprint = oceanFootprint(u, dist) / max(abs(v.z), 0.05);
     float2 slope = 0.0, stretch = 0.0;
+    float shear = 0.0;      // λ∂Dx/∂y, for the Jacobian (whitecaps)
     float3 variance = oceanRemainder(o);
     uint mask = 0u;
     for (int c = 0; c < 4; c++) {
@@ -906,6 +915,7 @@ fragment float4 oceanFragment(OceanOut in [[stage_in]], constant Uniforms &u [[b
         float4 mo = moments.sample(aniso, uv, uint(c)) * (atten * atten);
         slope += w * dv.xy;
         stretch += w * dv.zw;
+        if (c < 3) shear += w * atten * displacement.sample(aniso, uv, uint(c)).w;
         float3 filtered = max(float3(mo.x - dv.x * dv.x, mo.y - dv.y * dv.y, 0.0), 0.0);
         filtered.z = mo.z - dv.x * dv.y;
         variance += w * w * filtered + (1.0 - w * w) * whole;
@@ -958,6 +968,17 @@ fragment float4 oceanFragment(OceanOut in [[stage_in]], constant Uniforms &u [[b
             float3 white = albedo * (u.sunRadiance * (saturate(l.z) * sunLight) + skyIrradiance(u, float3(0.0, 0.0, 1.0)));
             color = mix(color, white, foam);
         }
+    }
+    // Whitecaps (research/ocean.md, step O3): where the choppy displacement folds the surface
+    // (its Jacobian drops towards zero) a crest is breaking. Patchy, in world axes; out past
+    // a few metres of water (the surf has the shallows).
+    float jacobian = (1.0 + stretch.x) * (1.0 + stretch.y) - shear * shear;
+    float cap = smoothstep(0.55, 0.1, jacobian) * smoothstep(3.0, 8.0, in.depth);
+    if (cap > 0.0) {
+        float breakup = groundNoise(in.plane / 3.1 + 7.3);
+        cap *= smoothstep(0.25, 0.6, breakup + 0.4 * cap);
+        float3 white = 0.8 * (u.sunRadiance * (saturate(l.z) * sunLight) + skyIrradiance(u, float3(0.0, 0.0, 1.0)));
+        color = mix(color, white, 0.9 * cap);
     }
     return finishSurface(u, skyView, clouds, cloudDistance, color, in.world, in.position.xy);
 }

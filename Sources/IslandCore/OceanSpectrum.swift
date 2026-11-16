@@ -91,7 +91,7 @@ public struct OceanSpectrum: Sendable {
     public var windSea: System
     /// Trade-wind swell: the sea the trades raise over the thousands of kilometres upwind of
     /// the islands, arriving from the ENE as long (~8 s) rolling waves. Hawaiian buoys on a trade
-    /// day read ~1.5 m at 7–9 s; the local fetch alone (`windSea`) only makes short chop.
+    /// day read ~1.5–2.5 m at 7–9 s; the local fetch alone (`windSea`) only makes short chop.
     public var tradeSwell: System
     public var swell: System
     /// Every system, for sums over the spectrum.
@@ -103,13 +103,13 @@ public struct OceanSpectrum: Sendable {
 
     /// Defaults: ~9 m/s trades blowing towards `windTowards` (the renderer's and the
     /// climate's NE trade: towards 5π/4) over 40 km of local fetch (Hs ≈ 1.2 m chop, ~4.4 s); the
-    /// trade swell, 1.5 m at 8 s from 22.5° north of the wind (ENE); and a 1.2 m, 13 s swell from
-    /// the NNW. Together Hs ≈ 2.3 m: a moderate trade-wind day on the windward side.
+    /// trade swell, 2 m at 8 s from 22.5° north of the wind (ENE); and a 1.5 m, 13 s swell from
+    /// the NNW. Together Hs ≈ 2.8 m: a fresh trade-wind day on the windward side.
     public init(windSpeed: Double = 9, fetch: Double = 40_000, windTowards: Double = 5 * Double.pi / 4,
-                tradeSwellHeight: Double = 1.5, tradeSwellPeriod: Double = 8,
-                swellHeight: Double = 1.2, swellPeriod: Double = 13,
+                tradeSwellHeight: Double = 2, tradeSwellPeriod: Double = 8,
+                swellHeight: Double = 1.5, swellPeriod: Double = 13,
                 swellTowards: Double = -Double.pi / 2 + 22.5 * Double.pi / 180,
-                patchSizes: [Double] = [1103, 251, 57.3, 13.1], choppiness: Double = 1.0) {
+                patchSizes: [Double] = [1103, 251, 57.3, 13.1], choppiness: Double = 1.2) {
         windSea = .windSea(speed: windSpeed, fetch: fetch, towards: windTowards)
         tradeSwell = .swell(height: tradeSwellHeight, period: tradeSwellPeriod,
                             towards: windTowards - 22.5 * Double.pi / 180, spread: 10)
@@ -143,7 +143,7 @@ public struct OceanSpectrum: Sendable {
     /// a local significant height of `ratio` × depth (surf-zone saturation, Hs/h ≈ 0.4–0.5).
     /// Shoaling makes waves steeper, not flatter; the TMA spectrum's φ applied to deep-water
     /// waves (which keep their deep-water length here) flattened every shelf and reef.
-    public static func shallowFactor(significantHeight hs: Double, depth: Double, ratio: Double = 0.5) -> Double {
+    public static func shallowFactor(significantHeight hs: Double, depth: Double, ratio: Double = 0.6) -> Double {
         guard hs > 0 else { return 1 }
         return Swift.min(Swift.max(ratio * depth / hs, 0), 1)
     }
@@ -279,7 +279,7 @@ public struct OceanQuadtree: Sendable {
     public let origin: (x: Double, y: Double)
     public let side: Double
     /// Highest crest above (and deepest trough below) the sea level, for node bounds.
-    public var amplitude: Double = 4
+    public var amplitude: Double = 5
 
     public init(quads: Int = 32, cellMetres: Double, centre: (x: Double, y: Double), reach: Double, rangeFactor: Double = 2.5) {
         self.quads = quads
