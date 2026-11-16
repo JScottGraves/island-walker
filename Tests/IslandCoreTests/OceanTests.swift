@@ -17,14 +17,21 @@ final class OceanTests: XCTestCase {
     }
 
     func testTradeWindSeaIsModerate() {
-        // ~9 m/s trades over a long fetch: a sea of 1.2–2.4 m with a 5.5–8.5 s peak.
+        // ~9 m/s trades over the local fetch: chop of 0.8–1.8 m with a 3.5–6 s peak.
         let sea = ocean.windSea
         let tp = 2 * Double.pi / sea.peakOmega
-        XCTAssertGreaterThan(tp, 5.5)
-        XCTAssertLessThan(tp, 8.5)
+        XCTAssertGreaterThan(tp, 3.5)
+        XCTAssertLessThan(tp, 6)
         let hs = 4 * variance(sea).squareRoot()
-        XCTAssertGreaterThan(hs, 1.2)
-        XCTAssertLessThan(hs, 2.4)
+        XCTAssertGreaterThan(hs, 0.8)
+        XCTAssertLessThan(hs, 1.8)
+        // The trade swell: 1.5 m at 8 s, from 22.5° north of the wind.
+        XCTAssertEqual(4 * variance(ocean.tradeSwell).squareRoot(), 1.5, accuracy: 0.02)
+        XCTAssertEqual(2 * Double.pi / ocean.tradeSwell.peakOmega, 8, accuracy: 0.01)
+        // All together a moderate trade-wind day: 2–2.6 m.
+        let total = 4 * ocean.systems.map(variance).reduce(0, +).squareRoot()
+        XCTAssertGreaterThan(total, 2)
+        XCTAssertLessThan(total, 2.6)
     }
 
     func testSwellHasItsSignificantHeight() {
@@ -66,7 +73,7 @@ final class OceanTests: XCTestCase {
             let modes = ocean.modes(cascade: c, seed: 7, size: 64)
             total += modes.expectedVariance
         }
-        let expected = variance(ocean.windSea) + variance(ocean.swell)
+        let expected = ocean.systems.map(variance).reduce(0, +)
         XCTAssertEqual(total, expected, accuracy: 0.1 * expected)
     }
 
@@ -110,6 +117,17 @@ final class OceanTests: XCTestCase {
         // Long waves shrink over a 2 m reef flat; short chop barely does.
         XCTAssertLessThan(OceanSpectrum.depthAttenuation(k: 0.08, depth: 2), 0.5)
         XCTAssertGreaterThan(OceanSpectrum.depthAttenuation(k: 5, depth: 2), 0.99)
+    }
+
+    func testShallowWaterKeepsItsWaves() {
+        // Deep water: untouched. Over a reef a few metres deep the long waves keep a local
+        // significant height of about half the depth (depth-limited), not the TMA's fraction.
+        XCTAssertEqual(OceanSpectrum.shallowFactor(significantHeight: 2.3, depth: 100), 1)
+        XCTAssertEqual(OceanSpectrum.shallowFactor(significantHeight: 2.3, depth: 4.6), 1, accuracy: 1e-9)
+        XCTAssertEqual(2.3 * OceanSpectrum.shallowFactor(significantHeight: 2.3, depth: 2), 1, accuracy: 1e-9)
+        XCTAssertEqual(OceanSpectrum.shallowFactor(significantHeight: 2.3, depth: 0), 0)
+        XCTAssertGreaterThan(OceanSpectrum.shallowFactor(significantHeight: 2.3, depth: 3),
+                             OceanSpectrum.depthAttenuation(k: 0.08, depth: 3))
     }
 
     func testFlatWaterFresnel() {
@@ -185,8 +203,9 @@ final class ShoreTests: XCTestCase {
     func testSystemsKnowTheirHeights() {
         let o = OceanSpectrum()
         XCTAssertEqual(o.swell.measuredSignificantHeight, 1.2, accuracy: 0.02)
-        XCTAssertGreaterThan(o.windSea.measuredSignificantHeight, 1.2)
-        XCTAssertLessThan(o.windSea.measuredSignificantHeight, 2.4)
+        XCTAssertGreaterThan(o.windSea.measuredSignificantHeight, 0.8)
+        XCTAssertLessThan(o.windSea.measuredSignificantHeight, 1.8)
+        XCTAssertEqual(o.tradeSwell.measuredSignificantHeight, 1.5, accuracy: 0.03)
     }
 }
 

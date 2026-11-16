@@ -92,7 +92,10 @@ final class OceanRenderer {
          queue: MTLCommandQueue) throws {
         self.seaLevel = seaLevel
         occlusion = TerrainOcclusion(height: overview)
-        let spectrum = OceanSpectrum(windTowards: windTowards)
+        let tuning = OceanRenderer.tuning()
+        let spectrum = OceanSpectrum(fetch: tuning["fetch"] ?? 40_000, windTowards: windTowards,
+                                     tradeSwellHeight: tuning["trade"] ?? 1.5, tradeSwellPeriod: tuning["tradeT"] ?? 8,
+                                     swellHeight: tuning["swell"] ?? 1.2, choppiness: tuning["chop"] ?? 1.0)
         self.spectrum = spectrum
         // Smoothed over ~150 m, so the surf's fronts (which follow it) curve without corners.
         let distance = ShoreDistance.smoothed(ShoreDistance.signed(height: overview, seaLevel: seaLevel), passes: 3)
@@ -236,14 +239,17 @@ final class OceanRenderer {
             origin: (.zero, .zero),
             morphStart: floats(tree.morphStart), morphEnd: floats(tree.morphEnd),
             grid: SIMD4(Float(tree.cellMetres), Float(tree.lodCount), Float(hs), Float(spectrum.choppiness)),
-            time: .zero,
+            time: SIMD4(0, 0, Float(tuning["surfwave"] ?? 1), 0),
             // Clear oceanic water (Jerlov I): pure-water absorption (Pope & Fry 1997) with a
             // little more in the blue; Rayleigh-like molecular scattering; few particles.
             absorption: SIMD4(0.45, 0.064, 0.017, 0),
             scattering: SIMD4(0.0008, 0.0019, 0.0045, 0.02),
             sss: SIMD4(0.05, 0.35, 0.3, 0.06),
-            surf: SIMD4(Float(spectrum.windSea.measuredSignificantHeight), Float(spectrum.swell.measuredSignificantHeight),
-                        Float(2 * Double.pi / spectrum.swell.peakOmega), 0),
+            // The trade swell comes in with the wind sea (the same exposure).
+            surf: SIMD4(Float((pow(spectrum.windSea.measuredSignificantHeight, 2)
+                               + pow(spectrum.tradeSwell.measuredSignificantHeight, 2)).squareRoot()),
+                        Float(spectrum.swell.measuredSignificantHeight),
+                        Float(2 * Double.pi / spectrum.swell.peakOmega), Float(tuning["shallow"] ?? 0.5)),
             // Waves come from the opposite of where they travel.
             surfFrom: SIMD4(Float(-cos(spectrum.swell.direction)), Float(-sin(spectrum.swell.direction)),
                             Float(-cos(windTowards)), Float(-sin(windTowards))))
@@ -306,7 +312,10 @@ final class OceanRenderer {
             origins += [Float((eye.x / size).rounded() * size), Float((eye.y / size).rounded() * size)]
         }
         params.origin = (SIMD4(origins[0], origins[1], origins[2], origins[3]), SIMD4(origins[4], origins[5], origins[6], origins[7]))
-        params.time.x = Float(time.truncatingRemainder(dividingBy: OceanSpectrum.repeatPeriod))
+        let now = Float(time.truncatingRemainder(dividingBy: OceanSpectrum.repeatPeriod))
+        // Last frame's time, for the surf's waves' motion (none after a reset).
+        params.time.y = previousValid ? params.time.x : now
+        params.time.x = now
 
         let n = OceanSpectrum.resolution
         // Only the cascades some pixel used two frames ago (the frame whose usage has surely
@@ -393,6 +402,20 @@ final class OceanRenderer {
         }
     }
 
+    /// Sea-state overrides for tuning, from the environment: ISLAND_OCEAN="trade=1.5,tradeT=8,
+    /// swell=1.2,fetch=40000,chop=1.0,shallow=0.5,surfwave=1" (trade swell height and period,
+    /// north swell height, local wind fetch (m), choppiness, the depth-limited Hs/h, and the
+    /// surf waves' height scale). Unset keys keep the defaults.
+    static func tuning() -> [String: Double] {
+        var out: [String: Double] = [:]
+        for pair in (ProcessInfo.processInfo.environment["ISLAND_OCEAN"] ?? "").split(separator: ",") {
+            let kv = pair.split(separator: "=")
+            if kv.count == 2, let v = Double(kv[1]) { out[String(kv[0])] = v }
+        }
+        if !out.isEmpty { print("ocean tuning: \(out)") }
+        return out
+    }
+
     /// Forgets last frame's waves (a new view: no motion to reproject).
     func resetHistory() {
         previousValid = false
@@ -404,6 +427,8 @@ final class OceanRenderer {
         enc.setVertexBytes(&params, length: MemoryLayout<Params>.stride, index: 7)
         enc.setFragmentBytes(&params, length: MemoryLayout<Params>.stride, index: 7)
         enc.setVertexTexture(displacement[current], index: 4)
+        // The surf's waves lift the water near the shore, in every pass that draws it.
+        enc.setVertexTexture(shore, index: 6)
     }
 
     private func drawNodes(_ enc: MTLRenderCommandEncoder) {
@@ -441,7 +466,6 @@ final class OceanRenderer {
         bind(enc, uniforms: &uniforms)
         enc.setFragmentBytes(&uniforms, length: MemoryLayout<TerrainRenderer.Uniforms>.stride, index: 1)
         enc.setFragmentTextures([derivatives, moments, environment, tiles], range: 6..<10)
-        enc.setVertexTexture(shore, index: 6)
         enc.setFragmentBuffer(usageBuffers[frameIndex % usageBuffers.count], offset: 0, index: 8)
         var t = terrainParams
         enc.setFragmentBytes(&t, length: MemoryLayout<TerrainRenderer.TerrainParams>.stride, index: 3)

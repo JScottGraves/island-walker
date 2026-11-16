@@ -18,11 +18,12 @@ struct OceanParams {
     float4 morphStart[4];   // per LOD of the sea's quadtree
     float4 morphEnd[4];
     float4 grid;            // finest cell (m), LOD count, significant wave height (m), choppiness
-    float4 time;            // seconds into the sea's loop, unused ×3
+    float4 time;            // seconds into the sea's loop, last frame's, surf waves' height scale, unused
     float4 absorption;      // water absorption per metre (rgb)
     float4 scattering;      // molecular scattering per metre (rgb); w: particle scattering per metre
     float4 sss;             // subsurface tint (rgb), strength
-    float4 surf;            // significant height of the wind sea and of the swell (m), swell period (s), unused
+    float4 surf;            // significant height of the wind sea (with the trade swell) and of the swell (m),
+                            // swell period (s), depth-limited Hs/h for the long waves
     float4 surfFrom;        // where the swell comes from (xy) and the wind sea (zw), unit vectors
 };
 
@@ -71,6 +72,14 @@ float oceanDepthFactor(float k, float depth) {
     float w = sqrt(max(k * depth, 0.0));
     float phi = w <= 1.0 ? 0.5 * w * w : (w < 2.0 ? 1.0 - 0.5 * (2.0 - w) * (2.0 - w) : 1.0);
     return sqrt(phi);
+}
+
+// Amplitude factor of cascade c over `depth` metres (OceanSpectrum.shallowFactor for the long
+// waves): the long-wave cascades keep their height until the depth limits the sea's significant
+// height to surf.w × depth; the short ones (≤ ~6 m) by the TMA factor, which barely touches them.
+float oceanWaveFactor(constant OceanParams &o, int c, float depth) {
+    if (c >= 2) return oceanDepthFactor(o.meanK[c], depth);
+    return saturate(o.surf.w * max(depth, 0.0) / max(o.grid.z, 0.1));
 }
 
 // Unresolved (Cox–Munk) slope covariance turned into world axes: (xx, yy, xy).
@@ -552,11 +561,8 @@ float3 oceanDisplacement(constant OceanParams &o, texture2d_array<float> maps, O
         if (w <= 0.0) continue;
         float mip = log2(max(p.filter * float(kOceanN) * o.invPatch[c], 1.0));
         float4 v = maps.sample(s, oceanUV(o, c, p.plane), uint(c), level(mip));
-        d += v.xyz * (w * oceanDepthFactor(o.meanK[c], p.depth));
+        d += v.xyz * (w * oceanWaveFactor(o, c, p.depth));
     }
-    // A trough can't sink through the bottom (which would show the floor dry in the swash), nor
-    // a crest heap up over the beach (water a few centimetres deep over the sand).
-    d.z = clamp(d.z, -0.9 * max(p.depth, 0.0), 0.5 * max(p.depth - 0.3, 0.0));
     return d;
 }
 
@@ -675,6 +681,52 @@ float surfFoam(constant OceanParams &o, float4 setting, float2 shoreward, float2
     return mix(lacy, cover, smoothstep(0.08, 0.5, footprint));
 }
 
+// ---- Surf waves: the swell's crests shoaling in under the breakers ----
+// Each surf front (surfFoam) rides a crest: a wave about the local significant height high, with
+// a long gentle back seaward of the front and a steep face shoreward of it, coming in with the
+// foam on the same clock and in the same sections (taller where a section breaks), faded out
+// where `filter` (m) can't resolve it. Its height (m, about the mean sea) at xy at `time`, and
+// through `slope` its gradient. None deeper than ~6 m (the cascades carry the sea there) or in
+// pockets of sea inland of the shoreline.
+float surfWave(constant OceanParams &o, float4 setting, float2 shoreward, float2 xy, float depth, float filter,
+               float time, thread float2 &slope) {
+    slope = 0.0;
+    float local = setting.y;
+    if (local <= 0.0 || o.time.z <= 0.0) return 0.0;
+    float spacing = kSurfSpeed * o.surf.z;
+    float wave = time / o.surf.z + setting.z;
+    float index = floor(wave + 0.5);
+    float section = groundNoise(xy / 160.0 + index * 1.37);
+    // 0 at the front (the crest), growing seaward to 1 at the next front: the back seaward of
+    // the crest is the low u0, the face shoreward of it the u0 just under 1.
+    float u0 = fract(wave + 0.08 * section);
+    float back = exp(-u0 / 0.16), face = exp(-(1.0 - u0) / 0.05);
+    float f = max(back, face);
+    float df = back > face ? -back / 0.16 : face / 0.05;
+    float on = smoothstep(0.3, 0.45, section);
+    float h = o.time.z * 0.9 * local * mix(0.55, 1.0, on) * (0.5 + 0.5 * setting.x)
+            * (1.0 - smoothstep(4.0, 6.0, depth)) * saturate(setting.w / 0.35)
+            // Faded where the grid (or a pixel) is too coarse for the face (~3 m).
+            * (1.0 - smoothstep(0.08, 0.2, filter / spacing));
+    // u0 grows seaward (against `shoreward`) by 1/spacing per metre.
+    slope = h * df * (-shoreward / spacing);
+    // Less the profile's mean (∫f ≈ 0.16 + 0.05), so the sea keeps its level.
+    return h * (f - 0.21);
+}
+
+// The water's displacement at a sea grid point at `time`: the cascades' (from `maps`) and the
+// surf's waves, kept off the bottom: a trough can't sink through it (which would show the floor
+// dry in the swash), nor a crest heap up over the beach (water a few centimetres deep over the
+// sand). Every pass that draws the water works it out the same way.
+float3 oceanWater(constant OceanParams &o, texture2d_array<float> maps, OceanPoint p, float4 setting, float2 shoreward,
+                  float time) {
+    float3 d = oceanDisplacement(o, maps, p);
+    float2 slope;
+    d.z += surfWave(o, setting, shoreward, p.plane, p.depth, p.filter, time, slope);
+    d.z = clamp(d.z, -0.9 * max(p.depth, 0.0), 0.5 * max(p.depth - 0.3, 0.0));
+    return d;
+}
+
 // The floor's slope and convexity over ~20 m around xy (as terrainVertex's ridge): its
 // normal is normalize(-slope, 1); reef darkens where convexity is positive.
 float3 oceanFloorShape(constant TerrainParams &t, const device int *pages, texture2d_array<ushort, access::read> tiles,
@@ -698,9 +750,9 @@ vertex OceanOut oceanVertex(uint vid [[vertex_id]], uint iid [[instance_id]],
                             texture2d_array<float> displacement [[texture(4)]],
                             texture2d<float> shore [[texture(6)]]) {
     OceanPoint p = oceanPoint(u, o, t, nodes[iid], vid, pages, tiles);
-    float3 d = oceanDisplacement(o, displacement, p);
     OceanOut out;
     out.surf = surfSetting(u, o, t, pages, tiles, shore, p.plane, p.depth, out.shoreward);
+    float3 d = oceanWater(o, displacement, p, out.surf, out.shoreward, o.time.x);
     out.world = float3(p.plane + d.xy, u.seaLevel + d.z);
     out.position = oceanClip(u, out.world);
     out.plane = p.plane;
@@ -723,11 +775,14 @@ vertex OceanMotionOut oceanMotionVertex(uint vid [[vertex_id]], uint iid [[insta
                                         constant OceanParams &o [[buffer(7)]],
                                         texture2d_array<ushort, access::read> tiles [[texture(0)]],
                                         texture2d_array<float> displacement [[texture(4)]],
-                                        texture2d_array<float> previous [[texture(5)]]) {
+                                        texture2d_array<float> previous [[texture(5)]],
+                                        texture2d<float> shore [[texture(6)]]) {
     OceanPoint p = oceanPoint(u, o, t, nodes[iid], vid, pages, tiles);
-    float3 d = oceanDisplacement(o, displacement, p);
+    float2 shoreward;
+    float4 setting = surfSetting(u, o, t, pages, tiles, shore, p.plane, p.depth, shoreward);
+    float3 d = oceanWater(o, displacement, p, setting, shoreward, o.time.x);
     float3 world = float3(p.plane + d.xy, u.seaLevel + d.z);
-    float3 d0 = oceanDisplacement(o, previous, p);
+    float3 d0 = oceanWater(o, previous, p, setting, shoreward, o.time.y);
     float3 before = float3(p.plane + d0.xy, u.seaLevel + d0.z);
     OceanMotionOut out;
     out.world = world;
@@ -836,7 +891,7 @@ fragment float4 oceanFragment(OceanOut in [[stage_in]], constant Uniforms &u [[b
     float3 variance = oceanRemainder(o);
     uint mask = 0u;
     for (int c = 0; c < 4; c++) {
-        float atten = oceanDepthFactor(o.meanK[c], in.depth);
+        float atten = oceanWaveFactor(o, c, in.depth);
         float3 whole = float3(o.slopeXX[c], o.slopeYY[c], o.slopeXY[c]) * (atten * atten);
         // Past ~7 mips the map is its own mean: just variance.
         float mip = log2(max(footprint * float(kOceanN) * o.invPatch[c], 1.0));
@@ -860,6 +915,13 @@ fragment float4 oceanFragment(OceanOut in [[stage_in]], constant Uniforms &u [[b
         atomic_fetch_or_explicit(used, group, memory_order_relaxed);
     }
     float2 s = slope / max(1.0 + stretch, 0.2);
+    // The surf's waves (the vertices lift the water by them, oceanWater).
+    float2 shorewardDir = length(in.shoreward) > 1e-3 ? normalize(in.shoreward) : float2(0.0, 1.0);
+    if (in.surf.y > 0.0) {
+        float2 surfSlope;
+        surfWave(o, in.surf, shorewardDir, in.plane, in.depth, oceanFootprint(u, dist), o.time.x, surfSlope);
+        s += surfSlope;
+    }
     float3 n = normalize(float3(-s, 1.0));
     float3 l = normalize(u.sunDirection);
 
@@ -888,9 +950,8 @@ fragment float4 oceanFragment(OceanOut in [[stage_in]], constant Uniforms &u [[b
     // Foam over the shallows (its own white: albedo ~0.8, lit by sun and sky, in the sun's and
     // the clouds' shadows), hiding the glint and the water beneath where it's dense.
     if (in.surf.x > 0.02 || waterDepth < 0.12) {
-        float2 shoreward = length(in.shoreward) > 1e-3 ? normalize(in.shoreward) : float2(0.0, 1.0);
         float roller;
-        float foam = surfFoam(o, in.surf, shoreward, in.plane, waterDepth, oceanFootprint(u, dist), roller);
+        float foam = surfFoam(o, in.surf, shorewardDir, in.plane, waterDepth, oceanFootprint(u, dist), roller);
         if (foam > 0.0) {
             // The roller's churned water brighter (0.88) than the foam it leaves (0.75).
             float albedo = mix(0.75, 0.88, roller);
