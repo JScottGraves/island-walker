@@ -712,7 +712,8 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
                                 constant float2 &floraRange [[buffer(2)]],
                                 constant float4 &coverRange [[buffer(3)]],
                                 constant OceanParams &ocean [[buffer(7)]],
-                                texture2d<float> shore [[texture(9)]]) {
+                                texture2d<float> shore [[texture(9)]],
+                                texture2d<float> surfWaves [[texture(10)]]) {
     float3 n = normalize(in.normal);
     float slope = 1.0 - n.z;
     float h = in.world.z - u.seaLevel;
@@ -861,13 +862,27 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
         constexpr sampler bilinear(filter::linear, address::clamp_to_edge);
         float4 shoreTexel = shoreAt(shore, in.world.xy / u.cloudLayer.w);
         if (shoreTexel.r > -kSwashReach && shoreTexel.r < 40.0) {
-            float hs = surfHeight(ocean, shoreTexel);
+            // Up-beach along the smoothed shore field.
+            float e = 60.0 / u.cloudLayer.w;
+            float2 uv = in.world.xy / u.cloudLayer.w;
+            float2 grad = float2(shoreAt(shore, uv + float2(e, 0.0)).r - shoreAt(shore, uv - float2(e, 0.0)).r,
+                                 shoreAt(shore, uv + float2(0.0, e)).r - shoreAt(shore, uv - float2(0.0, e)).r);
+            float2 up = length(grad) > 1e-4 ? -normalize(grad) : float2(0.0, 1.0);
+            // The waves' clock and height where they reach the sand: read at the waterline (5 m
+            // inland of the smoothed shoreline), so the timing doesn't run on up the beach.
+            float4 gradient;
+            float bakeDepth;
+            float4 wavesTexel = surfWavesAt(surfWaves, in.world.xy + up * min(shoreTexel.r + 5.0, 0.0), u.cloudLayer.w,
+                                            gradient, bakeDepth);
+            float hs;
+            float3 clock = swashClock(ocean, wavesTexel, hs);
             float d = distance(u.cameraPosition, in.world);
             float far = smoothstep(150.0, 300.0, d);
             float front = 0.0, runup = 0.0;
-            float4 sand = far < 1.0 ? swashSand(ocean, hs, in.world.xy, shoreTexel.r, h, ocean.time.x, front, runup)
+            float drift = surfSetDrift(in.world.xy);
+            float4 sand = far < 1.0 ? swashSand(ocean, hs, clock.x, clock.y, in.world.xy, h, ocean.time.x, drift, front, runup)
                                     : float4(0.0);
-            float band = swashRunup(ocean, hs, in.world.xy, 0.0) / 0.55;    // the highest typical run-up
+            float band = swashRunup(ocean, hs, clock.y, in.world.xy, 0.0, drift) / 0.55;    // the highest typical run-up
             // A swash runs a few metres up a sloping beach, not across a flat near sea level: spent
             // by a few tens of metres inland of the (smoothed, overview-scale) shoreline. Not from
             // the slope: per triangle, that would show the mesh's facets.
@@ -880,14 +895,9 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
             float wet = reach * mix(sand.x, 0.7 * meanWet, far);
             albedo *= mix(float3(1.0), kWetSand, wet);
             // The sheet rolling up the beach and back (swashSheet): its leading bore, the foam it
-            // carries, its thickness and moving ripples, up-beach along the smoothed shore field.
-            float e = 60.0 / u.cloudLayer.w;
-            float2 uv = in.world.xy / u.cloudLayer.w;
-            float2 grad = float2(shoreAt(shore, uv + float2(e, 0.0)).r - shoreAt(shore, uv - float2(e, 0.0)).r,
-                                 shoreAt(shore, uv + float2(0.0, e)).r - shoreAt(shore, uv - float2(0.0, e)).r);
-            float2 up = length(grad) > 1e-4 ? -normalize(grad) : float2(0.0, 1.0);
+            // carries, its thickness and moving ripples, up-beach.
             float footprint = d * 1.1547 / u.frame.y;
-            float4 water = far < 1.0 ? swashSheet(ocean, hs, in.world.xy, sand.z, front, runup, sand.w, up, footprint,
+            float4 water = far < 1.0 ? swashSheet(ocean, hs, clock.y, in.world.xy, sand.z, front, runup, sand.w, up, footprint,
                                                   ocean.time.x, sheetRipple) : float4(0.0);
             sheet = reach * (1.0 - far) * water.x;
             lace = sheet * max(water.y, water.z);
