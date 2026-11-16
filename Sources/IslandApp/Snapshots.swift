@@ -67,6 +67,10 @@ enum Snapshots {
         ("lanikai", 66480, 31367, 75, -1, 1.7),
         // A rocky Waiʻanae-coast shore, west into the afternoon sun.
         ("waianae-shore", 13037, 41993, 265, -2, 1.7),
+        // From a boat 4 km off Lanikai, out over open water (~100 m deep), across the trades.
+        ("offshore-east", 70500, 32500, 150, -3, 2.5),
+        // The same boat looking back at the Mokulua islets and the Koʻolau.
+        ("offshore-back", 70500, 32500, 250, -2, 2.5),
     ]
 
     /// The automatic viewpoints (summit, ridge, coast, pali…) picked on `height`.
@@ -133,7 +137,8 @@ enum Snapshots {
             for view in views where only?.contains(view.name) ?? true {
                 var c = view.camera
                 renderer.prepareGround(x: c.x, y: c.y)
-                c.z = renderer.groundHeight(x: c.x, y: c.y) + (view.eye ?? option("--eye").flatMap(Double.init) ?? 1.7)
+                // Over the sea, the eye height is above the water (a boat), not the floor.
+                c.z = Swift.max(renderer.groundHeight(x: c.x, y: c.y), Double(renderer.seaLevel)) + (view.eye ?? option("--eye").flatMap(Double.init) ?? 1.7)
                 if let degrees = option("--pitch").flatMap(Double.init) { c.pitch = -degrees * .pi / 180 }
                 let forward = SIMD3<Float>(Float(sin(c.yaw) * cos(c.pitch)), Float(cos(c.yaw) * cos(c.pitch)), Float(sin(c.pitch)))
                 // nil: the reference sun.
