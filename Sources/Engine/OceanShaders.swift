@@ -973,7 +973,7 @@ fragment float4 oceanFragment(OceanOut in [[stage_in]], constant Uniforms &u [[b
     // (its Jacobian drops towards zero) a crest is breaking. Patchy, in world axes; out past
     // a few metres of water (the surf has the shallows).
     float jacobian = (1.0 + stretch.x) * (1.0 + stretch.y) - shear * shear;
-    float cap = smoothstep(0.55, 0.1, jacobian) * smoothstep(3.0, 8.0, in.depth);
+    float cap = smoothstep(0.8, 0.3, jacobian) * smoothstep(3.0, 8.0, in.depth);
     if (cap > 0.0) {
         float breakup = groundNoise(in.plane / 3.1 + 7.3);
         cap *= smoothstep(0.25, 0.6, breakup + 0.4 * cap);
