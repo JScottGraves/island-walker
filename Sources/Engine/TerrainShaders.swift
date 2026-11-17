@@ -409,8 +409,10 @@ GroundTexel heightBlend(GroundTexel a, GroundTexel b, float t) {
 // Relief depth of each layer's height map (0…1 over its 1st…99th percentile), metres:
 // strand, rocky shore, marsh, dry forest, mesic, wet, riparian, cloud shrubland, bog,
 // cliff, montane, bare rock.
-constant float kGroundDepth[kGroundLayers + 1] = { 0.010, 0.060, 0.015, 0.040, 0.025, 0.025, 0.025,
-                                                   0.020, 0.020, 0.050, 0.025, 0.060 };
+// Litter, grass and sand show no gain for the cost (parallax-out/summary.md), so they are 0
+// and skip the march.
+constant float kGroundDepth[kGroundLayers + 1] = { 0.0, 0.060, 0.0, 0.060, 0.0, 0.0, 0.0,
+                                                   0.0, 0.0, 0.050, 0.0, 0.060 };
 // Longest shift per metre of depth the search walks (a view or sun ~7° above the ground).
 constant float kParallaxReach = 8.0;
 
