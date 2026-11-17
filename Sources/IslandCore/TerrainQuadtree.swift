@@ -47,10 +47,27 @@ public struct TerrainQuadtree: Sendable {
             return k == count - 1 ? .greatestFiniteMagnitude : previous + (r[k] - previous) * 0.7
         }
 
-        // Min/max pyramid of the overview. Fine detail can poke above the coarse mean by a
-        // few tens of metres at most: pad the bounds by that.
+        // Min/max pyramid of the overview. Each cell spans the samples round it too: the
+        // ground between cell centres runs towards its neighbours, which on a pali wall
+        // differ by over a hundred metres, and a node's box short of that surface is culled
+        // from under the camera (the ground vanishes and the sea shows far below). Fine
+        // detail can poke above the coarse mean by a few tens of metres at most: pad by that.
         let pad: Float = 40
-        var level = overview.values.map { (lo: $0 - pad, hi: $0 + pad) }
+        let w = overview.width, h = overview.height
+        var level = [(lo: Float, hi: Float)](repeating: (0, 0), count: w * h)
+        for y in 0..<h {
+            for x in 0..<w {
+                var lo = Float.greatestFiniteMagnitude, hi = -Float.greatestFiniteMagnitude
+                for sy in Swift.max(y - 1, 0)...Swift.min(y + 1, h - 1) {
+                    for sx in Swift.max(x - 1, 0)...Swift.min(x + 1, w - 1) {
+                        let v = overview[sx, sy]
+                        lo = Swift.min(lo, v)
+                        hi = Swift.max(hi, v)
+                    }
+                }
+                level[y * w + x] = (lo - pad, hi + pad)
+            }
+        }
         var side = overview.width
         var pyramid = [level]
         while side > 1 {
