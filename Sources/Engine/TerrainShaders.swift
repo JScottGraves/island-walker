@@ -880,7 +880,13 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
             float far = smoothstep(150.0, 300.0, d);
             float front = 0.0, runup = 0.0;
             float drift = surfSetDrift(in.world.xy);
-            float4 sand = far < 1.0 ? swashSand(ocean, hs, clock.x, clock.y, in.world.xy, h, ocean.time.x, drift, front, runup)
+            // The swash's edges are contours of the sand's height, which is planar over each of
+            // the mesh's triangles: on a nearly flat one a centimetre of the front's rise swept
+            // the edge across the whole triangle within a frame or two (flickering facets). A few
+            // centimetres of micro-relief keep the edges ragged and moving smoothly.
+            float2 relief = in.world.xy - floor(in.world.xy / 4096.0) * 4096.0;
+            float hSwash = h + 0.05 * (swashNoise(relief / 0.9 + 4.4) - 0.5) + 0.04 * (swashNoise(relief / 3.3 + 1.7) - 0.5);
+            float4 sand = far < 1.0 ? swashSand(ocean, hs, clock.x, clock.y, in.world.xy, hSwash, ocean.time.x, drift, front, runup)
                                     : float4(0.0);
             float band = swashRunup(ocean, hs, clock.y, in.world.xy, 0.0, drift) / 0.55;    // the highest typical run-up
             // A swash runs a few metres up a sloping beach, not across a flat near sea level: spent
