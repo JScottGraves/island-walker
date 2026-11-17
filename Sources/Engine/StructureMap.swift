@@ -405,6 +405,7 @@ struct PavementCracks {
     float halfWidth;
     float heavy;
     float pothole;
+    float hairline;     // distance (m) to the nearest hairline branch, ≥ 1 where none is drawn
 };
 
 PavementCracks pavementCracks(float2 uv, float upkeep, float footprint) {
@@ -413,6 +414,7 @@ PavementCracks pavementCracks(float2 uv, float upkeep, float footprint) {
     k.halfWidth = 0.0;
     k.heavy = 0.0;
     k.pothole = 0.0;
+    k.hairline = 1.0;
     float neglect = 1.0 - upkeep;
     if (neglect <= 0.0) return k;
     k.heavy = neglect * smoothstep(0.45, 0.78, 0.7 * structureNoise(uv / 31.0 + 5.3) + 0.3 * structureNoise(uv / 7.3 + 1.1));
@@ -454,6 +456,13 @@ PavementCracks pavementCracks(float2 uv, float upkeep, float footprint) {
         if (pair < k.heavy * 1.3 && a < k.distance) { k.distance = a; k.halfWidth = open * 0.8; }
         uint ph = structureHash(cell, 41u);
         if (structureUnit(ph) < 0.07 * k.heavy * k.heavy) k.pothole = smoothstep(0.02, 0.12, a);
+    }
+    // Each crack opens and closes along its length.
+    k.halfWidth *= 0.35 + 1.3 * structureNoise(uv / 0.31 + 4.7);
+    // Hairline cracks branching across the blocks, only where a pixel can show a millimetre line.
+    if (footprint < 0.012) {
+        float hair = voronoiBorder(uv / 0.7 + 13.0, 53u, cell, pair) * 0.7;
+        if (pair < 0.25 * neglect + 0.2 * k.heavy) k.hairline = hair;
     }
     return k;
 }

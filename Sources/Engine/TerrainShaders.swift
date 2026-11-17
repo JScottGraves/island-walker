@@ -960,6 +960,33 @@ constant float3 kMownDry = float3(0.105, 0.110, 0.045);      // sun-dried turf, 
 constant float3 kRankGreen = float3(0.050, 0.082, 0.028);    // long uncut grass in leaf
 constant float3 kRankStraw = float3(0.175, 0.150, 0.080);    // standing dead grass and seed heads
 constant float3 kWeeds = float3(0.045, 0.075, 0.025);        // grass in the cracks
+constant float3 kCrackWall = float3(0.030, 0.026, 0.021);    // a crack's dark walls, grit and old sealant
+constant float3 kCrackFloor = float3(0.060, 0.050, 0.038);   // dust and soil on its floor
+
+// Organic noise for worn paint and the like (−1…1, ~0.3 RMS): gradient noise in four
+// octaves, each turned ~37° from the last, through coordinates warped by a fifth, so
+// nothing lines up with a lattice.
+float wornNoise(float2 q, uint seed) {
+    float2 w = q + 0.55 * float2(gradientNoise(q / 1.9, seed), gradientNoise(q / 1.9 + 5.2, seed + 1u));
+    float sum = 0.0, amp = 0.55;
+    float lambda = 2.6;
+    for (int o = 0; o < 4; o++) {
+        sum += amp * gradientNoise(w / lambda, seed + 2u + uint(o));
+        w = kOctaveTurn * w;
+        lambda *= 0.4;
+        amp *= 0.5;
+    }
+    return sum;
+}
+
+// Asphalt aggregate (−0.5…0.5): value noise in three octaves of unrelated scale, each on a
+// frame turned its own way, so no lattice direction shows even at a grazing angle.
+float aggregateGrain(float2 q) {
+    float2 a = float2(0.8 * q.x - 0.6 * q.y, 0.6 * q.x + 0.8 * q.y);       // 37°
+    float2 b = float2(0.454 * q.x + 0.891 * q.y, -0.891 * q.x + 0.454 * q.y); // −63°
+    float2 c = float2(0.966 * q.x + 0.259 * q.y, -0.259 * q.x + 0.966 * q.y); // −15°
+    return 0.4 * groundNoise(a / 0.017 + 3.1) + 0.35 * groundNoise(b / 0.029 + 5.3) + 0.25 * groundNoise(c / 0.071 + 7.7) - 0.5;
+}
 
 // Unkempt grassland at p: green and straw in drifts metres to tens of metres across, darker
 // tussocks, a few bare scuffs.
@@ -997,8 +1024,7 @@ float3 builtSurface(int surface, StructureSample s, StructureZoneGPU z, float3 w
         // their centimetres to float precision this far from the origin).
         float grainShows = 1.0 - smoothstep(0.008, 0.05, max(f.x, f.y));
         if (grainShows > 0.0) {
-            float grain = 0.65 * (groundNoise(q / 0.018 + 3.1) - 0.5) + 0.35 * (groundNoise(q / 0.07 + 7.7) - 0.5);
-            albedo *= 1.0 + (0.3 + 0.25 * neglect) * grain * grainShows;
+            albedo *= 1.0 + (0.45 + 0.35 * neglect) * aggregateGrain(q) * grainShows;
         }
         float L = z.b.x, W = z.b.y;
         float fromEnd = L - abs(s.uv.x);
@@ -1012,9 +1038,20 @@ float3 builtSurface(int surface, StructureSample s, StructureZoneGPU z, float3 w
         float crack = 0.0, weeds = 0.0;
         if (neglect > 0.0) {
             crack = paintSpan(k.distance, -k.halfWidth, k.halfWidth, footprint);
-            // The crack's lips ravelled a little: a frayed, slightly paler band either side.
-            float lips = paintSpan(k.distance, -2.5 * k.halfWidth - 0.01, 2.5 * k.halfWidth + 0.01, footprint) - crack;
-            if (lips > 0.0) albedo *= 1.0 + 0.12 * lips * (groundNoise(q / 0.04 + 1.3) - 0.3);
+            // The crack's lips ravelled: a frayed band either side, chipped out (spalled) in places.
+            float lipWidth = 2.5 * k.halfWidth + 0.012;
+            float lips = paintSpan(k.distance, -lipWidth, lipWidth, footprint) - crack;
+            if (lips > 0.0) {
+                albedo *= 1.0 + 0.12 * lips * (groundNoise(groundTurn(q) / 0.04 + 1.3) - 0.3);
+                // Spalls: the lip broken out in chips, showing the paler, rougher aggregate below.
+                if (footprint < 0.06) {
+                    float chipNoise = 0.6 * groundNoise(groundTurn(q) / 0.05 + 2.9) + 0.4 * groundNoise(groundTurn(groundTurn(q)) / 0.019 + 7.1);
+                    float chips = smoothstep(0.62, 0.7, chipNoise) * (1.0 - smoothstep(0.02, 0.06, footprint));
+                    albedo = mix(albedo, kAsphaltBase * (0.85 + 0.3 * groundNoise(groundTurn(q) / 0.008)), lips * chips);
+                }
+            }
+            // Hairline branches off the main cracks, close up only.
+            if (k.hairline < 1.0) crack = max(crack, 0.6 * paintSpan(k.hairline, -0.0015, 0.0015, footprint));
             // Moss and seedlings in tufts along some of the cracks (the blades stand in them).
             float near = paintSpan(k.distance, -k.halfWidth - 0.025, k.halfWidth + 0.025, footprint);
             if (near > 0.0) {
@@ -1026,21 +1063,54 @@ float3 builtSurface(int surface, StructureSample s, StructureZoneGPU z, float3 w
             float far = smoothstep(0.08, 0.6, footprint);
             crack = mix(crack, mean, far);
             weeds = mix(weeds, 0.4 * mean, far);
-            albedo = mix(albedo, kAsphaltBase, k.pothole);
-            albedo *= 1.0 - 0.7 * crack;
-            albedo = mix(albedo, kWeeds, 0.8 * weeds);
+            // Potholes: the base course's loose gravel and dirt.
+            if (k.pothole > 0.0) albedo = mix(albedo, kAsphaltBase * (0.75 + 0.9 * aggregateGrain(q * 0.6) * grainShows + 0.15 * groundNoise(groundTurn(q) / 0.3)), k.pothole);
+            // Grit and dust in the crack, a little lighter on its floor than at its walls.
+            float floorShare = paintSpan(k.distance, -0.35 * k.halfWidth, 0.35 * k.halfWidth, footprint);
+            float3 fill = mix(kCrackWall, kCrackFloor, floorShare / max(crack, 1e-3));
+            albedo = mix(albedo, fill, crack * (1.0 - far));
+            albedo *= 1.0 - 0.6 * crack * far;
+            albedo = mix(albedo, kWeeds, 0.55 * weeds);
         }
 
-        // Paint: worn through in patches, flaking, broken by the cracks, chalky.
-        float paint = runwayPaint(s.uv.x, s.uv.y, L, W, int2(int(z.d.z) / 100, int(z.d.z) % 100), f);
+        // Paint: its edges eroded a few centimetres; worn through in irregular chips with crisp
+        // edges (softening only as a pixel grows), more in the wheel tracks and along cracks,
+        // small flakes lifting near the bigger losses; chalky by the metre.
+        int2 designators = int2(int(z.d.z) / 100, int(z.d.z) % 100);
+        float paint = runwayPaint(s.uv.x, s.uv.y, L, W, designators, f + 0.08 * neglect);
+        if (paint > 0.0 && neglect > 0.0) {
+            // Within reach of the paint: its edges eroded by a few centimetres.
+            float2 ragged = neglect * 0.03 * float2(gradientNoise(q / 0.09, 71u), gradientNoise(q / 0.09 + 3.7, 72u));
+            paint = runwayPaint(s.uv.x + ragged.x, s.uv.y + ragged.y, L, W, designators, f);
+        }
         if (paint > 0.0) {
-        float speckle = mix(groundNoise(q / 0.21 + 3.7), 0.5, smoothstep(0.03, 0.12, max(f.x, f.y)));
-        float wear = (0.6 + 0.4 * groundNoise(p / 2.3 + 9.1)) * (0.8 + 0.3 * speckle);
-        float patchy = smoothstep(0.38, 0.62, 0.6 * groundNoise(q / 3.7 + 1.9) + 0.4 * groundNoise(q / 0.95 + 7.3));
-        float flakes = mix(smoothstep(0.3, 0.55, groundNoise(q / 0.17 + 5.5)), 0.6, smoothstep(0.05, 0.25, footprint));
-        wear *= mix(1.0, (0.25 + 0.75 * patchy) * flakes, neglect);
-        float3 paintColour = mix(kRunwayPaint, kPaintFaded, 0.7 * neglect);
-        albedo = mix(albedo, paintColour, paint * wear * (1.0 - 0.6 * rubber) * (1.0 - min(1.0, 2.0 * crack)) * (1.0 - k.pothole));
+            float speckle = mix(groundNoise(groundTurn(q) / 0.21 + 3.7), 0.5, smoothstep(0.03, 0.12, max(f.x, f.y)));
+            float wear = (0.6 + 0.4 * groundNoise(groundTurn(p) / 2.3 + 9.1)) * (0.8 + 0.3 * speckle);
+            if (neglect > 0.0) {
+                float tracks = smoothstep(2.0, 3.5, abs(s.uv.y)) * (1.0 - smoothstep(5.5, 7.5, abs(s.uv.y)));
+                float byCrack = (1.0 - smoothstep(0.03, 0.2, k.distance + 0.12 * gradientNoise(q / 0.23, 73u)
+                                                              + 0.05 * gradientNoise(q / 0.06, 78u)))
+                              * smoothstep(-0.3, 0.3, gradientNoise(q / 0.5, 79u));
+                float n = wornNoise(q, 81u);
+                // Higher threshold: more of the paint gone.
+                float gone = mix(-0.7, -0.17, neglect) + 0.22 * tracks + 0.35 * byCrack;
+                float edge = 0.015 + 2.0 * footprint;
+                float keep = smoothstep(-edge, edge, n - gone);
+                // Flakes: small irregular cells lifting off near the edges of the bigger losses.
+                float flakeZone = 1.0 - smoothstep(0.0, 0.07, n - gone);
+                if (flakeZone > 0.0 && footprint < 0.03) {
+                    int2 cell;
+                    float pair;
+                    float2 fq = q / 0.045 + 0.4 * float2(gradientNoise(q / 0.05, 74u), gradientNoise(q / 0.05 + 9.1, 75u));
+                    float border = voronoiBorder(fq, 76u, cell, pair) * 0.045;
+                    float lifted = structureUnit(structureHash(cell, 77u)) < 0.4 * flakeZone ? 1.0 : 0.0;
+                    keep *= 1.0 - lifted * smoothstep(0.0, 0.004 + footprint, border);
+                }
+                float chalk = 0.5 + 0.5 * wornNoise(q / 2.5, 91u);
+                wear *= mix(1.0, keep * (0.75 + 0.25 * chalk), neglect);
+            }
+            float3 paintColour = mix(kRunwayPaint, kPaintFaded, neglect * mix(0.5, 0.85, saturate(0.5 + gradientNoise(q / 3.1, 92u))));
+            albedo = mix(albedo, paintColour, paint * wear * (1.0 - 0.6 * rubber) * (1.0 - min(1.0, 1.5 * crack)) * (1.0 - k.pothole));
         }
 
         // The edges crumbled back and grassed over.
