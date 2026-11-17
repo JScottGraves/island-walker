@@ -911,8 +911,12 @@ float surfBreakers(constant OceanParams &o, float arrival, float spacing, float 
     // A solid roller 4–10 m wide.
     float width = clamp(4.0 * hs * set, 4.0, 10.0) / spacing;
     float f = 1.0 - smoothstep(0.6 * width, 1.4 * width, u0);
-    // Dense whitewater right behind the roller, thinning into clumps over ~15 m, then a lace.
-    float trail = 0.85 * exp(-u0 * spacing / 15.0) + 0.25 * exp(-u0 * spacing / 45.0);
+    // Dense whitewater right behind the roller, thinning into clumps over ~15 m and a short
+    // lace, gone 2.5–6.5 s after the front (on the foam's clock, not by distance: a long trail of
+    // thin cover reached the next wave, and drawn as rafts it left a standing web over the
+    // whole surf zone).
+    float trail = (0.85 * exp(-u0 * spacing / 15.0) + 0.2 * exp(-u0 * spacing / 30.0))
+                  * (1.0 - smoothstep(2.5, 6.5, age));
     // Section ends ragged, and tapering over some tens of metres (the foam thinning into
     // clumps there), not cut straight across.
     float on = smoothstep(0.25, 0.5, section + 0.15 * ragged);
@@ -921,7 +925,8 @@ float surfBreakers(constant OceanParams &o, float arrival, float spacing, float 
     float bands = on * lead * max(f, trail);
     // A pixel wider than a fraction of the spacing sees the mean whitewater over a set.
     float spread = smoothstep(0.05, 0.25, footprint / spacing);
-    float mean = 0.55 * (width + (0.85 * 15.0 + 0.25 * 45.0) / spacing);
+    // (The trail's integral, cut off where it has faded: ~4 s of the front's travel.)
+    float mean = 0.55 * (width + min(0.85 * 15.0 + 0.2 * 30.0, 4.0 * spacing / period) / spacing);
     float meanBreaking = smoothstep(0.7, 0.9, 0.95 * hs / depthHs) * smoothstep(0.15, 0.3, 0.75 * hs);
     front = weight * breaking * on * lead * f * (1.0 - spread);
     return weight * mix(breaking * bands, meanBreaking * mean, spread);
@@ -963,26 +968,31 @@ float surfFoam(constant OceanParams &o, float4 setting, float4 crests, float2 he
     float shallow = clumps * max(0.85 * max(f1, f2), 0.3 * max(b1, b2));
     float bore = mix(shallow, max(b1, b2), run) * smoothstep(0.0, 0.03, depth);
     // Residual foam at the waterline in patches and threads, not a strip.
-    float lace = (1.0 - smoothstep(0.02, 0.12, depth)) * smoothstep(0.45, 0.8, swashNoise(rs / 0.6 + 1.9) + 0.25 * n2);
-    float cover = saturate(bore + lace * 0.6 * setting.w);
-    if (cover <= 0.02) return 0.0;
-    roller = max(f1, f2);
-    // A pixel this coarse sees only the foam's cover.
-    if (footprint >= 0.5) return cover;
     // The foam's own clock: the wave whose whitewater this is (the bigger system's) and how long
-    // since its front passed. Each wave leaves a fresh pattern, drifting on with it a little
-    // and ageing: its rafts' walls thin and break, its cells open up. (Drifting by the sea's
-    // whole time instead magnified the slightest turn of the waves' heading into streaks.)
+    // since its front passed.
     // The bigger system's (by its local height, which holds still): choosing by whose foam is
     // brighter this frame swapped the whole pattern back and forth where the two were alike.
     bool second = setting.y > setting.x;
     float age = second ? age2 : age1, wave = second ? wave2 : wave1;
-    float period = second ? o.waves.y : o.waves.x;
-    float old = saturate(age / (0.8 * period));
-    float2 q = xy - heading * (0.6 * age) + float2(fract(wave * 0.6180340), fract(wave * 0.3819660)) * 977.0;
-    // In world axes, turned off every lattice, and warped.
+    // How old the foam is: fresh for a second or two, old (opened up, breaking into a few
+    // streaks) by ~5 s.
+    float old = smoothstep(1.0, 5.0, age);
+    // Residual foam at the waterline in patches and threads, not a strip, thinning between waves.
+    float lace = (1.0 - smoothstep(0.02, 0.12, depth)) * smoothstep(0.45, 0.8, swashNoise(rs / 0.6 + 1.9) + 0.25 * n2);
+    float cover = saturate(bore + lace * 0.6 * setting.w * (1.0 - 0.6 * old));
+    if (cover <= 0.02) return 0.0;
+    roller = max(f1, f2);
+    // A pixel this coarse sees only the foam's cover.
+    if (footprint >= 0.5) return cover;
+    // Each wave leaves a fresh pattern, drifting on with it and ageing: its rafts' walls thin
+    // and break, its cells open up, and what's left is pulled out into streaks. (Drifting by the
+    // sea's whole time instead magnified the slightest turn of the waves' heading into streaks.)
+    // The drift speeds up as the foam ages (the bore's return flow and the next wave's
+    // pull), so the old foam moves rather than standing on the water.
+    float2 q = xy - heading * (0.6 * age + 0.12 * age * age) + float2(fract(wave * 0.6180340), fract(wave * 0.3819660)) * 977.0;
+    // In world axes, turned off every lattice, and warped (more as it ages: stretched).
     float2 r = float2(0.8 * q.x - 0.6 * q.y, 0.6 * q.x + 0.8 * q.y);
-    float2 warp = foamNoise2(r / 2.3, 11u);
+    float2 warp = foamNoise2(r / 2.3, 11u) * (1.0 + 1.5 * old);
     // Patches and streaks 5–20 m across: dense foam beside thin (x), and where the rafts are
     // tight and bubbly or wide and open (y; more of them wide as the foam ages).
     float2 patch = foamNoise2(r / 11.0 + 0.6 * warp, 5u);
@@ -992,7 +1002,7 @@ float surfFoam(constant OceanParams &o, float4 setting, float4 crests, float2 he
     // (Past 1 the last walls break away; under the roller, none.)
     // Held at 1 (a web of walls): past it the oldest foam's cells dissolve one by one, which in
     // the shallows left polygon shards; the trail's cover fades it out instead.
-    float open = clamp(1.25 - 1.3 * thick + 0.35 * old - 1.5 * roller, 0.0, 1.0);
+    float open = clamp(1.25 - 1.3 * thick + 0.6 * old - 1.5 * roller, 0.0, 1.0);
     float wide = smoothstep(-0.06, 0.06, patch.y + 0.5 * old - 0.2);
     // Warped at two scales so the rafts' walls (straight bisectors between cells) bend.
     float2 rw = r + 0.4 * warp + 0.18 * foamNoise2(r / 0.6 + 3.7, 29u);
@@ -1003,9 +1013,16 @@ float surfFoam(constant OceanParams &o, float4 setting, float4 crests, float2 he
     // Where tight rafts meet wide ones both sets of holes are punched (a short way into each
     // side), not one faded through the other.
     float rafts = min(mix(1.0, tight, saturate(2.0 - 2.0 * wide)), mix(1.0, loose, saturate(2.0 * wide)));
-    float lacy = rafts;
+    // As the cover thins the foam breaks up into a few streaks (~10 m along, 3 m across, in
+    // world axes) with clear water between, rather than a web drawn evenly over the surf zone:
+    // only where the streaks' noise tops what the cover leaves.
+    float streak = 0.5 + 0.8 * foamNoise(float2(0.6 * r.x + 0.8 * r.y, 0.8 * r.x - 0.6 * r.y) / float2(10.0, 3.0)
+                                         + 0.25 * warp, 37u);
+    float keep = smoothstep(-0.08, 0.08, streak - 1.05 + 2.6 * thick - 0.3 * old + roller);
+    float lacy = rafts * keep;
     // A pixel too coarse for the rafts sees their mean.
-    lacy = mix(lacy, thick * (1.0 - 0.6 * open), smoothstep(0.12, 0.35, footprint / mix(0.5, 1.5, wide)));
+    lacy = mix(lacy, thick * (1.0 - 0.6 * open) * saturate(2.6 * thick - 0.3 * old + roller + 0.05),
+               smoothstep(0.12, 0.35, footprint / mix(0.5, 1.5, wide)));
     // Thin foam is partly see-through (the water shows through it), dense foam opaque.
     lacy *= mix(0.55, 1.0, saturate(1.4 * thick + roller));
     return mix(lacy, cover, smoothstep(0.08, 0.5, footprint));
@@ -1042,7 +1059,7 @@ float oceanFoamCover(constant OceanParams &o, texture2d_array<float> foam, float
     float2 warp = foamNoise2(q / float2(3.0, 1.6), 17u);
     // Patchy and streaked downwind (5 m along, 1.5 m across): the cap's outline broken up, not
     // the maps' smooth contour, and some of it thicker than the rest.
-    float streak = 0.5 + 0.5 * foamNoise(q / float2(5.0, 1.5) + 0.7 * warp, 23u);
+    float streak = 0.5 + 0.8 * foamNoise(q / float2(5.0, 1.5) + 0.7 * warp, 23u);
     float d = f * (0.5 + streak);
     // Rafts 1.2 m along the wind, 0.45 m across: the ageing foam streaks downwind. Soft edges
     // (a few centimetres at least).
