@@ -690,26 +690,58 @@ float2 foamNoise2(float2 p, uint seed) {
                         mix(mix(gy.x, gy.y, u.x), mix(gy.z, gy.w, u.x), u.y));
 }
 
-// Foam's web: the bubble rafts' walls, as the edges between jittered cells (Worley F2 − F1,
-// in cell units: 0 on a wall, ~0.5 in a cell's middle). Irregular polygons of varied size,
-// with no lattice of their own to show.
-float foamWeb(float2 q) {
+// Foam's rafts at q (in cell units, on a jittered lattice): 1 where there is foam. The cells
+// are a power diagram (each centre weighted at random, so cells of mixed sizes). Foam is
+// what's left around holes punched in them: `open` 0 (young, dense foam) leaves a blanket with
+// a few small round holes in some cells; towards 1 (thinning, old) every cell's hole grows
+// until only the walls between them are left, fat where three cells meet (the holes don't
+// reach the corners), each wall its own thickness, and more and more of them gone (`gaps`),
+// so cells merge into bigger holes. `aa`: the edges' softness (cell units).
+float foamRafts(float2 q, float open, float aa) {
     float2 c0 = floor(q);
-    float f1 = 1e9, f2 = 1e9;
+    float b1 = 1e9, b2 = 1e9;
+    float2 p1 = 0.0, p2 = 0.0;
+    uint h1 = 0u, h2 = 0u;
     for (int j = -1; j <= 1; j++) {
         for (int i = -1; i <= 1; i++) {
             int2 c = int2(c0) + int2(i, j);
             uint h = (uint(c.x) * 1597334677u) ^ (uint(c.y) * 3812015801u);
             h *= 1597334677u;
             h ^= h >> 15;
-            float2 jitter = 0.1 + 0.8 * float2(float(h & 0xffffu), float(h >> 16)) / 65535.0;
-            float2 d = q - float2(c) - jitter;
-            float dd = dot(d, d);
-            f2 = dd < f1 ? f1 : min(f2, dd);
-            f1 = min(f1, dd);
+            float2 p = float2(c) + 0.1 + 0.8 * float2(float(h & 0xffu), float((h >> 8) & 0xffu)) / 255.0;
+            float2 d = q - p;
+            // Power distance: a weight up to a quarter cell² grows a cell at its neighbours' cost.
+            float pd = dot(d, d) - 0.3 * float((h >> 16) & 0xffu) / 255.0;
+            if (pd < b1) {
+                b2 = b1; p2 = p1; h2 = h1;
+                b1 = pd; p1 = p; h1 = h;
+            } else if (pd < b2) {
+                b2 = pd; p2 = p; h2 = h;
+            }
         }
     }
-    return sqrt(f2) - sqrt(f1);
+    // Distance to the wall between the two nearest cells (their power bisector).
+    float wallDist = (b2 - b1) / max(2.0 * length(p2 - p1), 1e-3);
+    // Holes: in a share of the cells when the foam is young, every one as it opens up, each
+    // its own size.
+    float2 rand1 = float2(float(h1 >> 24), float((h1 >> 4) & 0xffu)) / 255.0;
+    float2 rand2 = float2(float(h2 >> 24), float((h2 >> 4) & 0xffu)) / 255.0;
+    float share = mix(0.3, 1.05, open);
+    float size = mix(0.05, 0.62, open);
+    float r1 = rand1.y < share ? size * (0.4 + 0.9 * rand1.x) : -1.0;
+    float r2 = rand2.y < share ? size * (0.4 + 0.9 * rand2.x) : -1.0;
+    float hole = max(1.0 - smoothstep(r1 - aa, r1 + aa, length(q - p1)),
+                     1.0 - smoothstep(r2 - aa, r2 + aa, length(q - p2)));
+    // The wall between them: its own thickness, or gone.
+    uint pair = (h1 ^ h2) * 2654435761u;
+    pair ^= pair >> 13;
+    // Past 1 (the oldest foam) the walls go on thinning and breaking until none are left.
+    float thick = max(mix(0.09, 0.025, open), 0.0) * (0.4 + 1.2 * float(pair & 0xffu) / 255.0);
+    bool gap = float((pair >> 8) & 0xffu) / 255.0 < 0.45 * open + 2.0 * max(open - 1.0, 0.0);
+    float wall = gap ? 0.0 : 1.0 - smoothstep(thick, thick + aa, wallDist);
+    // The oldest (open 1…1.4): whole cells' remains dissolve, at random, until none are left.
+    float gone = step(rand1.x * 0.7 + rand1.y * 0.3, 2.5 * (open - 1.0));
+    return max(1.0 - hole, wall) * (1.0 - gone);
 }
 
 
@@ -844,32 +876,28 @@ float surfFoam(constant OceanParams &o, float4 setting, float4 crests, float2 he
     float period = second ? o.waves.y : o.waves.x;
     float old = saturate(age / (0.8 * period));
     float2 q = xy - heading * (0.6 * age) + float2(fract(wave * 0.6180340), fract(wave * 0.3819660)) * 977.0;
-    // In world axes, each scale turned its own way off the lattices, and warped.
+    // In world axes, turned off every lattice, and warped.
     float2 r = float2(0.8 * q.x - 0.6 * q.y, 0.6 * q.x + 0.8 * q.y);
     float2 warp = foamNoise2(r / 2.3, 11u);
-    // Clumps and patches a few metres across, streaky and ragged-edged.
-    float clumps = 0.5 + 0.34 * foamNoise(r / 3.4 + 0.5 * warp, 5u) + 0.12 * warp.y;
-    float body = smoothstep(1.0 - cover - 0.07, 1.0 - cover + 0.07, clumps);
-    // The web: rafts' walls ~0.75 m apart, thick at first and thinning, breaking up into
-    // filaments and dying out as the foam gets old, over a coarser web (~1.8 m) of the bigger
-    // rafts that lasts: the cells seem to open up. (A cell size varying with age instead would
-    // scale the pattern about the world's origin, tens of kilometres off, into speckle.)
-    float2 rw = r + 0.45 * warp;
-    float wall = mix(0.15, 0.05, old) * (0.55 + 0.6 * groundNoise(r / 4.0 + 3.3));
-    // Each web only over the ages it shows at (the age is the same over whole patches, so
-    // neighbouring pixels skip together).
-    float fineShare = 1.0 - smoothstep(0.45, 0.7, old), coarseShare = smoothstep(0.3, 0.55, old);
-    float fineWeb = fineShare > 0.0 ? foamWeb(rw / 0.75) : 1.0;
-    float coarseWeb = coarseShare > 0.0 ? foamWeb(float2(0.5 * rw.x - 0.87 * rw.y, 0.87 * rw.x + 0.5 * rw.y) / 1.8 + 31.7) : 1.0;
-    float aaFine = max(0.04, 1.5 * footprint / 0.75), aaCoarse = max(0.03, 1.5 * footprint / 1.8);
-    float fine = (1.0 - smoothstep(wall, wall + aaFine, fineWeb)) * fineShare;
-    float coarse = (1.0 - smoothstep(0.7 * wall, 0.7 * wall + aaCoarse, coarseWeb)) * coarseShare;
-    float strand = max(fine, coarse);
-    strand *= smoothstep(-0.9 + 1.3 * old, -0.6 + 1.3 * old, foamNoise(r / 1.5, 37u));
-    float cell = 0.75;
-    // A pixel too coarse for the walls sees their mean.
-    float net = mix(strand, 0.3, smoothstep(0.15, 0.4, footprint / cell));
-    float lacy = max(body * mix(net, 1.0, smoothstep(0.55, 0.85, cover)), 0.75 * net * smoothstep(0.1, 0.4, cover) * (1.0 - body));
+    // Patches and streaks 5–20 m across: dense foam beside thin (x), and where the rafts are
+    // tight and bubbly or wide and open (y; more of them wide as the foam ages).
+    float2 patch = foamNoise2(r / 11.0 + 0.6 * warp, 5u);
+    float thick = saturate(cover * (0.75 + 0.55 * patch.x));
+    // How far the foam has opened up: dense young whitewater a blanket with holes, thinning
+    // foam a web of walls, the oldest a few broken filaments.
+    // (Past 1 the last walls break away; under the roller, none.)
+    float open = clamp(1.25 - 1.3 * thick + 0.35 * old - 1.5 * roller, 0.0, 1.5);
+    float wide = smoothstep(-0.06, 0.06, patch.y + 0.5 * old - 0.2);
+    float2 rw = r + 0.4 * warp;
+    float aaFine = max(0.03, 1.2 * footprint / 0.5), aaWide = max(0.02, 1.2 * footprint / 1.5);
+    float tight = wide < 1.0 ? foamRafts(rw / 0.5, open, aaFine) : 0.0;
+    float loose = wide > 0.0 ? foamRafts(float2(0.5 * rw.x - 0.87 * rw.y, 0.87 * rw.x + 0.5 * rw.y) / 1.5 + 31.7, open, aaWide) : 0.0;
+    // Where tight rafts meet wide ones both sets of holes are punched (a short way into each
+    // side), not one faded through the other.
+    float rafts = min(mix(1.0, tight, saturate(2.0 - 2.0 * wide)), mix(1.0, loose, saturate(2.0 * wide)));
+    float lacy = rafts;
+    // A pixel too coarse for the rafts sees their mean.
+    lacy = mix(lacy, thick * (1.0 - 0.6 * open), smoothstep(0.12, 0.35, footprint / mix(0.5, 1.5, wide)));
     return mix(lacy, cover, smoothstep(0.08, 0.5, footprint));
 }
 
