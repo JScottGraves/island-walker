@@ -76,12 +76,13 @@ float oceanDepthFactor(float k, float depth) {
     return sqrt(phi);
 }
 
-// Amplitude factor of cascade c over `depth` metres (OceanSpectrum.shallowFactor for the long
-// waves): the long-wave cascades keep their height until the depth limits the sea's significant
-// height to surf.w × depth; the short ones (≤ ~6 m) by the TMA factor, which barely touches them.
-float oceanWaveFactor(constant OceanParams &o, int c, float depth) {
-    if (c >= 2) return oceanDepthFactor(o.meanK[c], depth);
-    return saturate(o.surf.w * max(depth, 0.0) / max(o.grid.z, 0.1));
+// Amplitude factor of cascade c over `depth` metres where the sea's shelter (SeaShelter) leaves
+// it `shelter` of the open sea's (OceanSpectrum.shallowFactor for the long waves): the long-wave
+// cascades keep their (sheltered) height until the depth limits the sea's significant height to
+// surf.w × depth; the short ones (≤ ~6 m) by the TMA factor, which barely touches them.
+float oceanWaveFactor(constant OceanParams &o, int c, float depth, float shelter) {
+    if (c >= 2) return shelter * oceanDepthFactor(o.meanK[c], depth);
+    return min(shelter, saturate(o.surf.w * max(depth, 0.0) / max(o.grid.z, 0.1)));
 }
 
 // Unresolved (Cox–Munk) slope covariance turned into world axes: (xx, yy, xy).
@@ -570,6 +571,8 @@ struct OceanOut {
     float4 crests;          // each system's arrival (periods) and crest spacing (m)
     float4 heading;         // each system's direction of travel
     float drift;            // the sets' timing (surfSetDrift)
+    float4 shelter;         // OceanPoint's
+    float calm;
 };
 
 struct OceanMotionOut {
@@ -607,12 +610,28 @@ struct OceanPoint {
     float2 plane;
     float depth;
     float filter;           // metres the displacement is filtered over (mesh and pixel)
+    float4 shelter;         // each cascade's share of the open sea's amplitude (SeaShelter)
+    float calm;             // the capillary roughness's share of the open sea's (the wind's lee)
 };
+
+// The sea's shelter at xy: each cascade's amplitude factor, and the capillaries' (shore.y).
+// Past the domain it opens up to the open sea over a few kilometres.
+float4 oceanShelter(constant TerrainParams &t, texture2d<float> shelter, texture2d<float> shore, float2 xy,
+                    thread float &calm) {
+    constexpr sampler linear(filter::linear, address::clamp_to_edge);
+    float2 size = float2(t.domainSize);
+    float2 uv = xy / size;
+    float outside = length(max(max(-xy, xy - size), 0.0));
+    float open = smoothstep(0.0, 4000.0, outside);
+    calm = mix(shore.sample(linear, uv, level(0)).y, 1.0, open);
+    return mix(shelter.sample(linear, uv, level(0)), float4(1.0), open);
+}
 
 // A vertex of a sea node's grid: CDLOD morphing onto the next level's grid towards the
 // ring's far edge, as terrainVertex does.
 OceanPoint oceanPoint(constant Uniforms &u, constant OceanParams &o, constant TerrainParams &t, TerrainNode node,
-                      uint vid, const device int *pages, texture2d_array<ushort, access::read> tiles) {
+                      uint vid, const device int *pages, texture2d_array<ushort, access::read> tiles,
+                      texture2d<float> shelter, texture2d<float> shore) {
     uint row = uint(node.quads + 1);
     float2 g = float2(float(vid % row), float(vid / row));
     float spacing = ldexp(o.grid.x, node.lod);
@@ -626,6 +645,7 @@ OceanPoint oceanPoint(constant Uniforms &u, constant OceanParams &o, constant Te
     p.depth = oceanWaterDepth(u, t, pages, tiles, xy, spacing);
     float footprint = oceanFootprint(u, distance(float3(xy, u.seaLevel), u.cameraPosition));
     p.filter = max(spacing * (1.0 + morph), footprint);
+    p.shelter = oceanShelter(t, shelter, shore, xy, p.calm);
     return p;
 }
 
@@ -640,7 +660,7 @@ float3 oceanDisplacement(constant OceanParams &o, texture2d_array<float> maps, O
         if (w <= 0.0) continue;
         float mip = log2(max(p.filter * float(kOceanN) * o.invPatch[c], 1.0));
         float4 v = maps.sample(s, oceanUV(o, c, p.plane), uint(c), level(mip));
-        d += v.xyz * (w * oceanWaveFactor(o, c, p.depth));
+        d += v.xyz * (w * oceanWaveFactor(o, c, p.depth, p.shelter[c]));
     }
     return d;
 }
@@ -991,9 +1011,12 @@ vertex OceanOut oceanVertex(uint vid [[vertex_id]], uint iid [[instance_id]],
                             texture2d_array<ushort, access::read> tiles [[texture(0)]],
                             texture2d_array<float> displacement [[texture(4)]],
                             texture2d<float> shore [[texture(6)]],
-                            texture2d<float> waves [[texture(7)]]) {
-    OceanPoint p = oceanPoint(u, o, t, nodes[iid], vid, pages, tiles);
+                            texture2d<float> waves [[texture(7)]],
+                            texture2d<float> shelter [[texture(8)]]) {
+    OceanPoint p = oceanPoint(u, o, t, nodes[iid], vid, pages, tiles, shelter, shore);
     OceanOut out;
+    out.shelter = p.shelter;
+    out.calm = p.calm;
     out.surf = surfSetting(u, o, t, shore, waves, p.plane, p.depth, out.crests, out.heading, out.drift);
     float3 d = oceanWater(o, displacement, p, out.surf, out.crests, out.heading, out.drift, o.time.x);
     out.world = float3(p.plane + d.xy, u.seaLevel + d.z);
@@ -1020,8 +1043,9 @@ vertex OceanMotionOut oceanMotionVertex(uint vid [[vertex_id]], uint iid [[insta
                                         texture2d_array<float> displacement [[texture(4)]],
                                         texture2d_array<float> previous [[texture(5)]],
                                         texture2d<float> shore [[texture(6)]],
-                                        texture2d<float> waves [[texture(7)]]) {
-    OceanPoint p = oceanPoint(u, o, t, nodes[iid], vid, pages, tiles);
+                                        texture2d<float> waves [[texture(7)]],
+                                        texture2d<float> shelter [[texture(8)]]) {
+    OceanPoint p = oceanPoint(u, o, t, nodes[iid], vid, pages, tiles, shelter, shore);
     float4 crests, heading;
     float drift;
     float4 setting = surfSetting(u, o, t, shore, waves, p.plane, p.depth, crests, heading, drift);
@@ -1135,10 +1159,12 @@ fragment float4 oceanFragment(OceanOut in [[stage_in]], constant Uniforms &u [[b
     float footprint = oceanFootprint(u, dist) / max(abs(v.z), 0.05);
     float2 slope = 0.0, stretch = 0.0;
     float shear = 0.0;      // λ∂Dx/∂y, for the Jacobian (whitecaps)
-    float3 variance = oceanRemainder(o);
+    // Sheltered water is smoother at every scale: its capillaries follow the wind's lee, its
+    // cascades their systems' shelter, so the glint narrows and calm water reads glassy.
+    float3 variance = oceanRemainder(o) * in.calm;
     uint mask = 0u;
     for (int c = 0; c < 4; c++) {
-        float atten = oceanWaveFactor(o, c, in.depth);
+        float atten = oceanWaveFactor(o, c, in.depth, in.shelter[c]);
         float3 whole = float3(o.slopeXX[c], o.slopeYY[c], o.slopeXY[c]) * (atten * atten);
         // Past ~7 mips the map is its own mean: just variance.
         float mip = log2(max(footprint * float(kOceanN) * o.invPatch[c], 1.0));
