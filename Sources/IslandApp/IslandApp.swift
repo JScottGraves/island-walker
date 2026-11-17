@@ -168,9 +168,9 @@ final class Coordinator: NSObject, MTKViewDelegate {
 
         // P switches the ground textures' parallax off and back on, for comparing.
         let pDown = view.keys.contains(kP)
-        if pDown && !pWasDown, let r = renderer {
-            if r.parallax.x > 0 { savedParallax = r.parallax.x; r.parallax.x = 0 } else { r.parallax.x = savedParallax }
-            print("parallax \(r.parallax.x > 0 ? "on" : "off")")
+        if pDown && !pWasDown {
+            if renderer.parallax.x > 0 { savedParallax = renderer.parallax.x; renderer.parallax.x = 0 } else { renderer.parallax.x = savedParallax }
+            print("parallax \(renderer.parallax.x > 0 ? "on" : "off")")
         }
         pWasDown = pDown
 

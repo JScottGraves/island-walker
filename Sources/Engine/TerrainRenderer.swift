@@ -201,7 +201,6 @@ public final class TerrainRenderer {
     /// Baked orographic cloud coverage (islandgen's clouds-trades.r32) over the domain.
     let cloudMap: MTLTexture
     let domainSize: Float
-    /// Local solar time (hours) for the clouds' daily cycle; keep it with `light`'s sun.
     /// Parallax on the ground textures (ParallaxParams in TerrainShaders): depth scale (0 off),
     /// fade-out distance (m), most search steps, self-shadow strength. ISLAND_PARALLAX
     /// overrides for tuning: "depth=1.5,end=30,steps=16,shadow=1".
@@ -223,6 +222,7 @@ public final class TerrainRenderer {
         return p
     }
 
+    /// Local solar time (hours) for the clouds' daily cycle; keep it with `light`'s sun.
     public var hour = 9.5
     /// Seconds of wind so far: how far the trade wind has carried the cloud texture.
     public var clock: Double = 0

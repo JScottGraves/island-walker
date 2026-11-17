@@ -498,9 +498,9 @@ float3 groundTexture(texture2d_array<float> albedo, texture2d_array<float> norma
     int first = 0, second = 1;
     float wf = -1.0, ws = -1.0;
     // One noise value, spread over the communities by golden-ratio steps.
-    float jitter = groundNoise(p / 9.0);
+    float pick = groundNoise(p / 9.0);
     for (int i = 0; i < kGroundLayers; i++) {
-        float v = w[i] * (0.75 + 0.5 * fract(jitter + 0.618034 * float(i)));
+        float v = w[i] * (0.75 + 0.5 * fract(pick + 0.618034 * float(i)));
         if (v > wf) { second = first; ws = wf; first = i; wf = v; }
         else if (v > ws) { second = i; ws = v; }
     }
@@ -512,11 +512,11 @@ float3 groundTexture(texture2d_array<float> albedo, texture2d_array<float> norma
     float depth = px.depthScale * kGroundDepth[first] * (1.0 - smoothstep(0.6 * px.end, px.end, dist))
         * (1.0 - smoothstep(0.15, 0.25, slope));
     if (depth > 1e-4) {
-        bool w = wide > 0.5;
+        bool useWide = wide > 0.5;
         float hit;
-        p += parallaxShift(normal, first, p, w, dpx, dpy, v, n, depth, px.steps, jitter, hit);
+        p += parallaxShift(normal, first, p, useWide, dpx, dpy, v, n, depth, px.steps, jitter, hit);
         if (px.shadow > 0.0)
-            sun = mix(1.0, parallaxShadow(normal, first, p, w, dpx, dpy, l, n, depth, hit, fract(jitter + 0.5)), px.shadow);
+            sun = mix(1.0, parallaxShadow(normal, first, p, useWide, dpx, dpy, l, n, depth, hit, fract(jitter + 0.5)), px.shadow);
     }
     GroundTexel t = groundLayer(albedo, normal, first, p, wide, dpx, dpy);
     float share = ws / max(wf + ws, 1e-4);
