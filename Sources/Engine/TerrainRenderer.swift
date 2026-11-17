@@ -202,6 +202,27 @@ public final class TerrainRenderer {
     let cloudMap: MTLTexture
     let domainSize: Float
     /// Local solar time (hours) for the clouds' daily cycle; keep it with `light`'s sun.
+    /// Parallax on the ground textures (ParallaxParams in TerrainShaders): depth scale (0 off),
+    /// fade-out distance (m), most search steps, self-shadow strength. ISLAND_PARALLAX
+    /// overrides for tuning: "depth=1.5,end=30,steps=16,shadow=1".
+    public var parallax: SIMD4<Float> = TerrainRenderer.parallaxDefaults()
+
+    static func parallaxDefaults() -> SIMD4<Float> {
+        var p = SIMD4<Float>(1, 25, 16, 1)
+        for pair in (ProcessInfo.processInfo.environment["ISLAND_PARALLAX"] ?? "").split(separator: ",") {
+            let kv = pair.split(separator: "=")
+            guard kv.count == 2, let v = Float(kv[1]) else { continue }
+            switch kv[0] {
+            case "depth": p.x = v
+            case "end": p.y = v
+            case "steps": p.z = v
+            case "shadow": p.w = v
+            default: break
+            }
+        }
+        return p
+    }
+
     public var hour = 9.5
     /// Seconds of wind so far: how far the trade wind has carried the cloud texture.
     public var clock: Double = 0
@@ -1118,6 +1139,8 @@ public final class TerrainRenderer {
         shade.setFragmentBytes(&floraRange, length: 8, index: 2)
         var coverRange = groundCover?.terrainRange ?? .zero
         shade.setFragmentBytes(&coverRange, length: 16, index: 3)
+        var parallaxParams = parallax
+        shade.setFragmentBytes(&parallaxParams, length: 16, index: 4)
         drawTerrain(shade, frame: frameTerrain)
         flora?.drawShading(shade, skyVisibility: skyVisibility, horizons: horizons)
         groundCover?.drawShading(shade, skyVisibility: skyVisibility, horizons: horizons)

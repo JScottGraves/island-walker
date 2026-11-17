@@ -124,6 +124,7 @@ enum Snapshots {
                                                groundCover: GroundCoverSettings(arguments: CommandLine.arguments),
                                                antialiasing: antialiasing())
             renderer.jitterSign = option("--jitter-sign").flatMap(Float.init) ?? 1
+            if option("--parallax") == "off" { renderer.parallax.x = 0 }
             print("shadows: \(renderer.shadows.rawValue); antialiasing: \(renderer.antialiasing)")
             // Viewpoints are picked on the overview; the camera then stands on the full-detail ground.
             let height = try tiles.grid(level: tiles.overviewLevel())
