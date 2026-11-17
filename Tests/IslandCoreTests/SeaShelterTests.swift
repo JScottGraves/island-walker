@@ -44,11 +44,12 @@ final class SeaShelterTests: XCTestCase {
 
     /// Behind a reef flat 0.5 m under water the wind sea starts again.
     func testReefFlatResetsTheFetch() {
-        var g = Grid(width: 200, height: 40, cellSize: 50, fill: -20)
-        for j in 0..<40 { for i in 120..<124 { g[i, j] = -0.5 } }
+        var g = Grid(width: 200, height: 200, cellSize: 50, fill: -20)
+        for j in 0..<200 { for i in 120..<124 { g[i, j] = -0.5 } }
         let wind = SeaShelter.wind(height: g, seaLevel: 0, towards: Double.pi, maxFetch: 40_000)
-        XCTAssertEqual(Double(wind.fetch[80, 20]), 40 * 50 + 25, accuracy: 400)
-        XCTAssertEqual(Double(wind.speed[80, 20]), 1, accuracy: 1e-6)
+        // ~2 km straight upwind, a little more along the fan's slanted rays.
+        XCTAssertEqual(Double(wind.fetch[80, 100]), 2_100, accuracy: 300)
+        XCTAssertEqual(Double(wind.speed[80, 100]), 1, accuracy: 1e-6)
     }
 
     func testSwellExposure() {
