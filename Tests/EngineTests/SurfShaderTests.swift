@@ -13,10 +13,10 @@ final class SurfShaderTests: XCTestCase {
                           constant float4 &probe [[buffer(2)]], uint i [[thread_position_in_grid]]) {
         float arrival = probe.x + float(i) * probe.y;
         float2 xy = probe.zw;
-        float front, n;
+        float front, n, age, wave;
         float2 slope;
         // A wave train breaking on and off from wave to wave (Hs/h about the set's threshold).
-        float foam = surfBreakers(o, arrival, 60.0, 1.0, 2.0, o.waves.x, xy, 0.0, 0.01, 0.0, 1.0, front);
+        float foam = surfBreakers(o, arrival, 60.0, 1.0, 2.0, o.waves.x, xy, 0.0, 0.01, 0.0, 1.0, front, age, wave);
         float z = surfCrest(o, arrival, 60.0, float2(0.0, 1.0), 1.0, 2.0, o.waves.x, xy, 0.01, o.time.x, 0.0, 1.0, slope);
         float phase = swashPhase(arrival, o.waves.x, xy, o.time.x, n);
         out[i] = float4(foam, front, z, phase);

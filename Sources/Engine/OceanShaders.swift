@@ -653,12 +653,63 @@ float3 oceanDisplacement(constant OceanParams &o, texture2d_array<float> maps, O
 // shore and grouped into sets; a lace of residual foam at the waterline. Advected bubbles, faded to their mean coverage where a pixel
 // spans them.
 
-// Foam's lace: a network of thin worm-like strands (ridged value noise), 1 on a
-// strand and 0 in the holes between.
-float foamLace(float2 q) {
-    // Turned off the noise's lattice, whose squares would show in the strands.
-    float2 r = float2(0.866 * q.x - 0.5 * q.y, 0.5 * q.x + 0.866 * q.y);
-    return smoothstep(0.75, 0.95, 1.0 - abs(2.0 * groundNoise(r) - 1.0));
+// Gradient noise in about −1…1 for the foam, without trigonometry: each lattice point's
+// gradient straight from its hash (gradientNoise's costs a sine and cosine a corner).
+float foamNoise(float2 p, uint seed) {
+    float2 i = floor(p), f = p - i;
+    float2 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    float4 g;
+    for (int k = 0; k < 4; k++) {
+        int2 o = int2(k & 1, k >> 1);
+        int2 c = int2(i) + o;
+        uint h = uint(c.x) * 0x85ebca6bu + uint(c.y) * 0xc2b2ae35u + seed * 0x9e3779b9u;
+        h ^= h >> 16; h *= 0x85ebca6bu; h ^= h >> 13; h *= 0xc2b2ae35u; h ^= h >> 16;
+        float2 grad = float2(float(h & 0xffffu), float(h >> 16)) * (2.0 / 65535.0) - 1.0;
+        g[k] = dot(grad, f - float2(o));
+    }
+    return 1.6 * mix(mix(g.x, g.y, u.x), mix(g.z, g.w, u.x), u.y);
+}
+
+// Two independent foamNoise fields at once (one hash a corner, its bits split between them).
+float2 foamNoise2(float2 p, uint seed) {
+    float2 i = floor(p), f = p - i;
+    float2 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    float4 gx, gy;
+    for (int k = 0; k < 4; k++) {
+        int2 o = int2(k & 1, k >> 1);
+        int2 c = int2(i) + o;
+        uint h = uint(c.x) * 0x85ebca6bu + uint(c.y) * 0xc2b2ae35u + seed * 0x9e3779b9u;
+        h ^= h >> 16; h *= 0x85ebca6bu; h ^= h >> 13; h *= 0xc2b2ae35u; h ^= h >> 16;
+        float4 grad = float4(float(h & 0xffu), float((h >> 8) & 0xffu), float((h >> 16) & 0xffu), float(h >> 24))
+                      * (2.0 / 255.0) - 1.0;
+        float2 d = f - float2(o);
+        gx[k] = dot(grad.xy, d);
+        gy[k] = dot(grad.zw, d);
+    }
+    return 1.6 * float2(mix(mix(gx.x, gx.y, u.x), mix(gx.z, gx.w, u.x), u.y),
+                        mix(mix(gy.x, gy.y, u.x), mix(gy.z, gy.w, u.x), u.y));
+}
+
+// Foam's web: the bubble rafts' walls, as the edges between jittered cells (Worley F2 − F1,
+// in cell units: 0 on a wall, ~0.5 in a cell's middle). Irregular polygons of varied size,
+// with no lattice of their own to show.
+float foamWeb(float2 q) {
+    float2 c0 = floor(q);
+    float f1 = 1e9, f2 = 1e9;
+    for (int j = -1; j <= 1; j++) {
+        for (int i = -1; i <= 1; i++) {
+            int2 c = int2(c0) + int2(i, j);
+            uint h = (uint(c.x) * 1597334677u) ^ (uint(c.y) * 3812015801u);
+            h *= 1597334677u;
+            h ^= h >> 15;
+            float2 jitter = 0.1 + 0.8 * float2(float(h & 0xffffu), float(h >> 16)) / 65535.0;
+            float2 d = q - float2(c) - jitter;
+            float dd = dot(d, d);
+            f2 = dd < f1 ? f1 : min(f2, dd);
+            f1 = min(f1, dd);
+        }
+    }
+    return sqrt(f2) - sqrt(f1);
 }
 
 
@@ -711,14 +762,20 @@ float4 surfSetting(constant Uniforms &u, constant OceanParams &o, constant Terra
 // nears the breaker depth over the smoothed depth `h`: the sets' big waves further out, the
 // small ones only on the inside. Returns its foam cover; through `front`, how much is the roller.
 float surfBreakers(constant OceanParams &o, float arrival, float spacing, float hs, float h, float period,
-                   float2 xy, float ragged, float footprint, float drift, float weight, thread float &front) {
+                   float2 xy, float ragged, float footprint, float drift, float weight, thread float &front,
+                   thread float &age, thread float &wave) {
     front = 0.0;
+    age = 0.0;
+    wave = 0.0;
     if (hs < 0.05 || weight <= 0.0) return 0.0;
     // Sections 50–300 m long, re-dealt every wave, peeling: each one's front lags a little
     // towards one end. In world axes (xy is tens of kilometres: rotating it by the waves'
     // direction, which varies across a triangle, would scramble every pattern).
     float section, u0, next;
     float index = surfClock(xy, o.time.x / period - arrival + 2.2 * ragged / spacing, period, section, u0, next);
+    // How long ago this wave's front passed (s), and which wave it was: its foam's own clock.
+    age = u0 * period;
+    wave = index;
     float set = surfSet(o, index, drift);
     // Waves break near H/h ≈ 0.78: a set's biggest (~1.8 Hs) from Hs/h ≈ 0.43, ~0.72 of the bake's
     // saturated Hs/h (o.waves.z), where all of them have broken. Breakers also need waves of some
@@ -738,12 +795,14 @@ float surfBreakers(constant OceanParams &o, float arrival, float spacing, float 
     // Section ends ragged, and tapering over some tens of metres (the foam thinning into
     // clumps there), not cut straight across.
     float on = smoothstep(0.25, 0.5, section + 0.15 * ragged);
-    float bands = on * max(f, trail);
+    // The leading edge feathered over half a metre (or a pixel), not cut.
+    float lead = smoothstep(0.0, max(0.5, footprint) / spacing, u0);
+    float bands = on * lead * max(f, trail);
     // A pixel wider than a fraction of the spacing sees the mean whitewater over a set.
     float spread = smoothstep(0.05, 0.25, footprint / spacing);
     float mean = 0.55 * (width + (0.85 * 15.0 + 0.25 * 45.0) / spacing);
     float meanBreaking = smoothstep(0.7, 0.9, 0.95 * hs / depthHs) * smoothstep(0.15, 0.3, 0.75 * hs);
-    front = weight * breaking * on * f * (1.0 - spread);
+    front = weight * breaking * on * lead * f * (1.0 - spread);
     return weight * mix(breaking * bands, meanBreaking * mean, spread);
 }
 
@@ -763,22 +822,54 @@ float surfFoam(constant OceanParams &o, float4 setting, float4 crests, float2 he
     // The leading edge, a metre or two ragged.
     float ragged = groundNoise(xy / 2.5 + 4.1) - 0.5;
     float2 weight = surfWeights(setting);
-    float f1, f2;
-    float b1 = surfBreakers(o, crests.x, crests.z, setting.x, setting.z, o.waves.x, xy, ragged, footprint, drift, weight.x, f1);
-    float b2 = surfBreakers(o, crests.y, crests.w, setting.y, setting.z, o.waves.y, xy, ragged, footprint, drift, weight.y, f2);
+    float f1, f2, age1, age2, wave1, wave2;
+    float b1 = surfBreakers(o, crests.x, crests.z, setting.x, setting.z, o.waves.x, xy, ragged, footprint, drift, weight.x, f1,
+                            age1, wave1);
+    float b2 = surfBreakers(o, crests.y, crests.w, setting.y, setting.z, o.waves.y, xy, ragged, footprint, drift, weight.y, f2,
+                            age2, wave2);
     float lace = 1.0 - smoothstep(0.02, 0.12, depth);
     // No breakers over the last few decimetres of water (the shallows' own depth): there the
     // front has become a sheet of swash and the waterline's lace.
     float cover = saturate(max(b1, b2) * smoothstep(0.25, 0.5, depth) + lace * 0.6 * setting.w);
     if (cover <= 0.02) return 0.0;
     roller = max(f1, f2);
-    // Clumps a few metres across, and within them a lace of strands, drifting with the waves.
-    // Thinning foam breaks into clumps, then into lace with holes.
-    float2 q = xy - heading * (1.0 * o.time.x);
-    float clumps = groundNoise(q / 2.6 + 1.7);
-    float body = smoothstep(1.0 - cover - 0.08, 1.0 - cover + 0.08, clumps);
-    float net = mix(foamLace(q / 1.6), 0.35, smoothstep(0.05, 0.2, footprint / 1.6));
-    float lacy = max(body * mix(net, 1.0, smoothstep(0.55, 0.85, cover)), 0.7 * net * smoothstep(0.1, 0.4, cover) * (1.0 - body));
+    // A pixel this coarse sees only the foam's cover.
+    if (footprint >= 0.5) return cover;
+    // The foam's own clock: the wave whose whitewater this is (the bigger system's) and how long
+    // since its front passed. Each wave leaves a fresh pattern, drifting on with it a little
+    // and ageing: its rafts' walls thin and break, its cells open up. (Drifting by the sea's
+    // whole time instead magnified the slightest turn of the waves' heading into streaks.)
+    bool second = b2 > b1;
+    float age = second ? age2 : age1, wave = second ? wave2 : wave1;
+    float period = second ? o.waves.y : o.waves.x;
+    float old = saturate(age / (0.8 * period));
+    float2 q = xy - heading * (0.6 * age) + float2(fract(wave * 0.6180340), fract(wave * 0.3819660)) * 977.0;
+    // In world axes, each scale turned its own way off the lattices, and warped.
+    float2 r = float2(0.8 * q.x - 0.6 * q.y, 0.6 * q.x + 0.8 * q.y);
+    float2 warp = foamNoise2(r / 2.3, 11u);
+    // Clumps and patches a few metres across, streaky and ragged-edged.
+    float clumps = 0.5 + 0.34 * foamNoise(r / 3.4 + 0.5 * warp, 5u) + 0.12 * warp.y;
+    float body = smoothstep(1.0 - cover - 0.07, 1.0 - cover + 0.07, clumps);
+    // The web: rafts' walls ~0.75 m apart, thick at first and thinning, breaking up into
+    // filaments and dying out as the foam gets old, over a coarser web (~1.8 m) of the bigger
+    // rafts that lasts: the cells seem to open up. (A cell size varying with age instead would
+    // scale the pattern about the world's origin, tens of kilometres off, into speckle.)
+    float2 rw = r + 0.45 * warp;
+    float wall = mix(0.15, 0.05, old) * (0.55 + 0.6 * groundNoise(r / 4.0 + 3.3));
+    // Each web only over the ages it shows at (the age is the same over whole patches, so
+    // neighbouring pixels skip together).
+    float fineShare = 1.0 - smoothstep(0.45, 0.7, old), coarseShare = smoothstep(0.3, 0.55, old);
+    float fineWeb = fineShare > 0.0 ? foamWeb(rw / 0.75) : 1.0;
+    float coarseWeb = coarseShare > 0.0 ? foamWeb(float2(0.5 * rw.x - 0.87 * rw.y, 0.87 * rw.x + 0.5 * rw.y) / 1.8 + 31.7) : 1.0;
+    float aaFine = max(0.04, 1.5 * footprint / 0.75), aaCoarse = max(0.03, 1.5 * footprint / 1.8);
+    float fine = (1.0 - smoothstep(wall, wall + aaFine, fineWeb)) * fineShare;
+    float coarse = (1.0 - smoothstep(0.7 * wall, 0.7 * wall + aaCoarse, coarseWeb)) * coarseShare;
+    float strand = max(fine, coarse);
+    strand *= smoothstep(-0.9 + 1.3 * old, -0.6 + 1.3 * old, foamNoise(r / 1.5, 37u));
+    float cell = 0.75;
+    // A pixel too coarse for the walls sees their mean.
+    float net = mix(strand, 0.3, smoothstep(0.15, 0.4, footprint / cell));
+    float lacy = max(body * mix(net, 1.0, smoothstep(0.55, 0.85, cover)), 0.75 * net * smoothstep(0.1, 0.4, cover) * (1.0 - body));
     return mix(lacy, cover, smoothstep(0.08, 0.5, footprint));
 }
 
