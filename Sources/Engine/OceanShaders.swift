@@ -261,17 +261,42 @@ float swashRunup(constant OceanParams &o, float hs, float period, float2 xy, flo
     return 0.38 * r2 * wave * cusps * surfSet(o, n, drift);
 }
 
+// Each wave's section along the shore (0…1, its own every wave; surfBreakers deals the
+// whitewater's sections from it and the fronts peel by it).
+float surfSection(float2 xy, float n, float period) {
+    return groundNoise(xy / 160.0 + n * 1.37 + period);
+}
+
+// The surf's wave clock at xy: which wave's front the point is behind (the last to have passed
+// it, its front peeled back 0.08 × its section: wave n's front is where wave + 0.08 s_n = n),
+// with that wave's section and through `u0` how far behind it (in periods, 0 at the front and
+// growing to the next front, ~1 on). Everything a wave carries (its set, sections, breaking)
+// runs on unbroken from its front to the next one's: rounding `wave` instead would hand the
+// trail over to the next wave half way, cutting it off in a seam along the crests.
+float surfClock(float2 xy, float wave, float period, thread float &section, thread float &u0) {
+    float k = floor(wave);
+    // Peels are 0…0.08, so the front ahead of `wave` is k + 1's if it has already passed (with
+    // its peel), and k's otherwise.
+    float s = surfSection(xy, k + 1.0, period);
+    float n = k + 1.0;
+    if (wave + 0.08 * s < n) {
+        n = k;
+        s = surfSection(xy, k, period);
+    }
+    section = s;
+    u0 = wave + 0.08 * s - n;
+    return n;
+}
+
 // Where in its swash the wave at xy is (0…1 of the period since its bore reached the shore),
-// and which wave (n): the surf's own clock (surfFoam), so each swash starts as the bore that
+// and which wave (n): the surf's own clock (surfClock), so each swash starts as the bore that
 // breaks on that stretch of shore arrives, sections peeling alike. `arrival` is the crests'
 // arrival there in periods (the wave texture's, read at the waterline so the timing doesn't run
 // on up the beach).
 float swashPhase(float arrival, float period, float2 xy, float time, thread float &n) {
-    float wave = time / period - arrival;
-    float index = floor(wave + 0.5);
-    float c = wave + 0.08 * groundNoise(xy / 160.0 + index * 1.37);
-    n = floor(c);
-    return c - n;
+    float section, phase;
+    n = surfClock(xy, time / period - arrival, period, section, phase);
+    return phase;
 }
 
 // Sand `h` metres above the sea: (x) how wet the last few swashes left it (drying over ~20 s),
@@ -686,11 +711,8 @@ float surfBreakers(constant OceanParams &o, float arrival, float spacing, float 
     // Sections 50–300 m long, re-dealt every wave, peeling: each one's front lags a little
     // towards one end. In world axes (xy is tens of kilometres: rotating it by the waves'
     // direction, which varies across a triangle, would scramble every pattern).
-    float wave = o.time.x / period - arrival;
-    float index = floor(wave + 0.5);
-    float section = groundNoise(xy / 160.0 + index * 1.37 + period);
-    float peel = 0.08 * section;
-    float u0 = fract(wave + peel + 2.2 * ragged / spacing);
+    float section, u0;
+    float index = surfClock(xy, o.time.x / period - arrival + 2.2 * ragged / spacing, period, section, u0);
     float set = surfSet(o, index, drift);
     // Waves break near H/h ≈ 0.78: a set's biggest (~1.8 Hs) from Hs/h ≈ 0.43, ~0.72 of the bake's
     // saturated Hs/h (o.waves.z), where all of them have broken. Breakers also need waves of some
@@ -749,6 +771,18 @@ float surfFoam(constant OceanParams &o, float4 setting, float4 crests, float2 he
 }
 
 // ---- Surf waves: the swell's crests shoaling in under the breakers ----
+// One wave's height in surfCrest: its set's share of the local significant height, taller
+// where its section breaks, faded out where `filter` (m) can't resolve the face.
+float surfCrestHeight(constant OceanParams &o, float hs, float h, float n, float section, float spacing, float filter,
+                      float drift, float weight) {
+    float on = smoothstep(0.3, 0.45, section);
+    float set = surfSet(o, n, drift);
+    float breaking = smoothstep(0.75, 0.85, hs * (0.6 + 0.5 * set) / (o.waves.z * max(h, 0.5)));
+    return weight * o.time.z * 0.45 * hs * set * mix(0.55, 1.0, on) * (0.6 + 0.4 * breaking)
+           // Faded where the grid (or a pixel) is too coarse for the face (~3 m).
+           * (1.0 - smoothstep(0.08, 0.2, filter / spacing));
+}
+
 // One system's crests (surfBreakers' clock): a wave its set's share of the local significant
 // height, with a long gentle back behind the crest and a steep face ahead of it, taller where a
 // section breaks, faded out where `filter` (m) can't resolve it. Its height (m, about the mean
@@ -757,25 +791,24 @@ float surfCrest(constant OceanParams &o, float arrival, float spacing, float2 he
                 float2 xy, float filter, float time, float drift, float weight, thread float2 &slope) {
     slope = 0.0;
     if (hs < 0.05 || weight <= 0.0) return 0.0;
+    // The crest the point is behind (surfClock), u0 periods back from it: its long gentle back;
+    // and the next one's, v periods ahead: that wave's steep face, at its own height.
     float wave = time / period - arrival;
-    float index = floor(wave + 0.5);
-    float section = groundNoise(xy / 160.0 + index * 1.37 + period);
-    // 0 at the crest, growing seaward to 1 at the next: the back behind the crest is the low u0,
-    // the face ahead of it the u0 just under 1.
-    float u0 = fract(wave + 0.08 * section);
-    float back = exp(-u0 / 0.16), face = exp(-(1.0 - u0) / 0.05);
-    float f = max(back, face);
-    float df = back > face ? -back / 0.16 : face / 0.05;
-    float on = smoothstep(0.3, 0.45, section);
-    float set = surfSet(o, index, drift);
-    float breaking = smoothstep(0.75, 0.85, hs * (0.6 + 0.5 * set) / (o.waves.z * max(h, 0.5)));
-    float a = weight * o.time.z * 0.45 * hs * set * mix(0.55, 1.0, on) * (0.6 + 0.4 * breaking)
-            // Faded where the grid (or a pixel) is too coarse for the face (~3 m).
-            * (1.0 - smoothstep(0.08, 0.2, filter / spacing));
-    // u0 grows against the heading by 1/spacing per metre.
-    slope = a * df * (-heading / spacing);
-    // Less the profile's mean (∫f ≈ 0.16 + 0.05), so the sea keeps its level.
-    return a * (f - 0.21);
+    float section, u0;
+    float n = surfClock(xy, wave, period, section, u0);
+    float next = surfSection(xy, n + 1.0, period);
+    float v = max(n + 1.0 - 0.08 * next - wave, 0.0);
+    float a0 = surfCrestHeight(o, hs, h, n, section, spacing, filter, drift, weight);
+    float a1 = surfCrestHeight(o, hs, h, n + 1.0, next, spacing, filter, drift, weight);
+    float back = a0 * exp(-u0 / 0.16), face = a1 * exp(-v / 0.05);
+    // Less the profile's mean (∫f ≈ 0.16 + 0.05 of the height), so the sea keeps its level,
+    // going over from one wave's height to the next's between their crests.
+    float gap = max(u0 + v, 1e-3);
+    float mean = 0.21 * mix(a0, a1, u0 / gap);
+    float dz = (back > face ? -back / 0.16 : face / 0.05) - 0.21 * (a1 - a0) / gap;
+    // u0 grows against the heading by 1/spacing per metre (and v shrinks).
+    slope = dz * (-heading / spacing);
+    return max(back, face) - mean;
 }
 
 // Both systems' surf crests (surfCrest), none deeper than ~6 m (the cascades carry the sea
