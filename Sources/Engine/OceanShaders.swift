@@ -274,8 +274,9 @@ float surfSection(float2 xy, float n, float period) {
 // with that wave's section and through `u0` how far behind it (in periods, 0 at the front and
 // growing to the next front, ~1 on). Everything a wave carries (its set, sections, breaking)
 // runs on unbroken from its front to the next one's: rounding `wave` instead would hand the
-// trail over to the next wave half way, cutting it off in a seam along the crests.
-float surfClock(float2 xy, float wave, float period, thread float &section, thread float &u0) {
+// trail over to the next wave half way, cutting it off in a seam along the crests. Through
+// `next`, the next wave's section (surfCrest's face; unused, the compiler drops it).
+float surfClock(float2 xy, float wave, float period, thread float &section, thread float &u0, thread float &next) {
     float k = floor(wave);
     // Peels are 0…0.08, so the front ahead of `wave` is k + 1's if it has already passed (with
     // its peel), and k's otherwise.
@@ -283,7 +284,10 @@ float surfClock(float2 xy, float wave, float period, thread float &section, thre
     float n = k + 1.0;
     if (wave + 0.08 * s < n) {
         n = k;
+        next = s;
         s = surfSection(xy, k, period);
+    } else {
+        next = surfSection(xy, k + 2.0, period);
     }
     section = s;
     u0 = wave + 0.08 * s - n;
@@ -296,8 +300,8 @@ float surfClock(float2 xy, float wave, float period, thread float &section, thre
 // arrival there in periods (the wave texture's, read at the waterline so the timing doesn't run
 // on up the beach).
 float swashPhase(float arrival, float period, float2 xy, float time, thread float &n) {
-    float section, phase;
-    n = surfClock(xy, time / period - arrival, period, section, phase);
+    float section, phase, next;
+    n = surfClock(xy, time / period - arrival, period, section, phase, next);
     return phase;
 }
 
@@ -713,8 +717,8 @@ float surfBreakers(constant OceanParams &o, float arrival, float spacing, float 
     // Sections 50–300 m long, re-dealt every wave, peeling: each one's front lags a little
     // towards one end. In world axes (xy is tens of kilometres: rotating it by the waves'
     // direction, which varies across a triangle, would scramble every pattern).
-    float section, u0;
-    float index = surfClock(xy, o.time.x / period - arrival + 2.2 * ragged / spacing, period, section, u0);
+    float section, u0, next;
+    float index = surfClock(xy, o.time.x / period - arrival + 2.2 * ragged / spacing, period, section, u0, next);
     float set = surfSet(o, index, drift);
     // Waves break near H/h ≈ 0.78: a set's biggest (~1.8 Hs) from Hs/h ≈ 0.43, ~0.72 of the bake's
     // saturated Hs/h (o.waves.z), where all of them have broken. Breakers also need waves of some
@@ -802,9 +806,8 @@ float surfCrest(constant OceanParams &o, float arrival, float spacing, float2 he
     // The crest the point is behind (surfClock), u0 periods back from it: its long gentle back;
     // and the next one's, v periods ahead: that wave's steep face, at its own height.
     float wave = time / period - arrival;
-    float section, u0;
-    float n = surfClock(xy, wave, period, section, u0);
-    float next = surfSection(xy, n + 1.0, period);
+    float section, u0, next;
+    float n = surfClock(xy, wave, period, section, u0, next);
     float v = max(n + 1.0 - 0.08 * next - wave, 0.0);
     float a0 = surfCrestHeight(o, hs, h, n, section, spacing, filter, drift, weight);
     float a1 = surfCrestHeight(o, hs, h, n + 1.0, next, spacing, filter, drift, weight);
