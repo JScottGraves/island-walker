@@ -113,14 +113,20 @@ final class Coordinator: NSObject, MTKViewDelegate {
         hour = Snapshots.option("--time").flatMap { Double($0) } ?? hour
         day = Snapshots.option("--day").flatMap { Int($0) } ?? day
         guard let overview = try? tiles.grid(level: tiles.overviewLevel()) else { return }
-        // `--camera X,Y,YAW,PITCH` or `--view coast` (or summit, ridge, pali…) starts there,
-        // facing that way; otherwise at the highest point so the whole island is in view.
+        // `--camera X,Y,YAW,PITCH[,EYE]` or `--view coast` (or summit, ridge, pali…) starts there,
+        // facing that way (with EYE over 3 m, flying that high); otherwise at the highest point so the whole island is in view.
         let named = Snapshots.option("--view").flatMap { name in Snapshots.viewpoints(overview).first { $0.name == name } }
         if let view = Snapshots.cameras().first ?? named.map({ (name: $0.name, camera: $0.camera, eye: Double?.none) }) {
             renderer?.prepareGround(x: view.camera.x, y: view.camera.y)
             var w = Walker(x: view.camera.x, y: view.camera.y, ground: ground)
             w.yaw = view.camera.yaw
             w.pitch = view.camera.pitch
+            // A fifth value over a few metres (an eye that far above the ground) starts flying there.
+            if let eye = view.eye, eye > 3 {
+                flying = true
+                flyHeight = w.z + eye - w.eyeHeight
+                w.z = flyHeight
+            }
             walker = w
             return
         }
