@@ -369,8 +369,10 @@ float foamCells(float2 q) {
 // foam (y), the foam and scum carried in the sheet (z), and its thickness in metres (w); and
 // through `ripple` a slope for the moving ripples on it. `above` is the front's height over the
 // sand (swashSand z), `phase` the swash's phase, `up` the up-beach direction, `footprint` metres
-// per pixel.
-float4 swashSheet(constant OceanParams &o, float hs, float period, float2 xy, float above, float front, float runup, float phase,
+// per pixel, `local` xy wrapped every 4 km in full precision (VOut.local: the world's float xy
+// tens of kilometres out steps by ~8 mm, and the patterns' contours showed those steps as
+// hairlines close up).
+float4 swashSheet(constant OceanParams &o, float hs, float period, float2 xy, float2 local, float above, float front, float runup, float phase,
                   float2 up, float footprint, float time, thread float2 &ripple) {
     ripple = 0.0;
     float4 r = 0.0;
@@ -391,10 +393,8 @@ float4 swashSheet(constant OceanParams &o, float hs, float period, float2 xy, fl
     // shear the patterns into streaks up the beach.
     float smoothRunup = 0.75 * swashRunup(o, hs, period, float2(0.0), 0.0, 0.5) / max(0.55 + 0.45 * swashNoise(float2(0.0)), 0.1);
     float travelled = (xa < 1.0 ? smoothRunup * 4.0 * xa * (1.0 - xa) : 0.0) / kSwashBeta;
-    float2 local = xy - floor(xy / 4096.0) * 4096.0;
     float2 q = local - up * travelled;
     q = float2(0.8 * q.x - 0.6 * q.y, 0.6 * q.x + 0.8 * q.y);
-    float2 across = float2(-up.y, up.x);
     // The bore: white water along the leading edge, 0.5–2 m wide on the slope, strong early on
     // the uprush and thinning as it slows.
     float uprush = saturate(1.0 - x / 0.5);
@@ -404,9 +404,12 @@ float4 swashSheet(constant OceanParams &o, float hs, float period, float2 xy, fl
     float churn = smoothstep(0.25, 0.65, swashNoise(q / 0.35 + 3.3));
     r.y = saturate(bore * (0.55 + 0.45 * churn));
     // Foam and scum riding in the sheet: patches carried up with it and back, thinner the
-    // further behind the bore and the later in the swash; on the backwash streaked downslope.
+    // further behind the bore and the later in the swash. In q's fixed axes: turned into the
+    // beach's own (up, across) and squashed along it, q (kilometres from the wrap's origin) swung
+    // with every millimetre step of `up`, which the shore texture resolves only that finely tens of
+    // kilometres out, and the cells jumped by decimetres: hairlines up the beach, a few cm apart.
     float behind = above / max(runup, 0.05);
-    float2 sq = float2(dot(q, across), dot(q, up) * mix(1.0, 0.5, smoothstep(0.4, 0.7, x)));
+    float2 sq = q;
     // Rounded blobs (a cell pattern, not thresholded value noise, whose bilinear lattice shows as
     // dashes), with a little finer lace through them.
     float blobs = smoothstep(0.45, 0.75, foamCells(sq / 1.4 + 1.9));

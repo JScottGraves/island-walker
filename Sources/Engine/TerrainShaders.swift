@@ -134,6 +134,10 @@ struct VOut {
     // Invariant: the depth prepass and the shading pass must produce identical depths.
     float4 position [[position, invariant]];
     float3 world;
+    // xy from a whole 4 km tile near the camera: small, so interpolated in full precision (world
+    // xy tens of kilometres out steps by millimetres from pixel to pixel). Wrapped every 4 km,
+    // it is the world's xy wrapped the same way.
+    float2 local;
     float3 normal;
     float2 light;
     // Horizon elevation (radians) in 16 azimuth sectors, for the baked shadow path.
@@ -180,6 +184,7 @@ vertex VOut terrainVertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     // Camera-relative: subtract before projecting so precision stays high near the viewer.
     o.position = u.viewProjection * float4(world - u.cameraPosition, 1.0);
     o.world = world;
+    o.local = xy - floor(u.cameraPosition.xy / 4096.0) * 4096.0;
     o.normal = normalize(float3(-hx, -hy, 2.0 * spacing));
     constexpr sampler linear(filter::linear, address::clamp_to_edge);
     o.light = float2(skyVisibility.sample(linear, xy / t.domainSize, level(0)).r, 1.0);
@@ -884,7 +889,7 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
             // the mesh's triangles: on a nearly flat one a centimetre of the front's rise swept
             // the edge across the whole triangle within a frame or two (flickering facets). A few
             // centimetres of micro-relief keep the edges ragged and moving smoothly.
-            float2 relief = in.world.xy - floor(in.world.xy / 4096.0) * 4096.0;
+            float2 relief = in.local - floor(in.local / 4096.0) * 4096.0;
             float hSwash = h + 0.05 * (swashNoise(relief / 0.9 + 4.4) - 0.5) + 0.04 * (swashNoise(relief / 3.3 + 1.7) - 0.5);
             float4 sand = far < 1.0 ? swashSand(ocean, hs, clock.x, clock.y, in.world.xy, hSwash, ocean.time.x, drift, front, runup)
                                     : float4(0.0);
@@ -903,14 +908,23 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
             // The sheet rolling up the beach and back (swashSheet): its leading bore, the foam it
             // carries, its thickness and moving ripples, up-beach.
             float footprint = d * 1.1547 / u.frame.y;
-            float4 water = far < 1.0 ? swashSheet(ocean, hs, clock.y, in.world.xy, sand.z, front, runup, sand.w, up, footprint,
+            float4 water = far < 1.0 ? swashSheet(ocean, hs, clock.y, in.world.xy, in.local - floor(in.local / 4096.0) * 4096.0, sand.z, front, runup, sand.w, up, footprint,
                                                   ocean.time.x, sheetRipple) : float4(0.0);
             sheet = reach * (1.0 - far) * water.x;
             lace = sheet * max(water.y, water.z);
             sheetDepth = water.w;
             // Strands 0.6 m across, faded to their mean (~0.4) well before a pixel spans them, so
             // they don't alias into blotches; the far line soft, as the mesh's heights are there.
-            float strands = mix(smoothstep(0.35, 0.7, groundNoise(in.world.xy / 0.6 + 8.1)), 0.4, smoothstep(15.0, 60.0, d));
+            // Close up, a ragged lace of bubbles through them (a soft band of white a
+            // quarter metre wide, as before, read as a smear on the sand at one's feet).
+            // (Only where there is stranded foam, and near enough to see it.)
+            float bubbles = 0.45;
+            if (sand.y > 0.002 && d < 8.0) {
+                float2 wobble = float2(swashNoise(relief / 0.4), swashNoise(relief / 0.4 + 7.7));
+                float web = 1.0 - smoothstep(0.3, 0.55, foamCells(relief / 0.14 + 2.3 + 0.6 * wobble));
+                bubbles = mix(web * smoothstep(0.15, 0.45, swashNoise(relief / 0.35 + 5.1)), 0.45, smoothstep(2.0, 8.0, d));
+            }
+            float strands = mix(smoothstep(0.35, 0.7, groundNoise(in.world.xy / 0.6 + 8.1)) * bubbles, 0.4, smoothstep(15.0, 60.0, d));
             stranded = reach * (0.8 * sand.y * strands * (1.0 - far) + 0.2 * far * (1.0 - smoothstep(0.0, 0.08, abs(h - band))));
 
         }
