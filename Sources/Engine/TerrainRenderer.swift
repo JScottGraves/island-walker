@@ -653,19 +653,19 @@ public final class TerrainRenderer {
     /// Renders a view offscreen and returns it as 8-bit RGB, top row first: `snapshotFrames`
     /// frames at the same camera, so the clouds look as they do in the running app.
     /// Lets tools and CI inspect what the app draws without a window or screen capture.
+    /// `warmup` seconds before it, the sea runs on at 60 frames a second up to `clock` (so the
+    /// whitecaps' foam has built up and faded as in the running app; the clock ends where it was).
     public func snapshot(width: Int, height: Int, eye: SIMD3<Double>, forward: SIMD3<Float>,
-                         colorFormat: MTLPixelFormat = .bgra8Unorm_srgb) throws -> [UInt8] {
-        let colorDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: colorFormat, width: width, height: height, mipmapped: false)
-        colorDesc.usage = [.renderTarget]
-        colorDesc.storageMode = .shared
-        guard let color = device.makeTexture(descriptor: colorDesc), let cmd = queue.makeCommandBuffer(),
-              let timed = queue.makeCommandBuffer()
+                         colorFormat: MTLPixelFormat = .bgra8Unorm_srgb, warmup: Double = 0) throws -> [UInt8] {
+        let color = try snapshotTarget(width: width, height: height, colorFormat: colorFormat)
+        guard let cmd = queue.makeCommandBuffer(), let timed = queue.makeCommandBuffer()
         else { throw RendererError.setup("snapshot targets") }
         // A fresh history, then enough frames at this camera for it to settle. Frames count
         // as 1/60 s apart for the trees' LOD fades, as in the running app.
         flora?.fixedFrameTime = 1.0 / 60
         historyValid = false
         ocean.resetHistory()
+        try runUp(to: clock, seconds: warmup, color: color, eye: eye, forward: forward)
         for k in 0..<TerrainRenderer.snapshotFrames {
             // Load every tile the view needs before the first frame: snapshots don't stream.
             encode([cmd], color: color, eye: eye, forward: forward, synchronousStreaming: k == 0)
@@ -695,6 +695,71 @@ public final class TerrainRenderer {
             }
         }
 
+        return rgb(color)
+    }
+
+    /// Frames as the running app draws them, history kept from one to the next: after
+    /// `warmup` seconds at 60 frames a second up to `clock`, `count` frames `step` seconds
+    /// apart (the frames between drawn too, 1/60 s apart), each as 8-bit RGB, top row first.
+    /// For the surf's and the whitecaps' motion, and for flicker from frame to frame.
+    public func snapshotSequence(width: Int, height: Int, eye: SIMD3<Double>, forward: SIMD3<Float>,
+                                 count: Int, step: Double, warmup: Double,
+                                 colorFormat: MTLPixelFormat = .bgra8Unorm_srgb) throws -> [[UInt8]] {
+        let color = try snapshotTarget(width: width, height: height, colorFormat: colorFormat)
+        flora?.fixedFrameTime = 1.0 / 60
+        historyValid = false
+        ocean.resetHistory()
+        let start = clock
+        // Load every tile the view needs first: snapshots don't stream.
+        if let cmd = queue.makeCommandBuffer() {
+            encode([cmd], color: color, eye: eye, forward: forward, synchronousStreaming: true)
+            cmd.commit()
+        }
+        try runUp(to: start, seconds: Swift.max(warmup, 0.5), color: color, eye: eye, forward: forward)
+        var frames: [[UInt8]] = []
+        for k in 0..<count {
+            let target = start + Double(k) * step
+            let between = k == 0 ? 0 : Swift.max(Int((step * 60).rounded()) - 1, 0)
+            try runUp(to: target, seconds: Double(between) / 60, color: color, eye: eye, forward: forward)
+            clock = target
+            guard let cmd = queue.makeCommandBuffer() else { throw RendererError.setup("snapshot frame") }
+            encode([cmd], color: color, eye: eye, forward: forward)
+            cmd.commit()
+            cmd.waitUntilCompleted()
+            frames.append(rgb(color))
+        }
+        return frames
+    }
+
+    private func snapshotTarget(width: Int, height: Int, colorFormat: MTLPixelFormat) throws -> MTLTexture {
+        let colorDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: colorFormat, width: width, height: height, mipmapped: false)
+        colorDesc.usage = [.renderTarget]
+        colorDesc.storageMode = .shared
+        guard let color = device.makeTexture(descriptor: colorDesc) else { throw RendererError.setup("snapshot targets") }
+        return color
+    }
+
+    /// Frames 1/60 s apart over the `seconds` before `end` (none at `end` itself), the clock
+    /// set to each; committed in batches, waiting on each.
+    private func runUp(to end: Double, seconds: Double, color: MTLTexture, eye: SIMD3<Double>, forward: SIMD3<Float>) throws {
+        let frames = Int((seconds * 60).rounded())
+        var k = 0
+        while k < frames {
+            guard let cmd = queue.makeCommandBuffer() else { throw RendererError.setup("snapshot warm-up") }
+            for _ in 0..<Swift.min(8, frames - k) {
+                clock = end - Double(frames - k) / 60
+                encode([cmd], color: color, eye: eye, forward: forward)
+                k += 1
+            }
+            cmd.commit()
+            cmd.waitUntilCompleted()
+        }
+        clock = end
+    }
+
+    /// The colour target as 8-bit RGB, top row first.
+    private func rgb(_ color: MTLTexture) -> [UInt8] {
+        let width = color.width, height = color.height
         var bgra = [UInt8](repeating: 0, count: width * height * 4)
         bgra.withUnsafeMutableBytes { buf in
             color.getBytes(buf.baseAddress!, bytesPerRow: width * 4, from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0)

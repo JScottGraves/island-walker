@@ -369,13 +369,18 @@ float foamCells(float2 q) {
 // foam (y), the foam and scum carried in the sheet (z), and its thickness in metres (w); and
 // through `ripple` a slope for the moving ripples on it. `above` is the front's height over the
 // sand (swashSand z), `phase` the swash's phase, `up` the up-beach direction, `footprint` metres
-// per pixel.
-float4 swashSheet(constant OceanParams &o, float hs, float period, float2 xy, float above, float front, float runup, float phase,
-                  float2 up, float footprint, float time, thread float2 &ripple) {
+// per pixel, `local` xy wrapped every 4 km in full precision (VOut.local: the world's float xy
+// tens of kilometres out steps by ~8 mm, and the patterns' contours showed those steps as
+// hairlines close up).
+float4 swashSheet(constant OceanParams &o, float hs, float period, float2 xy, float2 local, float above, float front, float runup, float phase,
+                  float2 up, float footprint, float time, float heightWidth, thread float2 &ripple) {
     ripple = 0.0;
     float4 r = 0.0;
     // A crisp edge, antialiased over the pixel (the front is a contour of the sand's height).
-    float aa = max(fwidth(above), 1e-4);
+    // `heightWidth` is fwidth of the sand's height, taken by the caller where every pixel of the
+    // quad runs it (the front moves little across a pixel): taken here, inside the swash's
+    // branch, quads on its edge read garbage from pixels that skipped it, a dotted contour line.
+    float aa = max(heightWidth, 1e-4);
     r.x = saturate(above / aa + 0.5) * (phase < kSwashShare ? 1.0 : 0.0);
     if (r.x <= 0.0) return r;
     float x = phase / kSwashShare;
@@ -391,10 +396,8 @@ float4 swashSheet(constant OceanParams &o, float hs, float period, float2 xy, fl
     // shear the patterns into streaks up the beach.
     float smoothRunup = 0.75 * swashRunup(o, hs, period, float2(0.0), 0.0, 0.5) / max(0.55 + 0.45 * swashNoise(float2(0.0)), 0.1);
     float travelled = (xa < 1.0 ? smoothRunup * 4.0 * xa * (1.0 - xa) : 0.0) / kSwashBeta;
-    float2 local = xy - floor(xy / 4096.0) * 4096.0;
     float2 q = local - up * travelled;
     q = float2(0.8 * q.x - 0.6 * q.y, 0.6 * q.x + 0.8 * q.y);
-    float2 across = float2(-up.y, up.x);
     // The bore: white water along the leading edge, 0.5–2 m wide on the slope, strong early on
     // the uprush and thinning as it slows.
     float uprush = saturate(1.0 - x / 0.5);
@@ -404,9 +407,12 @@ float4 swashSheet(constant OceanParams &o, float hs, float period, float2 xy, fl
     float churn = smoothstep(0.25, 0.65, swashNoise(q / 0.35 + 3.3));
     r.y = saturate(bore * (0.55 + 0.45 * churn));
     // Foam and scum riding in the sheet: patches carried up with it and back, thinner the
-    // further behind the bore and the later in the swash; on the backwash streaked downslope.
+    // further behind the bore and the later in the swash. In q's fixed axes: turned into the
+    // beach's own (up, across) and squashed along it, q (kilometres from the wrap's origin) swung
+    // with every millimetre step of `up`, which the shore texture resolves only that finely tens of
+    // kilometres out, and the cells jumped by decimetres: hairlines up the beach, a few cm apart.
     float behind = above / max(runup, 0.05);
-    float2 sq = float2(dot(q, across), dot(q, up) * mix(1.0, 0.5, smoothstep(0.4, 0.7, x)));
+    float2 sq = q;
     // Rounded blobs (a cell pattern, not thresholded value noise, whose bilinear lattice shows as
     // dashes), with a little finer lace through them.
     float blobs = smoothstep(0.45, 0.75, foamCells(sq / 1.4 + 1.9));
@@ -531,6 +537,58 @@ kernel void oceanColumns(constant OceanParams &o [[buffer(0)]],
         derivatives.write(float4(s.x, s.y, lambda * e.x, lambda * e.y), p, c);
         moments.write(float4(s.x * s.x, s.y * s.y, s.x * s.y, 0.0), p, c);
     }
+}
+
+// ---- Whitecaps (research/waves.md, gap 3; Atlas, GDC 2019; Crest) ----
+// Each of the long cascades keeps a foam map in its patch's space, fixed in the world: where its
+// crests fold (the Jacobian of the choppy displacement drops well under 1, by some multiple of
+// the cascade's own spread of it, λσ_slope) foam is added, the more the longer and harder the
+// crest folds, and everywhere it fades by e^(−dt/τ). The crest runs on at the waves' speed and
+// leaves its foam behind to thin out over seconds, as whitecaps do (5–20 s).
+
+// Seconds the foam fades over (e-folding), the fold that starts a cap (in the cascade's σ of
+// 1 − J under 1), the fold's span from a trace of foam to a full cap, how fast a held fold
+// piles it up (per second; up to 1.5, a dense cap that lasts longer), and how fast it spreads
+// into its neighbours (per second: an ageing patch widens and thins).
+constant float kFoamFade = 6.0;
+constant float kFoamOnset = 2.95;
+constant float kFoamSpan = 0.6;
+constant float kFoamGrowth = 0.6;
+constant float kFoamSpread = 0.4;
+
+// One step of the foam over every cascade with whitecaps (z): `step` xyz the seconds each fades
+// by (−1: not updated this frame, kept as it was), w 1 to start over from this moment's folds.
+kernel void oceanFoam(constant OceanParams &o [[buffer(0)]],
+                      constant float4 &step [[buffer(1)]],
+                      texture2d_array<float, access::read> derivatives [[texture(0)]],
+                      texture2d_array<float, access::read> displacement [[texture(1)]],
+                      texture2d_array<float, access::read> previous [[texture(2)]],
+                      texture2d_array<float, access::write> foam [[texture(3)]],
+                      uint3 g [[thread_position_in_grid]]) {
+    if (g.x >= foam.get_width() || g.y >= foam.get_height()) return;
+    uint c = g.z;
+    float dt = step[c];
+    float f = previous.read(g.xy, c).r;
+    if (dt >= 0.0 || step.w > 0.5) {
+        float4 dv = derivatives.read(g.xy, c);
+        float shear = displacement.read(g.xy, c).w;
+        float j = (1.0 + dv.z) * (1.0 + dv.w) - shear * shear;
+        float sigma = max(o.grid.w * sqrt(max(o.slopeXX[c] + o.slopeYY[c], 0.0)), 1e-3);
+        float inject = saturate((1.0 - kFoamOnset * sigma - j) / (kFoamSpan * sigma));
+        float held = max(dt, 0.0);
+        if (step.w > 0.5) {
+            f = inject;
+        } else {
+            uint2 last = uint2(foam.get_width() - 1, foam.get_height() - 1);
+            float around = previous.read(uint2(g.x == 0 ? last.x : g.x - 1, g.y), c).r
+                         + previous.read(uint2(g.x == last.x ? 0 : g.x + 1, g.y), c).r
+                         + previous.read(uint2(g.x, g.y == 0 ? last.y : g.y - 1), c).r
+                         + previous.read(uint2(g.x, g.y == last.y ? 0 : g.y + 1), c).r;
+            f = mix(f, 0.25 * around, saturate(kFoamSpread * held)) * exp(-held / kFoamFade);
+        }
+        f = min(max(f, inject) + inject * held * kFoamGrowth, 1.5);
+    }
+    foam.write(float4(f, 0.0, 0.0, 0.0), g.xy, c);
 }
 
 // The sky environment the sea reflects: the sky-view LUT lifted to the horizon, with the
@@ -748,19 +806,30 @@ float foamRafts(float2 q, float open, float aa) {
     float2 rand2 = float2(float(h2 >> 24), float((h2 >> 4) & 0xffu)) / 255.0;
     float share = mix(0.3, 1.05, open);
     float size = mix(0.05, 0.62, open);
-    float r1 = rand1.y < share ? size * (0.4 + 0.9 * rand1.x) : -1.0;
-    float r2 = rand2.y < share ? size * (0.4 + 0.9 * rand2.x) : -1.0;
-    float hole = max(1.0 - smoothstep(r1 - aa, r1 + aa, length(q - p1)),
-                     1.0 - smoothstep(r2 - aa, r2 + aa, length(q - p2)));
+    // A cell's hole grows in from nothing as the share passes it (popping in whole flickered).
+    float g1 = saturate((share - rand1.y) / 0.12), g2 = saturate((share - rand2.y) / 0.12);
+    float r1 = g1 > 0.0 ? size * (0.4 + 0.9 * rand1.x) * g1 - aa : -1.0;
+    float r2 = g2 > 0.0 ? size * (0.4 + 0.9 * rand2.x) * g2 - aa : -1.0;
+    // Holes are bubbles burst out of the foam: squashed each its own way and with ragged rims
+    // (a little noise on the distance), not circles.
+    float2 rim = foamNoise2(q * 2.7, 41u);
+    float2 s1 = float2(1.0 + 0.5 * (rand1.x - 0.5), 1.0 - 0.5 * (rand1.y - 0.5));
+    float2 s2 = float2(1.0 + 0.5 * (rand2.y - 0.5), 1.0 - 0.5 * (rand2.x - 0.5));
+    float d1 = length((q - p1) * s1) + 0.09 * rim.x, d2 = length((q - p2) * s2) + 0.09 * rim.y;
+    float hole = max(1.0 - smoothstep(r1 - aa, r1 + aa, d1), 1.0 - smoothstep(r2 - aa, r2 + aa, d2));
     // The wall between them: its own thickness, or gone.
     uint pair = (h1 ^ h2) * 2654435761u;
     pair ^= pair >> 13;
     // Past 1 (the oldest foam) the walls go on thinning and breaking until none are left.
     float thick = max(mix(0.09, 0.025, open), 0.0) * (0.4 + 1.2 * float(pair & 0xffu) / 255.0);
-    bool gap = float((pair >> 8) & 0xffu) / 255.0 < 0.45 * open + 2.0 * max(open - 1.0, 0.0);
-    float wall = gap ? 0.0 : 1.0 - smoothstep(thick, thick + aa, wallDist);
+    // Walls and cells fade out over a stretch of `open` rather than vanish at a threshold:
+    // the foam ages every frame, and a cell or wall switching off at once flickered.
+    float gapAt = float((pair >> 8) & 0xffu) / 255.0;
+    float gap = smoothstep(gapAt - 0.08, gapAt + 0.08, 0.45 * open + 2.0 * max(open - 1.0, 0.0));
+    float wall = (1.0 - gap) * (1.0 - smoothstep(thick, thick + aa, wallDist));
     // The oldest (open 1…1.4): whole cells' remains dissolve, at random, until none are left.
-    float gone = step(rand1.x * 0.7 + rand1.y * 0.3, 2.5 * (open - 1.0));
+    float goneAt = rand1.x * 0.7 + rand1.y * 0.3;
+    float gone = smoothstep(goneAt - 0.12, goneAt + 0.12, 2.5 * (open - 1.0));
     return max(1.0 - hole, wall) * (1.0 - gone);
 }
 
@@ -879,10 +948,23 @@ float surfFoam(constant OceanParams &o, float4 setting, float4 crests, float2 he
                             age1, wave1);
     float b2 = surfBreakers(o, crests.y, crests.w, setting.y, setting.z, o.waves.y, xy, ragged, footprint, drift, weight.y, f2,
                             age2, wave2);
-    float lace = 1.0 - smoothstep(0.02, 0.12, depth);
-    // No breakers over the last few decimetres of water (the shallows' own depth): there the
-    // front has become a sheet of swash and the waterline's lace.
-    float cover = saturate(max(b1, b2) * smoothstep(0.25, 0.5, depth) + lace * 0.6 * setting.w);
+    // In world axes, wrapped every 4 km and turned off the noise's lattice.
+    float2 local = xy - floor(xy / 4096.0) * 4096.0;
+    float2 rs = float2(0.8 * local.x - 0.6 * local.y, 0.6 * local.x + 0.8 * local.y);
+    // The whitewater runs on into the shallows as a thinning, ragged bore up to where it has run
+    // out, a depth that varies along the shore over metres (a few to ~35 cm: on a 1:20 beach
+    // the bore's end wanders by metres), not a contour line; past it the swash sheet on the sand
+    // carries the bore on (swashSheet). Thinning into clumps, not fading as a whole.
+    float n1 = swashNoise(rs / 1.4 + 2.7), n2 = swashNoise(rs / 7.0 + 9.1);
+    float runout = 0.03 + 0.22 * n2 + 0.1 * n1;
+    float run = smoothstep(runout - 0.02, runout + 0.3, depth);
+    // Inside it, the roller's front runs on in clumps, with only a thin lace of its trail.
+    float clumps = smoothstep(0.35, 0.7, swashNoise(rs / 0.8 + 5.3) + 0.35 * run);
+    float shallow = clumps * max(0.85 * max(f1, f2), 0.3 * max(b1, b2));
+    float bore = mix(shallow, max(b1, b2), run) * smoothstep(0.0, 0.03, depth);
+    // Residual foam at the waterline in patches and threads, not a strip.
+    float lace = (1.0 - smoothstep(0.02, 0.12, depth)) * smoothstep(0.45, 0.8, swashNoise(rs / 0.6 + 1.9) + 0.25 * n2);
+    float cover = saturate(bore + lace * 0.6 * setting.w);
     if (cover <= 0.02) return 0.0;
     roller = max(f1, f2);
     // A pixel this coarse sees only the foam's cover.
@@ -891,7 +973,9 @@ float surfFoam(constant OceanParams &o, float4 setting, float4 crests, float2 he
     // since its front passed. Each wave leaves a fresh pattern, drifting on with it a little
     // and ageing: its rafts' walls thin and break, its cells open up. (Drifting by the sea's
     // whole time instead magnified the slightest turn of the waves' heading into streaks.)
-    bool second = b2 > b1;
+    // The bigger system's (by its local height, which holds still): choosing by whose foam is
+    // brighter this frame swapped the whole pattern back and forth where the two were alike.
+    bool second = setting.y > setting.x;
     float age = second ? age2 : age1, wave = second ? wave2 : wave1;
     float period = second ? o.waves.y : o.waves.x;
     float old = saturate(age / (0.8 * period));
@@ -906,10 +990,14 @@ float surfFoam(constant OceanParams &o, float4 setting, float4 crests, float2 he
     // How far the foam has opened up: dense young whitewater a blanket with holes, thinning
     // foam a web of walls, the oldest a few broken filaments.
     // (Past 1 the last walls break away; under the roller, none.)
-    float open = clamp(1.25 - 1.3 * thick + 0.35 * old - 1.5 * roller, 0.0, 1.5);
+    // Held at 1 (a web of walls): past it the oldest foam's cells dissolve one by one, which in
+    // the shallows left polygon shards; the trail's cover fades it out instead.
+    float open = clamp(1.25 - 1.3 * thick + 0.35 * old - 1.5 * roller, 0.0, 1.0);
     float wide = smoothstep(-0.06, 0.06, patch.y + 0.5 * old - 0.2);
-    float2 rw = r + 0.4 * warp;
-    float aaFine = max(0.03, 1.2 * footprint / 0.5), aaWide = max(0.02, 1.2 * footprint / 1.5);
+    // Warped at two scales so the rafts' walls (straight bisectors between cells) bend.
+    float2 rw = r + 0.4 * warp + 0.18 * foamNoise2(r / 0.6 + 3.7, 29u);
+    // Soft edges, ~5–10 cm at the least: bubbles, not cut paper.
+    float aaFine = max(0.1, 1.2 * footprint / 0.5), aaWide = max(0.06, 1.2 * footprint / 1.5);
     float tight = wide < 1.0 ? foamRafts(rw / 0.5, open, aaFine) : 0.0;
     float loose = wide > 0.0 ? foamRafts(float2(0.5 * rw.x - 0.87 * rw.y, 0.87 * rw.x + 0.5 * rw.y) / 1.5 + 31.7, open, aaWide) : 0.0;
     // Where tight rafts meet wide ones both sets of holes are punched (a short way into each
@@ -918,7 +1006,56 @@ float surfFoam(constant OceanParams &o, float4 setting, float4 crests, float2 he
     float lacy = rafts;
     // A pixel too coarse for the rafts sees their mean.
     lacy = mix(lacy, thick * (1.0 - 0.6 * open), smoothstep(0.12, 0.35, footprint / mix(0.5, 1.5, wide)));
+    // Thin foam is partly see-through (the water shows through it), dense foam opaque.
+    lacy *= mix(0.55, 1.0, saturate(1.4 * thick + roller));
     return mix(lacy, cover, smoothstep(0.08, 0.5, footprint));
+}
+
+// The whitecaps' whiteness (0…1) at xy (oceanFoam's maps): each cascade's foam over `filter`
+// (m, the pixel's footprint along the view; its mips, far out, the mean cover over the patch)
+// with its pattern drawn at `footprint` (m, the pixel's size), less where its waves are
+// sheltered (`atten`: oceanWaveFactor) and none over the last few metres of water (the surf's).
+// Fresh foam (≥ 1) is a dense blanket with a few holes, ageing foam a web of walls and streaks
+// stretched downwind, the oldest broken filaments (foamRafts), thinner and more see-through as
+// it goes; a pixel too coarse for that sees their mean.
+float oceanFoamCover(constant OceanParams &o, texture2d_array<float> foam, float2 xy, float filter, float footprint,
+                     float4 atten, float depth) {
+    constexpr sampler s(filter::linear, mip_filter::linear, address::repeat);
+    float shallow = smoothstep(3.0, 8.0, depth);
+    if (shallow <= 0.0) return 0.0;
+    float f = 0.0;
+    for (int c = 0; c < 3; c++) {
+        float mip = log2(max(filter * float(kOceanN) * o.invPatch[c], 1.0));
+        f += foam.sample(s, oceanUV(o, c, xy), uint(c), level(mip)).r * smoothstep(0.55, 0.9, atten[c]);
+    }
+    f *= shallow;
+    if (f < 0.01) return 0.0;
+    float alpha = mix(0.35, 0.92, saturate(f));
+    float mean = alpha * min(f, 1.0) * 0.6;
+    float coarse = smoothstep(0.12, 0.5, footprint);
+    if (coarse >= 1.0) return mean;
+    // Downwind (x) and across in world axes (the wind is the same everywhere), wrapped every
+    // 4 km, turned off the lattices and warped.
+    float2 w = length(o.remainder.zw) > 0.5 ? normalize(o.remainder.zw) : float2(1.0, 0.0);
+    float2 local = xy - floor(xy / 4096.0) * 4096.0;
+    float2 q = float2(dot(local, w), dot(local, float2(-w.y, w.x)));
+    float2 warp = foamNoise2(q / float2(3.0, 1.6), 17u);
+    // Patchy and streaked downwind (5 m along, 1.5 m across): the cap's outline broken up, not
+    // the maps' smooth contour, and some of it thicker than the rest.
+    float streak = 0.5 + 0.5 * foamNoise(q / float2(5.0, 1.5) + 0.7 * warp, 23u);
+    float d = f * (0.5 + streak);
+    // Rafts 1.2 m along the wind, 0.45 m across: the ageing foam streaks downwind. Soft edges
+    // (a few centimetres at least).
+    float2 r = (q + 0.5 * warp) / float2(1.2, 0.45);
+    float open = clamp(1.15 - 0.8 * d, 0.0, 1.0);
+    float lace = foamRafts(r, open, max(0.14, footprint / 0.45));
+    // Through ageing foam, bubbles a third the size: it reads as foam, not cut-out sheets.
+    if (lace > 0.0 && open > 0.15 && footprint < 0.08) {
+        float fine = foamRafts(r * 3.1 + 17.3, 0.85 * open, max(0.14, 3.1 * footprint / 0.45));
+        lace *= mix(1.0, fine, saturate(1.5 * open - 0.2) * (1.0 - smoothstep(0.03, 0.08, footprint)));
+    }
+    float white = lace * mix(0.35, 0.92, saturate(d)) * smoothstep(0.03, 0.25, d);
+    return mix(white, mean, coarse);
 }
 
 // ---- Surf waves: the swell's crests shoaling in under the breakers ----
@@ -1147,7 +1284,7 @@ fragment float4 oceanFragment(OceanOut in [[stage_in]], constant Uniforms &u [[b
                               texture2d_array<float> derivatives [[texture(6)]],
                               texture2d_array<float> moments [[texture(7)]],
                               texture2d<float> environment [[texture(8)]],
-                              texture2d_array<float> displacement [[texture(11)]],
+                              texture2d_array<float> foam [[texture(12)]],
                               constant TerrainParams &t [[buffer(3)]],
                               const device int *pages [[buffer(5)]],
                               texture2d_array<ushort, access::read> tiles [[texture(9)]],
@@ -1158,13 +1295,14 @@ fragment float4 oceanFragment(OceanOut in [[stage_in]], constant Uniforms &u [[b
     float3 v = toEye / max(dist, 1e-3);
     float footprint = oceanFootprint(u, dist) / max(abs(v.z), 0.05);
     float2 slope = 0.0, stretch = 0.0;
-    float shear = 0.0;      // λ∂Dx/∂y, for the Jacobian (whitecaps)
+    float4 atten4 = 0.0;    // each cascade's amplitude factor here (the whitecaps')
     // Sheltered water is smoother at every scale: its capillaries follow the wind's lee, its
     // cascades their systems' shelter, so the glint narrows and calm water reads glassy.
     float3 variance = oceanRemainder(o) * in.calm;
     uint mask = 0u;
     for (int c = 0; c < 4; c++) {
         float atten = oceanWaveFactor(o, c, in.depth, in.shelter[c]);
+        atten4[c] = atten;
         float3 whole = float3(o.slopeXX[c], o.slopeYY[c], o.slopeXY[c]) * (atten * atten);
         // Past ~7 mips the map is its own mean: just variance.
         float mip = log2(max(footprint * float(kOceanN) * o.invPatch[c], 1.0));
@@ -1179,7 +1317,6 @@ fragment float4 oceanFragment(OceanOut in [[stage_in]], constant Uniforms &u [[b
         float4 mo = moments.sample(aniso, uv, uint(c)) * (atten * atten);
         slope += w * dv.xy;
         stretch += w * dv.zw;
-        if (c < 3) shear += w * atten * displacement.sample(aniso, uv, uint(c)).w;
         float3 filtered = max(float3(mo.x - dv.x * dv.x, mo.y - dv.y * dv.y, 0.0), 0.0);
         filtered.z = mo.z - dv.x * dv.y;
         variance += w * w * filtered + (1.0 - w * w) * whole;
@@ -1215,7 +1352,9 @@ fragment float4 oceanFragment(OceanOut in [[stage_in]], constant Uniforms &u [[b
         float3 refracted = refract(-v, n, 1.0 / kWaterIndex);
         OceanFloor f = oceanFloor(u, t, pages, tiles, in.world, refracted, in.depth, footprint, sunLight, cloudSun, in.floorShape);
         path = f.path;
-        waterDepth = f.below;
+        // From the mean sea down to the floor: the surface's facets (triangles a few centimetres
+        // apart in the shallows) would draw the foam's edges along them.
+        waterDepth = max(f.below - (in.world.z - u.seaLevel), 0.0);
         float sunCos = sqrt(max(1.0 - (1.0 - l.z * l.z) / (kWaterIndex * kWaterIndex), 0.05));
         float3 kd = (o.absorption.rgb + 0.5 * o.scattering.rgb + 0.02 * o.scattering.w) / sunCos;
         float3 c = o.absorption.rgb + o.scattering.rgb + o.scattering.w;
@@ -1230,21 +1369,17 @@ fragment float4 oceanFragment(OceanOut in [[stage_in]], constant Uniforms &u [[b
                               oceanFootprint(u, dist), in.drift, roller);
         if (foam > 0.0) {
             // The roller's churned water brighter (0.88) than the foam it leaves (0.75).
-            float albedo = mix(0.75, 0.88, roller);
+            float albedo = mix(0.75, 0.88, roller) * (0.92 + 0.12 * swashNoise(in.plane / 1.7 + 3.1));
             float3 white = albedo * (u.sunRadiance * (saturate(l.z) * sunLight) + skyIrradiance(u, float3(0.0, 0.0, 1.0)));
             color = mix(color, white, foam);
         }
     }
-    // Whitecaps (research/ocean.md, step O3): where the choppy displacement folds the surface
-    // (its Jacobian drops towards zero) a crest is breaking. Patchy, in world axes; out past
-    // a few metres of water (the surf has the shallows).
-    float jacobian = (1.0 + stretch.x) * (1.0 + stretch.y) - shear * shear;
-    float cap = smoothstep(0.8, 0.3, jacobian) * smoothstep(3.0, 8.0, in.depth);
+    // Whitecaps (research/waves.md, gap 3): the foam the cascades' breaking crests left
+    // (oceanFoam), fading behind them; out past a few metres of water (the surf has the shallows).
+    float cap = oceanFoamCover(o, foam, in.plane, footprint, oceanFootprint(u, dist), atten4, in.depth);
     if (cap > 0.0) {
-        float breakup = groundNoise(in.plane / 3.1 + 7.3);
-        cap *= smoothstep(0.25, 0.6, breakup + 0.4 * cap);
         float3 white = 0.8 * (u.sunRadiance * (saturate(l.z) * sunLight) + skyIrradiance(u, float3(0.0, 0.0, 1.0)));
-        color = mix(color, white, 0.9 * cap);
+        color = mix(color, white, cap);
     }
     return finishSurface(u, skyView, clouds, cloudDistance, color, in.world, in.position.xy);
 }

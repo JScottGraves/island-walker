@@ -23,6 +23,9 @@ import IslandGen
 /// one named NAME; repeat it for more. A fifth value stands that view's camera that many metres
 /// above the ground instead (a lookout platform above the trees). `--views a,b` renders only the views
 /// named. `--ocean-views` adds the sea test views of the real Oahu import (`oceanViews`).
+/// `--warm S` runs the sea for S seconds before each frame (the whitecaps' foam builds up and
+/// fades as in the running app). `--sequence N,STEP` renders N frames STEP seconds apart from
+/// each time, history kept as the app keeps it (app-NAME-HHMM-fNNN.png; for motion and flicker).
 /// Each view's GPU frame time is printed and written to timings.csv.
 enum Snapshots {
     static func option(_ name: String) -> String? {
@@ -158,7 +161,21 @@ enum Snapshots {
                     } else {
                         renderer.light = .reference
                     }
-                    let rgb = try renderer.snapshot(width: width, height: rows, eye: SIMD3(c.x, c.y, c.z), forward: forward)
+                    let warm = option("--warm").flatMap(Double.init) ?? 0
+                    let sequence = option("--sequence")?.split(separator: ",").compactMap { Double($0) } ?? []
+                    if sequence.count == 2, hour != nil {
+                        let frames = try renderer.snapshotSequence(width: width, height: rows, eye: SIMD3(c.x, c.y, c.z),
+                                                                   forward: forward, count: Int(sequence[0]),
+                                                                   step: sequence[1], warmup: warm)
+                        for (k, rgb) in frames.enumerated() {
+                            let url = out.appendingPathComponent(name + String(format: "-f%03d.png", k))
+                            try Data(PNG.encode(rgb: rgb, width: width, height: rows)).write(to: url)
+                            print("wrote \(url.path)")
+                        }
+                        continue
+                    }
+                    let rgb = try renderer.snapshot(width: width, height: rows, eye: SIMD3(c.x, c.y, c.z), forward: forward,
+                                                    warmup: warm)
                     let url = out.appendingPathComponent(name + ".png")
                     try Data(PNG.encode(rgb: rgb, width: width, height: rows)).write(to: url)
                     let s = renderer.stats
