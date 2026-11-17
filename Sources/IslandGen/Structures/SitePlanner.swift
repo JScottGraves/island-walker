@@ -114,8 +114,12 @@ public enum Grading {
         let hl = s.gradedHalfLength, hw = s.gradedHalfWidth
         guard hl > 0, hw > 0 else { return }
         let cell = height.cellSize
+        // A shallow cut's 1:3 bank can be narrower than a cell, which aliases a diagonal
+        // edge into a sawtooth of graded and natural cells: every bank spans at least this
+        // far, gentler than 1:3 where the cut is shallow.
+        let minBank = 2.5 * cell
         // The deepest cut or fill sets how far out the slopes can reach.
-        let reachLimit = 60.0 * run
+        let reachLimit = Swift.max(60.0 * run, minBank + cell)
         let r = (hl + reachLimit) * (hl + reachLimit) + (hw + reachLimit) * (hw + reachLimit)
         let reach = r.squareRoot()
         let x0 = Swift.max(0, Int((s.x - reach) / cell)), x1 = Swift.min(height.width - 1, Int((s.x + reach) / cell) + 1)
@@ -134,14 +138,17 @@ public enum Grading {
                 let target = s.gradeHeight(u: u)
                 let natural = Double(height[i, j])
                 let diff = natural - target
-                let limit = d / run
+                let limit = d * Swift.min(1 / run, abs(diff) / minBank)
                 // Soft clamp of diff to ±limit: the surface leaves the grade at 1:3 and
                 // eases into the natural ground instead of meeting it at a kink.
                 let graded: Double
                 if d == 0 {
                     graded = target
                 } else {
-                    graded = target + (diff < 0 ? -1 : 1) * softMin(abs(diff), limit, knee: Swift.min(soft, limit))
+                    // The knee also scales with the cut, so a shallow bank's toe meets the natural
+                    // ground within ~1.5 bank widths instead of easing in for a hundred metres.
+                    let knee = Swift.min(soft, limit, abs(diff) / 2)
+                    graded = target + (diff < 0 ? -1 : 1) * softMin(abs(diff), limit, knee: knee)
                 }
                 if abs(graded - natural) > 0.05 { embankment = Swift.max(embankment, d) }
                 out[i, j] = Float(graded)

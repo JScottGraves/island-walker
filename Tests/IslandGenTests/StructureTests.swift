@@ -98,6 +98,39 @@ final class StructureTests: XCTestCase {
         XCTAssertEqual(back.v, -45, accuracy: 1e-9)
     }
 
+    /// A shallow cut's 1:3 slope is narrower than a 10 m cell; graded naively, a diagonal strip
+    /// edge aliases into a sawtooth of cells at grade next to cells at natural height. The
+    /// slope must ease out over a few cells instead, so the edge reads as a smooth bank.
+    func testShallowCutEdgeHasNoStairSteps() {
+        var g = Grid(width: 400, height: 400, cellSize: 10)
+        for k in 0..<g.count { g.values[k] = 20 }
+        var s = Structure(id: "airstrip-1", kind: "airstrip", x: 2000, y: 2000, heading: 33, elevation: 18.5, slope: 0,
+                          zones: [StructureZone(name: "strip", halfLength: 810, halfWidth: 45, surface: .mownGrass,
+                                                plants: .grassOnly, graded: true)])
+        Grading.apply(&s, to: &g, seaLevel: 0)
+        var worst = 0.0
+        for j in 1..<(g.height - 1) {
+            for i in 1..<(g.width - 1) {
+                let lap = 4 * Double(g[i, j]) - Double(g[i - 1, j]) - Double(g[i + 1, j]) - Double(g[i, j - 1]) - Double(g[i, j + 1])
+                worst = max(worst, abs(lap))
+            }
+        }
+        // A 1.5 m bank spread over ≥ 2.5 cells bends by ~0.6 m per cell along an edge and about
+        // twice that at the strip's corners, where two banks meet; a one-cell sawtooth bends by ~3.4 m.
+        XCTAssertLessThan(worst, 1.5)
+        XCTAssertEqual(Double(g[200, 200]), 18.5, accuracy: 1e-4)
+        XCTAssertEqual(Double(g[5, 5]), 20, accuracy: 1e-4)
+        // ...and the bank still meets the natural ground close by: a 1.5 m cut is back to
+        // natural within a few tens of metres, not easing on for a hundred.
+        XCTAssertLessThanOrEqual(s.embankment, 50)
+        var shallow = s
+        shallow.elevation = 19.6
+        shallow.embankment = 0
+        for k in 0..<g.count { g.values[k] = 20 }
+        Grading.apply(&shallow, to: &g, seaLevel: 0)
+        XCTAssertLessThanOrEqual(shallow.embankment, 50)
+    }
+
     func testSoftMinIsContinuous() {
         var last = Grading.softMin(0, 5, knee: 1.5)
         for k in 1...1000 {
