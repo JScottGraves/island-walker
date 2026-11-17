@@ -17,6 +17,7 @@ import Walker
 // `--view coast` starts at that snapshot viewpoint (summit, ridge, coast, pali), `--camera X,Y,YAW,PITCH`
 // (metres, degrees) at that spot, and `--flora off` draws no trees. `--cover off` draws no grasses and
 // sedges; `--cover-range M` (default 50) and `--cover-density X` (default 1) tune them.
+// `--parallax off` draws the ground textures flat; P toggles that live (ISLAND_PARALLAX tunes it).
 
 @main
 struct IslandApp: App {
@@ -78,6 +79,8 @@ final class Coordinator: NSObject, MTKViewDelegate {
     var lastTime = CACurrentMediaTime()
     var fWasDown = false
     var tWasDown = false
+    var pWasDown = false
+    var savedParallax: Float = 1
     /// Local solar time of day and day of year; the sun follows them.
     var hour = 9.5
     var day = SunPath.defaultDay
@@ -89,6 +92,7 @@ final class Coordinator: NSObject, MTKViewDelegate {
     // macOS virtual key codes
     let kW: UInt16 = 13, kA: UInt16 = 0, kS: UInt16 = 1, kD: UInt16 = 2
     let kF: UInt16 = 3, kSpace: UInt16 = 49, kC: UInt16 = 8
+    let kP: UInt16 = 35
     let kT: UInt16 = 17, kLeftBracket: UInt16 = 33, kRightBracket: UInt16 = 30
 
     func attach(_ view: InputMTKView) {
@@ -106,6 +110,7 @@ final class Coordinator: NSObject, MTKViewDelegate {
                                            groundCover: GroundCoverSettings(arguments: CommandLine.arguments),
                                            antialiasing: Snapshots.antialiasing())
             renderer?.jitterSign = Snapshots.option("--jitter-sign").flatMap(Float.init) ?? 1
+            if Snapshots.option("--parallax") == "off" { renderer?.parallax.x = 0 }
         } catch {
             print("renderer failed: \(error)")
             return
@@ -160,6 +165,14 @@ final class Coordinator: NSObject, MTKViewDelegate {
             flyHeight = w.z + 50
         }
         fWasDown = fDown
+
+        // P switches the ground textures' parallax off and back on, for comparing.
+        let pDown = view.keys.contains(kP)
+        if pDown && !pWasDown {
+            if renderer.parallax.x > 0 { savedParallax = renderer.parallax.x; renderer.parallax.x = 0 } else { renderer.parallax.x = savedParallax }
+            print("parallax \(renderer.parallax.x > 0 ? "on" : "off")")
+        }
+        pWasDown = pDown
 
         let tDown = view.keys.contains(kT)
         if tDown && !tWasDown { timeRuns.toggle() }

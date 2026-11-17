@@ -357,20 +357,28 @@ struct GroundTexel {
 
 // One layer at two scales, the wider one turned, switched between by a noise field tens
 // of metres across, so neither repeat lines up into a grid.
-GroundTexel groundLayer(texture2d_array<float> albedo, texture2d_array<float> normal, int layer, float2 p, float wide) {
+// The wider scale's turn (37°).
+float2 groundTurn(float2 v) { return float2(0.8 * v.x - 0.6 * v.y, 0.6 * v.x + 0.8 * v.y); }
+
+// The texture's gradients are those of the unshifted ground (dpx, dpy: world xy per pixel),
+// so a parallax shift that jumps between neighbouring pixels doesn't pick a coarse mip.
+GroundTexel groundLayer(texture2d_array<float> albedo, texture2d_array<float> normal, int layer, float2 p, float wide,
+                        float2 dpx, float2 dpy) {
     constexpr sampler s(filter::linear, mip_filter::linear, address::repeat, max_anisotropy(8));
     float2 a = p / kGroundTile;
-    float2 b = float2(0.8 * p.x - 0.6 * p.y, 0.6 * p.x + 0.8 * p.y) / kGroundTileWide + 0.37;
+    float2 b = groundTurn(p) / kGroundTileWide + 0.37;
+    gradient2d ga = gradient2d(dpx / kGroundTile, dpy / kGroundTile);
+    gradient2d gb = gradient2d(groundTurn(dpx) / kGroundTileWide, groundTurn(dpy) / kGroundTileWide);
     // Normal maps: OpenGL x and y in red and green, height in blue.
     // Only where the switch between them is under way does a pixel sample both.
     float3 pa = 0.0, pb = 0.0, ca = 0.0, cb = 0.0;
     if (wide < 0.99) {
-        pa = normal.sample(s, a, uint(layer)).xyz;
-        ca = albedo.sample(s, a, uint(layer)).rgb;
+        pa = normal.sample(s, a, uint(layer), ga).xyz;
+        ca = albedo.sample(s, a, uint(layer), ga).rgb;
     }
     if (wide > 0.01) {
-        pb = normal.sample(s, b, uint(layer)).xyz;
-        cb = albedo.sample(s, b, uint(layer)).rgb;
+        pb = normal.sample(s, b, uint(layer), gb).xyz;
+        cb = albedo.sample(s, b, uint(layer), gb).rgb;
     }
     float2 na = pa.xy * 2.0 - 1.0, nb = pb.xy * 2.0 - 1.0;
     // The wider scale's normal turned back into world axes.
@@ -397,13 +405,94 @@ GroundTexel heightBlend(GroundTexel a, GroundTexel b, float t) {
     return o;
 }
 
+// ---- Parallax (research/parallax-ground.md) ----
+// Relief depth of each layer's height map (0…1 over its 1st…99th percentile), metres:
+// strand, rocky shore, marsh, dry forest, mesic, wet, riparian, cloud shrubland, bog,
+// cliff, montane, bare rock.
+// Litter, grass and sand show no gain for the cost (parallax-out/summary.md), so they are 0
+// and skip the march.
+constant float kGroundDepth[kGroundLayers + 1] = { 0.0, 0.060, 0.0, 0.060, 0.0, 0.0, 0.0,
+                                                   0.0, 0.0, 0.050, 0.0, 0.060 };
+// Longest shift per metre of depth the search walks (a view or sun ~7° above the ground).
+constant float kParallaxReach = 8.0;
+
+struct ParallaxParams {
+    float depthScale;       // × kGroundDepth; 0 turns parallax off
+    float end;              // metres from the camera where the relief has faded out
+    float steps;            // most search steps (at grazing views near the camera)
+    float shadow;           // self-shadow strength 0…1
+};
+
+// One layer's height (1 = top) at one of its two scales, with the unshifted gradients.
+float groundHeight(texture2d_array<float> normal, int layer, float2 p, bool wide, float2 dpx, float2 dpy) {
+    constexpr sampler s(filter::linear, mip_filter::linear, address::repeat);
+    if (wide)
+        return normal.sample(s, groundTurn(p) / kGroundTileWide + 0.37, uint(layer),
+                             gradient2d(groundTurn(dpx) / kGroundTileWide, groundTurn(dpy) / kGroundTileWide)).z;
+    return normal.sample(s, p / kGroundTile, uint(layer), gradient2d(dpx / kGroundTile, dpy / kGroundTile)).z;
+}
+
+// Parallax occlusion (linear search, then a secant step) through one layer's height map,
+// laid with its top on the surface. v: from the camera to the point; n: the surface
+// normal; depth: metres. Returns the world-xy shift to where the view ray meets the
+// relief, and that point's height (0…1) through `hit`.
+float2 parallaxShift(texture2d_array<float> normal, int layer, float2 p, bool wide, float2 dpx, float2 dpy,
+                     float3 v, float3 n, float depth, float steps, float jitter, thread float &hit) {
+    float vn = max(-dot(v, n), 1e-3);
+    float2 dir = (v - n * dot(v, n)).xy / vn;
+    float reach = length(dir);
+    if (reach > kParallaxReach) dir *= kParallaxReach / reach;
+    // Fewer steps looking down, where the shift is short.
+    int count = int(clamp(steps * saturate(reach / 3.0), 3.0, steps));
+    float dt = 1.0 / float(count);
+    float2 stride = dir * depth * dt;
+    // Each pixel starts its search at a different fraction of a step, changing every
+    // frame, so TAA averages the steps' bands away.
+    float t = dt * jitter, prevT = 0.0, prevGap = -1.0;
+    float gap = 0.0;
+    for (int i = 0; i <= count; i++) {
+        float hgt = groundHeight(normal, layer, p + stride * (t / dt), wide, dpx, dpy);
+        gap = (1.0 - hgt) - t;      // above the relief while positive
+        if (gap <= 0.0) break;
+        prevT = t; prevGap = gap;
+        t += dt;
+    }
+    // Secant between the last step above and the first below.
+    float k = prevGap / max(prevGap - gap, 1e-4);
+    float tHit = gap <= 0.0 && prevGap > 0.0 ? mix(prevT, t, k) : min(t, 1.0);
+    hit = 1.0 - tHit;
+    return stride * (tHit / dt);
+}
+
+// How much of the sun the relief lets through at a point of height h (0…1): a short march
+// towards the sun, soft by how far each sample rises over the ray and how near it is.
+float parallaxShadow(texture2d_array<float> normal, int layer, float2 p, bool wide, float2 dpx, float2 dpy,
+                     float3 l, float3 n, float depth, float h, float jitter) {
+    float ln = dot(l, n);
+    if (ln <= 0.0 || h >= 0.98) return 1.0;
+    float2 dir = (l - n * ln).xy / ln;
+    float reach = length(dir);
+    if (reach > kParallaxReach) dir *= kParallaxReach / reach;
+    const int count = 6;
+    float rise = (1.0 - h) / float(count);
+    float block = 0.0;
+    for (int i = 1; i <= count; i++) {
+        float s = (float(i) - 0.5 + jitter) / float(count);
+        float ray = h + (1.0 - h) * s;
+        float hgt = groundHeight(normal, layer, p + dir * depth * (ray - h), wide, dpx, dpy);
+        block = max(block, (hgt - ray) / max(rise, 0.02) * (1.0 - 0.6 * s));
+    }
+    return 1.0 - saturate(block);
+}
+
 // The textured ground at p: the two communities weighing most there (the weights carry the
 // ecotone noise already; a little more breaks the bilinear ramps between 80 m texels into
 // patches), slope-weighted rock as in terrainAlbedo, sand at the waterline. Writes the
 // shading normal through `n`.
 float3 groundTexture(texture2d_array<float> albedo, texture2d_array<float> normal, texture2d<float> w0,
                      texture2d<float> w1, texture2d<float> w2, float2 p, float uvScale, float above, float slope,
-                     thread float3 &n) {
+                     thread float3 &n, float2 dpx, float2 dpy, float3 v, float3 l, float dist, float jitter,
+                     constant ParallaxParams &px, thread float &sun) {
     constexpr sampler linear(filter::linear, address::clamp_to_edge);
     float2 uv = p * uvScale;
     float4 a = w0.sample(linear, uv), b = w1.sample(linear, uv), c = w2.sample(linear, uv);
@@ -411,22 +500,35 @@ float3 groundTexture(texture2d_array<float> albedo, texture2d_array<float> norma
     int first = 0, second = 1;
     float wf = -1.0, ws = -1.0;
     // One noise value, spread over the communities by golden-ratio steps.
-    float jitter = groundNoise(p / 9.0);
+    float pick = groundNoise(p / 9.0);
     for (int i = 0; i < kGroundLayers; i++) {
-        float v = w[i] * (0.75 + 0.5 * fract(jitter + 0.618034 * float(i)));
+        float v = w[i] * (0.75 + 0.5 * fract(pick + 0.618034 * float(i)));
         if (v > wf) { second = first; ws = wf; first = i; wf = v; }
         else if (v > ws) { second = i; ws = v; }
     }
     float wide = smoothstep(0.35, 0.65, groundNoise(p / 23.0 + 11.0));
-    GroundTexel t = groundLayer(albedo, normal, first, p, wide);
+    // Parallax through the heaviest layer's relief, at the scale that shows more; the shift
+    // moves every layer blended in. Fades out with distance and on steep ground, where the
+    // top-down projection stretches the maps.
+    sun = 1.0;
+    float depth = px.depthScale * kGroundDepth[first] * (1.0 - smoothstep(0.6 * px.end, px.end, dist))
+        * (1.0 - smoothstep(0.15, 0.25, slope));
+    if (depth > 1e-4) {
+        bool useWide = wide > 0.5;
+        float hit;
+        p += parallaxShift(normal, first, p, useWide, dpx, dpy, v, n, depth, px.steps, jitter, hit);
+        if (px.shadow > 0.0)
+            sun = mix(1.0, parallaxShadow(normal, first, p, useWide, dpx, dpy, l, n, depth, hit, fract(jitter + 0.5)), px.shadow);
+    }
+    GroundTexel t = groundLayer(albedo, normal, first, p, wide, dpx, dpy);
     float share = ws / max(wf + ws, 1e-4);
-    if (share > 0.02) t = heightBlend(t, groundLayer(albedo, normal, second, p, wide), share);
+    if (share > 0.02) t = heightBlend(t, groundLayer(albedo, normal, second, p, wide, dpx, dpy), share);
     // Sand where the far albedo has it, a band just above the waterline on gentle slopes,
     // but only along the shore: dry forest on a low plain stands on its own soil.
     float sand = (1.0 - max(smoothstep(1.0, 3.0, above), smoothstep(0.1, 0.25, slope))) * saturate(2.0 * (a.x + a.y));
-    if (sand > 0.01 && first != 0) t = heightBlend(t, groundLayer(albedo, normal, 0, p, wide), sand);
+    if (sand > 0.01 && first != 0) t = heightBlend(t, groundLayer(albedo, normal, 0, p, wide, dpx, dpy), sand);
     float rock = smoothstep(0.4, 0.7, slope) * (0.2 + 0.6 * (1.0 - exposure(p)));
-    if (rock > 0.01) t = heightBlend(t, groundLayer(albedo, normal, kGroundRock, p, wide), rock);
+    if (rock > 0.01) t = heightBlend(t, groundLayer(albedo, normal, kGroundRock, p, wide, dpx, dpy), rock);
     // Brightness drifting over a few metres, as wetness and litter do.
     float3 colour = t.albedo.rgb * (0.88 + 0.24 * groundNoise(p / 3.7 + 5.0));
     float3 tx = normalize(float3(1.0, 0.0, 0.0) - n * n.x);
@@ -717,6 +819,7 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
                                 constant float2 &floraRange [[buffer(2)]],
                                 constant float4 &coverRange [[buffer(3)]],
                                 constant OceanParams &ocean [[buffer(7)]],
+                                constant ParallaxParams &parallax [[buffer(4)]],
                                 texture2d<float> shore [[texture(9)]],
                                 texture2d<float> surfWaves [[texture(10)]]) {
     float3 n = normalize(in.normal);
@@ -724,6 +827,10 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
     float h = in.world.z - u.seaLevel;
     // The height's change across the pixel for the swash's edges, here where every pixel runs.
     float heightWidth = fwidth(h);
+    // The ground's footprint per pixel, for the ground textures' mips under parallax.
+    float2 groundDx = dfdx(in.world.xy), groundDy = dfdy(in.world.xy);
+    // Sun let through by the ground textures' relief (parallax self-shadowing).
+    float groundSun = 1.0;
     float3 l = normalize(u.sunDirection);
 
     float3 albedo;
@@ -755,8 +862,15 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
         float near = communities ? 1.0 - smoothstep(kGroundNear, kGroundFar, d) : 0.0;
         if (near > 0.0) {
             float3 textured = n;
+            // Interleaved gradient noise, stepped by the frame, for the parallax searches' starts.
+            float2 q = in.position.xy + 5.588238 * fmod(u.frame.z, 64.0);
+            float jitter = fract(52.9829189 * fract(0.06711056 * q.x + 0.00583715 * q.y));
+            float reliefSun = 1.0;
             float3 ground = groundTexture(groundAlbedo, groundNormal, groundWeights0, groundWeights1, groundWeights2,
-                                          in.world.xy, 1.0 / u.cloudLayer.w, h, slope, textured);
+                                          in.world.xy, 1.0 / u.cloudLayer.w, h, slope, textured,
+                                          groundDx, groundDy, normalize(in.world - u.cameraPosition), l, d, jitter,
+                                          parallax, reliefSun);
+            groundSun = mix(1.0, reliefSun, near);
             // Where the ground cover thins out with distance (coverRange: its full-density
             // distance, its end, 1 if drawn), the texture takes the cover's colour, so the
             // edge of the blades doesn't show.
@@ -945,7 +1059,7 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
             sunVisibility = horizonSun(in, l);
         }
     }
-    sunVisibility *= cloudSun;
+    sunVisibility *= cloudSun * groundSun;
     // Sunflecks get through gaps in the crowns; the sky is half hidden by them.
     sunVisibility *= 1.0 - 0.85 * sunCover;
     float3 color = litSurface(u, albedo, n, nDotL, sunVisibility, skyVisibility, 1.0 - 0.5 * underCanopy, cloudSun);
