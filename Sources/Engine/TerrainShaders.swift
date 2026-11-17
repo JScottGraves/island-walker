@@ -953,6 +953,7 @@ float runwayPaint(float u, float v, float L, float W, int2 designators, float2 f
 constant float3 kAsphalt = float3(0.085, 0.084, 0.080);      // weathered asphalt, sRGB ~82
 constant float3 kRunwayPaint = float3(0.60, 0.60, 0.57);     // worn white paint
 constant float3 kMownGrass = float3(0.058, 0.110, 0.032);    // mown grass, sRGB ~68, 94, 50
+constant float3 kMownDry = float3(0.105, 0.110, 0.045);      // sun-dried turf, sRGB ~92, 94, 60
 
 // The albedo of a built surface at `world` (StructureSample `s`, its zone `z`), with the
 // pixel's footprint along the structure's axes from the world-space derivatives; `n`
@@ -995,7 +996,9 @@ float3 builtSurface(int surface, StructureSample s, StructureZoneGPU z, float3 w
     float drift = groundNoise(p / 23.0 + 7.3);
     float3 albedo = kMownGrass * (0.9 + 0.2 * drift) * (0.94 + 0.12 * bands);
     albedo *= float3(1.0 + 0.12 * (groundNoise(p / 5.0) - 0.5), 1.0, 1.0);
-    return albedo;
+    // Drier, straw-tinted patches where the sun burns the turf, tens of metres across.
+    float dry = smoothstep(0.55, 0.85, 0.65 * groundNoise(p / 41.0 + 2.9) + 0.35 * groundNoise(p / 11.0 + 6.1));
+    return mix(albedo, kMownDry, 0.55 * dry);
 }
 
 // Mirrors Look.lit and GroundView.shade; constants come from Look.metalPrelude, the sun

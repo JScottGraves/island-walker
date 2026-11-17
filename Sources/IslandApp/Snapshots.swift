@@ -85,7 +85,8 @@ enum Snapshots {
     /// 300 m up, behind and to the left, looking at its middle; `airstrip-side` standing at
     /// the grass strip's edge 250 m in, looking along the runway.
     static func structureViews() -> [(name: String, camera: GroundView.Camera, eye: Double?)] {
-        guard let s = IslandSource.structures().first(where: { $0.kind == "airstrip" }),
+        // From the bundle even with `--structures off`, so the same spots can be compared.
+        guard let s = IslandSource.bundle()?.structures().first(where: { $0.kind == "airstrip" }),
               let runway = s.zones.first(where: { $0.surface == .paved }) else { return [] }
         let radians = Double.pi / 180
         func view(_ name: String, u: Double, v: Double, yaw: Double, pitch: Double, eye: Double?)
