@@ -94,6 +94,11 @@ struct CoverParams {
     float4 lods;            // LOD0 distance (m), render height (px), unused, unused
 };
 
+// Blades per m² of a mown grass strip: a dense lawn (the candidate grid's 64 per m² at most).
+constant float kCoverLawnDensity = 52.0;
+constant float3 kCoverLawnRoot = float3(0.035, 0.060, 0.020);
+constant float3 kCoverLawnTip = float3(0.080, 0.135, 0.040);
+
 // Plants the tree scatter puts near p (canopy trees and shrubs), as floraCandidate picks
 // them: their stems are kept clear. Only the cheap part of the pick (cell hash, community,
 // density, plant), not its slope and sea tests, so it errs on the side of clearing.
@@ -153,6 +158,7 @@ kernel void coverGenerate(constant Uniforms &u [[buffer(0)]],
                           texture2d<float> b0 [[texture(5)]],
                           texture2d<float> b1 [[texture(6)]],
                           texture2d<float> b2 [[texture(7)]],
+                          const device uchar *structures [[buffer(20)]],
                           uint3 gid [[thread_position_in_grid]]) {
     if (gid.z >= uint(cp.counts.w) || gid.x >= uint(kCoverGrid) || gid.y >= uint(kCoverGrid)) return;
     uint slot = generate[gid.z];
@@ -161,14 +167,22 @@ kernel void coverGenerate(constant Uniforms &u [[buffer(0)]],
     float step = kCoverTile / float(kCoverGrid);
     uint h = floraHash(cell, 9u, uint(f.counts.w));
     float2 p = (float2(cell) + float2(floraRandom(h, 0), floraRandom(h, 1))) * step;
+    // Structures (StructureMap): nothing on pavement; a mown lawn of short ʻakiʻaki on a
+    // grass strip, whatever the biomes grow around it; grasses only on its cut and fill
+    // slopes (the sedges there give way to kawelu).
+    StructureSample built = structureAt(structures, p);
+    if (built.plants == kPlantsNone) return;
+    bool mown = floraRandom(h, 12) < structureMownShare(built, p);
 
     constexpr sampler linear(filter::linear, address::clamp_to_edge);
     float2 uv = p / t.domainSize;
     float4 a = w0.sample(linear, uv, level(0)), b = w1.sample(linear, uv, level(0)), c = w2.sample(linear, uv, level(0));
     int community = floraPickCommunity(a, b, c, floraRandom(h, 2));
-    if (community < 0) return;
-    float4 cc = kCoverCommunity[community];
+    if (community < 0 && !mown) return;
+    float4 cc = community >= 0 ? kCoverCommunity[community] : float4(0.0);
+    if (mown) cc = float4(0.0, kCoverLawnDensity, 0.0, 1.0);
     int species = int(cc.x);
+    if (built.plants == kPlantsGrassOnly && species >= 2) species = 1;
     float4 sa = kCoverShapeA[species], sb = kCoverShapeB[species];
     float density = cc.y * cp.range.z * step * step;
     // Slope from the data's own 10 m grid: nothing steeper than the species grows on.
@@ -207,7 +221,8 @@ kernel void coverGenerate(constant Uniforms &u [[buffer(0)]],
         if (best * spacing > r) return;
     }
     if (floraRandom(h, 3) >= density) return;
-    if (haveFlora != 0u && coverNearStem(f, b0, b1, b2, p)) return;
+    // Trees and shrubs aren't scattered where only grass grows, so no stems to keep clear.
+    if (haveFlora != 0u && built.plants == kPlantsUntouched && coverNearStem(f, b0, b1, b2, p)) return;
 
     // Facing: away from the clump's centre (a tussock fans out), with some spread; the
     // clump leans one way together.
@@ -223,8 +238,11 @@ kernel void coverGenerate(constant Uniforms &u [[buffer(0)]],
     uint index = atomic_fetch_add_explicit(&slotCounts[slot], 1u, memory_order_relaxed);
     if (index >= uint(cp.counts.y)) return;
     CoverSeed s;
-    s.a = float4(p, clumpHeight * centreFactor * (0.7 + 0.6 * floraRandom(h, 5)), 0.7 + 0.6 * floraRandom(h, 6));
-    s.b = float4(dir, 0.7 + 0.6 * floraRandom(h, 7), float(species) + 0.999 * floraRandom(h, 8));
+    // Mown: an even 9–15 cm (coverCull's height for ʻakiʻaki at these factors), standing straighter.
+    s.a = mown ? float4(p, 0.55 + 0.2 * floraRandom(h, 5), 0.4 + 0.3 * floraRandom(h, 6))
+               : float4(p, clumpHeight * centreFactor * (0.7 + 0.6 * floraRandom(h, 5)), 0.7 + 0.6 * floraRandom(h, 6));
+    // Mown blades carry kCoverSpecies more in their species code (a lawn's green, coverFragment).
+    s.b = float4(dir, 0.7 + 0.6 * floraRandom(h, 7), float(species + (mown ? kCoverSpecies : 0)) + 0.999 * floraRandom(h, 8));
     seeds[slot * uint(cp.counts.y) + index] = s;
 }
 
@@ -252,7 +270,7 @@ kernel void coverCull(constant Uniforms &u [[buffer(0)]],
     float2 rel = s.a.xy - u.cameraPosition.xy;
     float end = cp.range.y;
     if (dot(rel, rel) > end * end) return;
-    int species = int(s.b.w);
+    int species = int(s.b.w) % kCoverSpecies;
     float rank = fract(s.b.w);
     float4 sa = kCoverShapeA[species];
     // Fade out when flying: none once the camera stands 25 m above the ground.
@@ -285,7 +303,7 @@ kernel void coverCull(constant Uniforms &u [[buffer(0)]],
     CoverBlade b;
     b.root = float4(root - float3(0.0, 0.0, 0.03), height);
     b.facing = float4(s.b.xy, width, sa.w * s.a.w);
-    b.ground = float4(normalize(float3(-gradient, 1.0)), float(species) + 0.999 * fract(rank * 7.31 + s.a.z));
+    b.ground = float4(normalize(float3(-gradient, 1.0)), floor(s.b.w) + 0.999 * fract(rank * 7.31 + s.a.z));
     blades[uint(lod) * drawCapacity + index] = b;
 }
 
@@ -323,6 +341,7 @@ struct CoverOut {
     float tint;
     float dead [[flat]];
     int species [[flat]];
+    float mown [[flat]];
 };
 
 // A blade as a quadratic Bézier from its root, built from the vertex id (a triangle strip,
@@ -337,7 +356,8 @@ vertex CoverOut coverVertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     uint leaves = segments == 5u ? kCoverLeaves0 : kCoverLeaves1;
     uint leaf = iid % leaves;
     CoverBlade b = blades[iid / leaves];
-    int species = int(b.ground.w);
+    int species = int(b.ground.w) % kCoverSpecies;
+    bool mown = int(b.ground.w) >= kCoverSpecies;
     float r = fract(b.ground.w * 13.7 + float(leaf) * 0.618);
     float fan = (float(leaf) - 0.5 * float(leaves - 1u)) * 0.7 + (r - 0.5) * 0.5;
     b.facing.xy = float2(b.facing.x * cos(fan) - b.facing.y * sin(fan), b.facing.x * sin(fan) + b.facing.y * cos(fan));
@@ -381,8 +401,9 @@ vertex CoverOut coverVertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     o.ground = n;
     o.t = t;
     o.tint = 0.8 + 0.4 * fract(b.ground.w);
-    o.dead = r < 0.16 ? 0.4 + 2.5 * r : 0.0;
+    o.dead = r < (mown ? 0.05 : 0.16) ? 0.4 + 2.5 * r : 0.0;
     o.species = species;
+    o.mown = mown ? 1.0 : 0.0;
     return o;
 }
 
@@ -413,6 +434,8 @@ fragment float4 coverFragment(CoverOut in [[stage_in]], bool front [[front_facin
     int s = in.species;
     float t = saturate(in.t);
     float3 albedo = mix(kCoverRoot[s], kCoverTip[s], smoothstep(0.0, 0.85, t)) * in.tint;
+    // Mown: the cut leaf's green, not the seed heads' grey and straw.
+    if (in.mown > 0.0) albedo = mix(kCoverLawnRoot, kCoverLawnTip, smoothstep(0.0, 0.85, t)) * in.tint;
     // About one leaf in six dry and straw-coloured, as in any stand of grass or sedge.
     albedo = mix(albedo, float3(0.30, 0.25, 0.13) * in.tint, in.dead);
     float3 blade = normalize(front ? in.normal : -in.normal);

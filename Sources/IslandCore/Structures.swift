@@ -189,7 +189,9 @@ public struct StructureMap: Sendable {
     public func sample(x: Double, y: Double) -> StructureSample {
         for (k, s) in structures.enumerated() {
             let dx = x - s.x, dy = y - s.y
-            let r = s.radius + s.embankment
+            // Every zone, and the embankment's box (square corners), within this circle.
+            let ehl = s.gradedHalfLength + s.embankment, ehw = s.gradedHalfWidth + s.embankment
+            let r = Swift.max(s.radius + s.embankment, (ehl * ehl + ehw * ehw).squareRoot())
             guard dx * dx + dy * dy <= r * r else { continue }
             let (u, v) = s.local(x: x, y: y)
             if let z = s.zone(atU: u, v: v) {

@@ -86,6 +86,13 @@ enum IslandSource {
         return FloraMaps(weights: weights, site: FloraMaps.site(mai: map("mai"), exposure: map("exposure")))
     }
 
+    /// The man-made structures islandgen placed (structures.json in the bundle), or none
+    /// for a bundle without them or with `--structures off` (the bundle's heights stay graded).
+    static func structures() -> [Structure] {
+        guard Snapshots.option("--structures") != "off", let bundle = bundle() else { return [] }
+        return bundle.structures()
+    }
+
     /// Standing trade-wind cloud coverage: islandgen's clouds-trades.r32 next to the
     /// height map, or baked here from the heightfield if there is none.
     static func clouds(for height: Grid) -> Grid {

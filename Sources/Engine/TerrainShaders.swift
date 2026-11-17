@@ -80,7 +80,7 @@ float terrainHeight(constant TerrainParams &t, const device int *pages,
     if (morph > 0.0 && m + 1 < t.levels) h = mix(h, levelHeight(t, pages, tiles, m + 1, xy), morph);
     return h;
 }
-""" + detailShaderSource + """
+""" + structureShaderSource + detailShaderSource + """
 struct Uniforms {
     float4x4 viewProjection;
     float4x4 inverseViewProjection; // clip space → camera-relative world directions
@@ -864,6 +864,140 @@ CanopyTexel canopyAverage(ForestCover f, float3 n, float3 l, float3 toEye) {
     return t;
 }
 
+// ---- Built surfaces (StructureMap zone surfaces): asphalt with its paint, mown grass ----
+
+// Share of the pixel footprint [x − f/2, x + f/2] that falls in [lo, hi]: an exact box
+// filter, so a stripe thinner than a pixel fades to its share instead of shimmering.
+float paintSpan(float x, float lo, float hi, float f) {
+    f = max(f, 1e-3);
+    return saturate((min(x + 0.5 * f, hi) - max(x - 0.5 * f, lo)) / f);
+}
+
+float paintRect(float2 p, float2 lo, float2 hi, float2 f) {
+    return paintSpan(p.x, lo.x, hi.x, f.x) * paintSpan(p.y, lo.y, hi.y, f.y);
+}
+
+// One digit (0–9) of a runway designator in a W × H box (x across, y along, metres), as
+// seven strokes `kStroke` wide: block numerals like those painted on small airfields.
+constant float kDigitW = 4.0, kDigitH = 9.0, kStroke = 0.9;
+constant uchar kSegments[10] = { 0x3f, 0x06, 0x5b, 0x4f, 0x66, 0x6d, 0x7d, 0x07, 0x7f, 0x6f };   // bits A…G
+
+float paintDigit(int digit, float2 p, float2 f) {
+    if (p.x < -f.x || p.y < -f.y || p.x > kDigitW + f.x || p.y > kDigitH + f.y) return 0.0;
+    const float W = kDigitW, H = kDigitH, t = kStroke, m = 0.5 * kDigitH;
+    if (digit == 1) return paintRect(p, float2(0.5 * W - 0.5 * t, 0.0), float2(0.5 * W + 0.5 * t, H), f);
+    uint s = kSegments[clamp(digit, 0, 9)];
+    float c = 0.0;
+    if (s & 0x01u) c = max(c, paintRect(p, float2(0.0, H - t), float2(W, H), f));            // A top
+    if (s & 0x02u) c = max(c, paintRect(p, float2(W - t, m), float2(W, H), f));              // B upper right
+    if (s & 0x04u) c = max(c, paintRect(p, float2(W - t, 0.0), float2(W, m), f));            // C lower right
+    if (s & 0x08u) c = max(c, paintRect(p, float2(0.0, 0.0), float2(W, t), f));              // D bottom
+    if (s & 0x10u) c = max(c, paintRect(p, float2(0.0, 0.0), float2(t, m), f));              // E lower left
+    if (s & 0x20u) c = max(c, paintRect(p, float2(0.0, m), float2(t, H), f));                // F upper left
+    if (s & 0x40u) c = max(c, paintRect(p, float2(0.0, m - 0.5 * t), float2(W, m + 0.5 * t), f));   // G middle
+    return c;
+}
+
+// The markings at one end of a runway, in that end's frame: s metres in from the runway's
+// end along the direction of landing, w metres to the pilot's right; f the pixel footprint
+// along (s, w). Threshold bars, the designator, the aiming-point bars.
+float runwayEndPaint(float s, float w, float halfWidth, int designator, float2 f) {
+    if (s < -f.x || s > 360.0) return 0.0;
+    float aw = abs(w);
+    float paint = 0.0;
+    // Threshold ("piano keys"): eight bars 30 m long and 1.8 m wide, four each side of the
+    // centreline at 3.6 m pitch; their average once a pixel spans one.
+    if (s > 6.0 - f.x && s < 36.0 + f.x) {
+        float k = clamp(floor((aw - 1.35) / 3.6), 0.0, 3.0);
+        float centre = 2.25 + 3.6 * k;
+        float bars = paintSpan(aw, centre - 0.9, centre + 0.9, f.y);
+        bars = mix(bars, 0.5 * paintSpan(aw, 1.35, 13.95, f.y), smoothstep(0.9, 1.8, f.y));
+        paint = max(paint, bars * paintSpan(s, 6.0, 36.0, f.x));
+    }
+    // Designator: two digits 9 m tall from 48 m in, the first to the pilot's left.
+    if (designator > 0 && s > 48.0 - f.x && s < 48.0 + kDigitH + f.x) {
+        float2 g = float2(w, s - 48.0);
+        float digits = max(paintDigit(designator / 10, g - float2(-0.8 - kDigitW, 0.0), f.yx),
+                           paintDigit(designator % 10, g - float2(0.8, 0.0), f.yx));
+        // Strokes a pixel can't hold fade to the numbers' mean coverage (about a third).
+        digits = mix(digits, 0.33 * paintRect(g, float2(-0.8 - kDigitW, 0.0), float2(0.8 + kDigitW, kDigitH), f.yx),
+                     smoothstep(0.45, 0.9, max(f.x / 4.0, f.y)));
+        paint = max(paint, digits);
+    }
+    // Aiming point: a 4 m bar 45 m long either side of the centreline, 300 m in.
+    if (s > 300.0 - f.x && s < 345.0 + f.x) {
+        paint = max(paint, paintSpan(s, 300.0, 345.0, f.x) * paintSpan(aw, 4.5, 8.5, f.y));
+    }
+    return paint;
+}
+
+// Paint over a runway at (u, v) (runway frame, metres) of half length L and half width W,
+// with the designators painted at its −u and +u ends; f the pixel footprint along (u, v).
+float runwayPaint(float u, float v, float L, float W, int2 designators, float2 f) {
+    float paint = max(runwayEndPaint(u + L, v, W, designators.x, f), runwayEndPaint(L - u, -v, W, designators.y, f));
+    float s = u + L;
+    // Centreline: 30 m dashes with 20 m gaps, 0.9 m wide, between the designators; their
+    // 60 % average along once a pixel spans a dash.
+    if (s > 66.0 && s < 2.0 * L - 66.0 && abs(v) < 0.45 + f.y) {
+        float phase = fmod(s - 66.0, 50.0);
+        float dash = max(paintSpan(phase, 0.0, 30.0, f.x), paintSpan(phase - 50.0, 0.0, 30.0, f.x));
+        dash = mix(dash, 0.6, smoothstep(12.0, 30.0, f.x));
+        paint = max(paint, dash * paintSpan(v, -0.45, 0.45, f.y));
+    }
+    // Edge lines 0.6 m wide, just inside the pavement's edges.
+    float aw = abs(v);
+    paint = max(paint, paintSpan(aw, W - 0.9, W - 0.3, f.y) * paintSpan(u, -L, L, f.x));
+    return paint;
+}
+
+constant float3 kAsphalt = float3(0.085, 0.084, 0.080);      // weathered asphalt, sRGB ~82
+constant float3 kRunwayPaint = float3(0.60, 0.60, 0.57);     // worn white paint
+constant float3 kMownGrass = float3(0.058, 0.110, 0.032);    // mown grass, sRGB ~68, 94, 50
+
+// The albedo of a built surface at `world` (StructureSample `s`, its zone `z`), with the
+// pixel's footprint along the structure's axes from the world-space derivatives; `n`
+// (the mesh's normal) gets a faint grain on asphalt near the camera.
+float3 builtSurface(int surface, StructureSample s, StructureZoneGPU z, float3 world, float3 dx, float3 dy, float distance,
+                    thread float3 &n) {
+    float2 axis = z.a.zw, across = float2(axis.y, -axis.x);
+    float2 f = float2(abs(dot(dx.xy, axis)) + abs(dot(dy.xy, axis)), abs(dot(dx.xy, across)) + abs(dot(dy.xy, across)));
+    float2 p = world.xy;
+    if (surface == kSurfacePaved) {
+        // Patching and wear tens of metres across, slabs of resurfacing, the aggregate's speckle
+        // (fading once a pixel spans it), rubber from tyres in the touchdown zones.
+        float patches = 0.75 * groundNoise(p / 37.0 + 4.1) + 0.25 * groundNoise(p / 9.0 + 1.7);
+        float3 albedo = kAsphalt * (0.82 + 0.36 * patches);
+        float grain = groundNoise(p / 0.06) - 0.5;
+        albedo *= 1.0 + 0.25 * grain * (1.0 - smoothstep(0.02, 0.08, max(f.x, f.y)));
+        float L = z.b.x, W = z.b.y;
+        float fromEnd = L - abs(s.uv.x);
+        float rubber = smoothstep(150.0, 260.0, fromEnd) * (1.0 - smoothstep(550.0, 750.0, fromEnd))
+                     * (1.0 - smoothstep(3.0, 8.0, abs(s.uv.y))) * (0.6 + 0.4 * groundNoise(float2(s.uv.x / 25.0, s.uv.y / 1.5)));
+        albedo *= 1.0 - 0.45 * rubber;
+        float paint = runwayPaint(s.uv.x, s.uv.y, L, W, int2(z.d.zw), f);
+        // Worn: thinner in patches a few metres across and speckled where the binder shows
+        // through (the speckle fading once a pixel spans it), and over the rubber.
+        float speckle = mix(groundNoise(p / 0.21 + 3.7), 0.5, smoothstep(0.03, 0.12, max(f.x, f.y)));
+        float wear = (0.6 + 0.4 * groundNoise(p / 2.3 + 9.1)) * (0.8 + 0.3 * speckle);
+        albedo = mix(albedo, kRunwayPaint, paint * wear * (1.0 - 0.6 * rubber));
+        // A faint grain in the surface's normal near the camera; otherwise flat.
+        float near = 1.0 - smoothstep(5.0, 25.0, distance);
+        if (near > 0.0) {
+            float2 bump = float2(groundNoise(p / 0.13) - 0.5, groundNoise(p / 0.13 + 31.0) - 0.5);
+            n = normalize(n + float3(0.04 * near * bump, 0.0));
+        }
+        return albedo;
+    }
+    // Mown grass: faint light and dark bands along the runway where the mower turned, and
+    // a drift in colour tens of metres across.
+    float band = sin(3.14159265 * s.uv.y / 4.5);
+    float bands = mix(smoothstep(-0.25, 0.25, band), 0.5, smoothstep(1.5, 3.0, f.y));
+    float drift = groundNoise(p / 23.0 + 7.3);
+    float3 albedo = kMownGrass * (0.9 + 0.2 * drift) * (0.94 + 0.12 * bands);
+    albedo *= float3(1.0 + 0.12 * (groundNoise(p / 5.0) - 0.5), 1.0, 1.0);
+    return albedo;
+}
+
 // Mirrors Look.lit and GroundView.shade; constants come from Look.metalPrelude, the sun
 // and sky from SunLight through the uniforms.
 fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buffer(1)]],
@@ -885,7 +1019,8 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
                                 constant OceanParams &ocean [[buffer(7)]],
                                 constant ParallaxParams &parallax [[buffer(4)]],
                                 texture2d<float> shore [[texture(9)]],
-                                texture2d<float> surfWaves [[texture(10)]]) {
+                                texture2d<float> surfWaves [[texture(10)]],
+                                const device uchar *structures [[buffer(20)]]) {
     float3 n = normalize(in.normal);
     float slope = 1.0 - n.z;
     float h = in.world.z - u.seaLevel;
@@ -916,6 +1051,12 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
     } else {
         constexpr sampler linear(filter::linear, address::clamp_to_edge);
         float4 canopy = canopyMap.sample(linear, in.world.xy / u.cloudLayer.w);
+        // A structure's zone here (StructureMap): its own surface, and no forest shading where
+        // only grass may grow.
+        StructureSample built = structureAt(structures, in.world.xy);
+        float mown = structureMownShare(built, in.world.xy);
+        bool builtGround = built.surface == kSurfacePaved || mown > 0.999;
+        bool wooded = built.plants == kPlantsUntouched;
         // A 1×1 weight map: no communities in the bundle, so no ground textures.
         bool communities = groundWeights0.get_width() > 1;
         // The waterline's sand band only along the shore (strand and rocky shore weights),
@@ -923,7 +1064,7 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
         float shore = communities ? saturate(2.0 * dot(groundWeights0.sample(linear, in.world.xy / u.cloudLayer.w).xy, float2(1.0))) : 1.0;
         albedo = terrainAlbedo(in.world.xy, max(h, 3.0 * (1.0 - shore)), slope, u.maxHeight, canopy);
         float d = distance(u.cameraPosition, in.world);
-        float near = communities ? 1.0 - smoothstep(kGroundNear, kGroundFar, d) : 0.0;
+        float near = communities && !builtGround ? 1.0 - smoothstep(kGroundNear, kGroundFar, d) : 0.0;
         if (near > 0.0) {
             float3 textured = n;
             // Interleaved gradient noise, stepped by the frame, for the parallax searches' starts.
@@ -949,7 +1090,16 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
             albedo = mix(albedo, ground, near);
             n = normalize(mix(n, textured, near));
         }
-        if (communities && d > 30.0) {
+        if (built.surface == kSurfacePaved || mown > 0.0) {
+            int surface = built.surface == kSurfacePaved ? kSurfacePaved : kSurfaceMownGrass;
+            float3 meshNormal = normalize(in.normal);
+            float3 surfaceAlbedo = builtSurface(surface, built, structureZones(structures)[built.zone], in.world,
+                                                groundDx, groundDy, d, meshNormal);
+            float share = surface == kSurfacePaved ? 1.0 : mown;
+            albedo = mix(albedo, surfaceAlbedo, share);
+            n = normalize(mix(n, meshNormal, share));
+        }
+        if (communities && d > 30.0 && wooded) {
             float2 uv = in.world.xy / u.cloudLayer.w;
             // The share of the far albedo that is plants: terrainAlbedo's soil and rock aren't.
             // Ferns and shrubs grow over nearly all of the soil streaks on a pali wall and most
@@ -1034,7 +1184,7 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
             }
         }
         float nearby = 1.0 - smoothstep(floraRange.x - 100.0, floraRange.x, d);
-        if (nearby > 0.0) underCanopy = nearby * canopyCover.sample(linear, in.world.xy / u.cloudLayer.w).r;
+        if (nearby > 0.0 && wooded) underCanopy = nearby * canopyCover.sample(linear, in.world.xy / u.cloudLayer.w).r;
         sunCover = underCanopy * smoothstep(floraRange.y - kTreeShadowFade, floraRange.y, d);
     }
 
