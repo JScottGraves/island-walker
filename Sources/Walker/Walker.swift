@@ -61,10 +61,6 @@ public struct Walker: Sendable {
         guard distance > 0 else { return }
         let target = ground(x + dx, y + dy)
         if (target - z) / distance > maxSlope { return } // too steep to climb
-        // Nor up to the foot of a wall that would rise into the eye's clearance (unless
-        // the step leaves it no worse than now).
-        let raised = Self.eyeZ(x: x + dx, y: y + dy, feet: target, eyeHeight: eyeHeight, ground: ground) - target - eyeHeight
-        if raised > 0 && raised >= eyeZ(ground: ground) - z - eyeHeight { return }
         x += dx
         y += dy
         z = target

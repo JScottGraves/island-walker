@@ -23,12 +23,22 @@ final class WalkerTests: XCTestCase {
         }
     }
 
-    func testCannotWalkUpToTheFootOfAWall() {
-        var w = Walker(x: -2, y: 0, ground: Self.wall)
-        w.yaw = .pi / 2   // east, into the wall
-        for _ in 0..<400 { w.update(forward: 1, strafe: 0, running: false, dt: 1.0 / 60, ground: Self.wall) }
-        // Stops while the wall above eye level is still beyond the clearance.
-        XCTAssertLessThan(w.x, 1 + 1.7 / 5 - Walker.nearClearance + 0.05)
-        XCTAssertEqual(w.eyeZ(ground: Self.wall), w.z + w.eyeHeight, accuracy: 1e-9)
+    func testWalksAlongTheFootOfAWall() {
+        // Standing beside a wall (the eye raised clear of it), walking along it still moves.
+        var w = Walker(x: 0.8, y: 0, ground: Self.wall)
+        w.yaw = 0   // north, along the wall
+        for _ in 0..<60 { w.update(forward: 1, strafe: 0, running: false, dt: 1.0 / 60, ground: Self.wall) }
+        XCTAssertGreaterThan(w.y, 1.0)
+        XCTAssertGreaterThan(w.eyeZ(ground: Self.wall), w.z + w.eyeHeight)
+    }
+
+    func testWalksOnRoughGentleGround() {
+        // 0.5 m bumps every 2 m: the eye stays at eye height and walking never stalls.
+        let bumps: (Double, Double) -> Double = { x, y in 0.25 * sin(x * .pi) * cos(y * .pi) }
+        var w = Walker(x: 0, y: 0, ground: bumps)
+        w.yaw = .pi / 4
+        for _ in 0..<120 { w.update(forward: 1, strafe: 0, running: false, dt: 1.0 / 60, ground: bumps) }
+        XCTAssertGreaterThan(hypot(w.x, w.y), 2.5)
+        XCTAssertEqual(w.eyeZ(ground: bumps), w.z + w.eyeHeight, accuracy: 1e-9)
     }
 }
