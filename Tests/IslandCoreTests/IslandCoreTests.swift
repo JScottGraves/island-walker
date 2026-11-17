@@ -231,4 +231,22 @@ final class IslandCoreTests: XCTestCase {
             XCTAssertLessThan(tree.morphEnd[k], tree.morphStart[k + 1])
         }
     }
+
+    func testQuadtreeBoundsHoldTheGroundOnSteepSlopes() {
+        // A pali-like wall: 2 m rise per metre east (160 m per 80 m overview cell), so the
+        // ground inside one cell spans far more than the bounds' padding.
+        var overview = Grid(width: 64, height: 64, cellSize: 80)
+        for j in 0..<64 { for i in 0..<64 { overview[i, j] = Float((Double(i) + 0.5) * 80 * 2) } }
+        let tree = TerrainQuadtree(quads: 64, cellMetres: 0.3125, domain: 5120, overview: overview)
+        for x in stride(from: 0.0, to: 5100, by: 13.7) {
+            for size in [20.0, 40.0, 80.0] {
+                let b = tree.heightBounds(x: x, y: 1000, size: size)
+                for (dx, dy) in [(0.0, 0.0), (size, 0), (0, size), (size, size), (size / 2, size / 2)] {
+                    let h = overview.meshHeight(x: x + dx, y: 1000 + dy)
+                    XCTAssertLessThanOrEqual(b.lo, h, "x \(x) size \(size)")
+                    XCTAssertGreaterThanOrEqual(b.hi, h, "x \(x) size \(size)")
+                }
+            }
+        }
+    }
 }

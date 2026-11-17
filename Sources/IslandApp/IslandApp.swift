@@ -217,7 +217,7 @@ final class Coordinator: NSObject, MTKViewDelegate {
         walker = w
 
         let dir = SIMD3<Float>(Float(sin(w.yaw) * cos(w.pitch)), Float(cos(w.yaw) * cos(w.pitch)), Float(sin(w.pitch)))
-        let eye = SIMD3<Double>(w.x, w.y, flying ? w.z : w.z + w.eyeHeight)
+        let eye = SIMD3<Double>(w.x, w.y, flying ? w.z : w.eyeZ(ground: ground))
         renderer.draw(in: view, eye: eye, forward: dir)
     }
 }

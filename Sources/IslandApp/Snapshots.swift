@@ -5,6 +5,7 @@ import simd
 import Engine
 import IslandCore
 import IslandGen
+import Walker
 
 /// Headless mode: renders the app's own Metal view of the automatic viewpoints to PNGs,
 /// so what the app draws can be checked without a window or screen-recording permission.
@@ -144,6 +145,8 @@ enum Snapshots {
                 renderer.prepareGround(x: c.x, y: c.y)
                 // Over the sea, the eye height is above the water (a boat), not the floor.
                 c.z = Swift.max(renderer.groundHeight(x: c.x, y: c.y), Double(renderer.seaLevel)) + (view.eye ?? option("--eye").flatMap(Double.init) ?? 1.7)
+                // Clear of a steep wall beside the eye, as the walker keeps it.
+                c.z = Swift.max(c.z, Walker(x: c.x, y: c.y, ground: renderer.groundHeight).eyeZ(ground: renderer.groundHeight))
                 if let degrees = option("--pitch").flatMap(Double.init) { c.pitch = -degrees * .pi / 180 }
                 let forward = SIMD3<Float>(Float(sin(c.yaw) * cos(c.pitch)), Float(cos(c.yaw) * cos(c.pitch)), Float(sin(c.pitch)))
                 // nil: the reference sun.
