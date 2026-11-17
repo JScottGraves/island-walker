@@ -48,9 +48,13 @@ final class GroundCoverRenderer {
         return (Int(c[0]), Int(c[1]))
     }
 
+    /// The structure map: mown grass on airstrips, nothing on pavement.
+    let structures: MTLBuffer
+
     init(device: MTLDevice, library: MTLLibrary, constants: MTLFunctionConstantValues, colorFormat: MTLPixelFormat,
-         depthFormat: MTLPixelFormat, rayTraced: Bool, settings: GroundCover.Settings) throws {
+         depthFormat: MTLPixelFormat, rayTraced: Bool, settings: GroundCover.Settings, structures: MTLBuffer) throws {
         self.device = device
+        self.structures = structures
         self.settings = settings
         func kernel(_ name: String) throws -> MTLComputePipelineState {
             guard let f = library.makeFunction(name: name) else { throw RendererError.setup("ground cover \(name)") }
@@ -163,6 +167,7 @@ final class GroundCoverRenderer {
         enc.setBuffer(seeds, offset: 0, index: 5)
         enc.setBytes(&t, length: MemoryLayout<TerrainRenderer.TerrainParams>.stride, index: 6)
         enc.setBuffer(pages, offset: 0, index: 7)
+        enc.setBuffer(structures, offset: 0, index: StructureLookup.bufferIndex)
         enc.setTexture(tiles, index: 0)
         if !generate.isEmpty {
             enc.setComputePipelineState(clearPipeline)

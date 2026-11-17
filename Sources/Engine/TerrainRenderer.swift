@@ -158,6 +158,10 @@ public final class TerrainRenderer {
     /// Fraction of the ground the tree crowns cover (r32Float), for shading the floor under
     /// the drawn trees until they cast shadows (zero without trees).
     let canopyCover: MTLTexture
+    /// The structures' zones (StructureMap.swift), bound at StructureLookup.bufferIndex for
+    /// every shader that asks what lies at a point.
+    public let structureMap: StructureLookup
+    let structureBuffer: MTLBuffer
     public let seaLevel: Float
     let maxHeight: Float
     /// Native trees and shrubs (nil when drawn without them).
@@ -242,11 +246,14 @@ public final class TerrainRenderer {
     ///   - fineDetail: false draws only the data's own grid (for comparisons).
     ///   - flora: the plant-community maps the native trees are scattered from; nil draws
     ///     no trees. `floraSpecimens` places them by hand instead (floragen).
+    ///   - structures: the bundle's man-made structures (none for a bundle without them).
+    ///   - structureUpkeep: how kept they are where their properties don't say (0 abandoned … 1 maintained).
     public init(device: MTLDevice, colorFormat: MTLPixelFormat, depthFormat: MTLPixelFormat,
                 terrain: TerrainTiles, shadows requested: Shadows = .rayTraced, clouds: Grid? = nil,
                 detailMaps: DetailMaps? = nil, fineDetail: Bool = true, flora floraMaps: FloraMaps? = nil,
                 floraSpecimens: Bool = false, groundCover coverSettings: GroundCover.Settings = .init(),
-                antialiasing requestedAA: Antialiasing = .off) throws {
+                antialiasing requestedAA: Antialiasing = .off, structures: [Structure] = [],
+                structureUpkeep: Float = 0) throws {
         self.device = device
         var antialiasing = requestedAA
         if case .upscaled = antialiasing, !MTLFXTemporalScalerDescriptor.supportsDevice(device) { antialiasing = .temporal }
@@ -362,10 +369,14 @@ public final class TerrainRenderer {
         domainSize = Float(terrain.domainMetres)
         // The finest CDLOD levels draw generated detail, each half the spacing of the next.
         let detailLods = fineDetail ? TerrainDetail.levelCount(cellMetres: terrain.cellMetres) : 0
+        structureMap = StructureLookup(structures: structures, upkeep: structureUpkeep)
+        structureBuffer = try structureMap.makeBuffer(device: device)
         detail = try TerrainDetail(device: device, library: library, levels: detailLods, cellMetres: terrain.cellMetres,
-                                   seaLevel: terrain.seaLevel, seed: TerrainDetail.seed(of: overview), maps: detailMaps)
+                                   seaLevel: terrain.seaLevel, seed: TerrainDetail.seed(of: overview), maps: detailMaps,
+                                   structures: structureBuffer)
         canopy = try TerrainRenderer.canopyTexture(device: device, map: detailMaps?.canopy)
-        canopyCover = try TerrainRenderer.canopyCoverTexture(device: device, maps: floraMaps)
+        canopyCover = try TerrainRenderer.canopyCoverTexture(device: device, maps: floraMaps, structures: structureMap,
+                                                             domain: terrain.domainMetres)
         let ground = try GroundTextures.load()
         groundAlbedo = try FloraRenderer.textureArray(device: device, images: ground.albedo)
         groundNormal = try FloraRenderer.textureArray(device: device, images: ground.normal, format: .rgba8Unorm)
@@ -377,11 +388,12 @@ public final class TerrainRenderer {
                                 depthFormat: depthFormat, rayTraced: shadows == .rayTraced, treeShadows: treeShadows,
                                 maps: floraMaps,
                                 seed: TerrainDetail.seed(of: overview), seaLevel: terrain.seaLevel,
-                                domainSize: Float(terrain.domainMetres))
+                                domainSize: Float(terrain.domainMetres), structures: structureBuffer)
             : nil
         groundCover = coverSettings.enabled && !(detailMaps?.communities.isEmpty ?? true) && !floraSpecimens
             ? try GroundCoverRenderer(device: device, library: library, constants: constants, colorFormat: shadeFormat,
-                                      depthFormat: depthFormat, rayTraced: shadows == .rayTraced, settings: coverSettings)
+                                      depthFormat: depthFormat, rayTraced: shadows == .rayTraced, settings: coverSettings,
+                                      structures: structureBuffer)
             : nil
         ocean = try OceanRenderer(device: device, library: library, constants: constants, colorFormat: shadeFormat,
                                   depthFormat: depthFormat, rayTraced: shadows == .rayTraced, motion: temporal,
@@ -1141,6 +1153,7 @@ public final class TerrainRenderer {
         shade.setFragmentBytes(&coverRange, length: 16, index: 3)
         var parallaxParams = parallax
         shade.setFragmentBytes(&parallaxParams, length: 16, index: 4)
+        shade.setFragmentBuffer(structureBuffer, offset: 0, index: StructureLookup.bufferIndex)
         drawTerrain(shade, frame: frameTerrain)
         flora?.drawShading(shade, skyVisibility: skyVisibility, horizons: horizons)
         groundCover?.drawShading(shade, skyVisibility: skyVisibility, horizons: horizons)
@@ -1236,7 +1249,10 @@ extension TerrainRenderer {
     /// Crown cover per cell from the community weights and each community's canopy
     /// stems per hectare (Communities.table), taking a crown as ~25 m² and crowns as
     /// randomly placed: cover = 1 − exp(−stems × area).
-    static func canopyCoverTexture(device: MTLDevice, maps: FloraMaps?) throws -> MTLTexture {
+    /// Cut to nothing over the structures' footprints where trees may not grow, by the share
+    /// of each cell they cover, so no crown shade shows on a runway.
+    static func canopyCoverTexture(device: MTLDevice, maps: FloraMaps?, structures: StructureLookup,
+                                   domain: Double) throws -> MTLTexture {
         let first = maps?.weights.first
         let w = first?.width ?? 1, h = first?.height ?? 1
         let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r32Float, width: w, height: h, mipmapped: false)
@@ -1251,6 +1267,16 @@ extension TerrainRenderer {
                 guard g.width == w, g.height == h, entry.canopy > 0 else { continue }
                 let c = Float(1 - exp(-entry.canopy * crownArea / 10_000))
                 for i in 0..<(w * h) { cover[i] += g.values[i] * c }
+            }
+        }
+        if !structures.zones.isEmpty, maps != nil {
+            let cell = Float(domain) / Float(w)
+            for j in 0..<h {
+                for i in 0..<w where cover[j * w + i] > 0 {
+                    let x0 = Float(i) * cell, y0 = Float(j) * cell
+                    guard structures.clearance(x: x0 + 0.5 * cell, y: y0 + 0.5 * cell) < cell else { continue }
+                    cover[j * w + i] *= 1 - structures.restrictedFraction(x0: x0, y0: y0, size: cell)
+                }
             }
         }
         cover.withUnsafeBytes { raw in

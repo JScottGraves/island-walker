@@ -128,13 +128,17 @@ void floraAppend(device atomic_uint *counts, device FloraInstance *instances, ui
 bool floraCandidate(constant Uniforms &u, constant FloraParams &f, constant TerrainParams &t,
                     constant DetailParams &d, const device int *pages, texture2d_array<ushort, access::read> tiles,
                     texture2d_array<float, access::read> detail, texture2d<float> biome0, texture2d<float> biome1,
-                    texture2d<float> biome2, bool canopy, int2 cell, float range,
+                    texture2d<float> biome2, const device uchar *structures, bool canopy, int2 cell, float range,
                     thread FloraInstance &inst, thread int &plantOut, thread int &variantOut) {
     float cellSize = canopy ? f.cells.x : f.cells.y;
     uint h = floraHash(cell, canopy ? 0u : 1u, uint(f.counts.w));
     float2 xy = (float2(cell) + float2(floraRandom(h, 0), floraRandom(h, 1))) * cellSize;
     float2 rel = xy - u.cameraPosition.xy;
     if (dot(rel, rel) > range * range) return false;
+    // Nothing woody on or over ground where only grass may grow (StructureMap); the crown
+    // kept clear of it by about its radius once the height is known.
+    float clearance = structureClearance(structures, xy);
+    if (clearance < 0.5) return false;
 
     constexpr sampler linear(filter::linear, address::clamp_to_edge);
     float2 uv = xy / f.lods.w;
@@ -159,6 +163,7 @@ bool floraCandidate(constant Uniforms &u, constant FloraParams &f, constant Terr
     // Taller where wetter and sheltered (site, in biome2.w), with some spread.
     float site = w2.w;
     float height = mix(info.x, info.y, 0.2 + 0.8 * site) * (0.75 + 0.4 * floraRandom(h, 5));
+    if (clearance < 0.3 * height) return false;
 
     inst.position = packed_float3(xy.x, xy.y, ground);
     inst.scale = height / info.z;
@@ -282,6 +287,7 @@ kernel void floraScatter(constant Uniforms &u [[buffer(0)]],
                          device atomic_uint *lodKeys [[buffer(10)]],
                          device uint *lodValues [[buffer(11)]],
                          constant FloraHzb &hzbInfo [[buffer(12)]],
+                         const device uchar *structures [[buffer(20)]],
                          texture2d<float> hzb [[texture(5)]],
                          texture2d_array<ushort, access::read> tiles [[texture(0)]],
                          texture2d_array<float, access::read> detail [[texture(1)]],
@@ -298,7 +304,7 @@ kernel void floraScatter(constant Uniforms &u [[buffer(0)]],
     int plant, variant;
     // Looked at a little past the range, so plants leaving it can fade out.
     float reach = range * (1.0 + 2.0 * kLodHysteresis);
-    if (!floraCandidate(u, f, t, d, pages, tiles, detail, biome0, biome1, biome2, canopy, cell, reach,
+    if (!floraCandidate(u, f, t, d, pages, tiles, detail, biome0, biome1, biome2, structures, canopy, cell, reach,
                         inst, plant, variant)) return;
     float height = inst.height;
 
@@ -425,6 +431,7 @@ kernel void floraCasters(constant Uniforms &u [[buffer(0)]],
                          constant uint &layer [[buffer(7)]],
                          constant FloraCasterParams &s [[buffer(8)]],
                          constant TreeShadows &shadows [[buffer(9)]],
+                         const device uchar *structures [[buffer(20)]],
                          texture2d_array<ushort, access::read> tiles [[texture(0)]],
                          texture2d_array<float, access::read> detail [[texture(1)]],
                          texture2d<float> biome0 [[texture(2)]],
@@ -437,7 +444,7 @@ kernel void floraCasters(constant Uniforms &u [[buffer(0)]],
     int2 cell = int2(canopy ? s.origins.xy : s.origins.zw) + int2(gid);
     FloraInstance inst;
     int plant, variant;
-    if (!floraCandidate(u, f, t, d, pages, tiles, detail, biome0, biome1, biome2, canopy, cell,
+    if (!floraCandidate(u, f, t, d, pages, tiles, detail, biome0, biome1, biome2, structures, canopy, cell,
                         canopy ? s.extent.z : s.extent.w, inst, plant, variant)) return;
     float3 centre = float3(inst.position) + float3(0.0, 0.0, 0.55 * inst.height) - u.cameraPosition;
     float radius = 0.65 * inst.height + 1.0;
@@ -910,6 +917,7 @@ kernel void floraPatches(constant Uniforms &u [[buffer(0)]],
                          device atomic_uint *lodKeys [[buffer(10)]],
                          device uint *lodValues [[buffer(11)]],
                          constant FloraHzb &hzbInfo [[buffer(12)]],
+                         const device uchar *structures [[buffer(20)]],
                          texture2d_array<ushort, access::read> tiles [[texture(0)]],
                          texture2d_array<float, access::read> detail [[texture(1)]],
                          texture2d<float> biome0 [[texture(2)]],
@@ -937,6 +945,8 @@ kernel void floraPatches(constant Uniforms &u [[buffer(0)]],
     if (e.z <= 0.0) return;  // nothing grows there tall enough
     // Open stands leave cells empty, by the cover of what the patch shows.
     if (floraRandom(h, 3) >= 1.3 * e.y) return;
+    // A card stands clear of ground where only grass may grow by its whole half-width.
+    if (structureClearance(structures, xy) < 1.15 * e.x) return;
     float2 gradient;
     float ground = floraGround(t, d, detail, pages, tiles, xy, length(rel), gradient);
     // Walls steeper than 40° are the canopy shading's: a card there stands off the slope.

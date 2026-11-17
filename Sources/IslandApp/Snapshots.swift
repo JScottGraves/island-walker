@@ -41,9 +41,11 @@ enum Snapshots {
         return args.indices.filter { args[$0] == name && $0 + 1 < args.count }.map { args[$0 + 1] }
     }
 
-    /// Views given with `--camera [NAME=]X,Y,YAW,PITCH`.
+    /// Views given with `--camera [NAME=]X,Y,YAW,PITCH`, or `--camera airstrip` (and the
+    /// other structureViews by name).
     static func cameras() -> [(name: String, camera: GroundView.Camera, eye: Double?)] {
         options("--camera").enumerated().compactMap { k, value in
+            if !value.contains(","), let view = structureViews().first(where: { $0.name == value }) { return view }
             var name = "cam\(k + 1)", spec = Substring(value)
             if let eq = value.firstIndex(of: "=") {
                 name = String(value[..<eq])
@@ -77,6 +79,33 @@ enum Snapshots {
         // The same boat looking back at the Mokulua islets and the Koʻolau.
         ("offshore-back", 70500, 32500, 250, -2, 2.5),
     ]
+
+    /// Views of the island's airstrip, when it has one: `airstrip` at eye height on the
+    /// centreline 25 m short of the runway's first end, looking down it; `airstrip-aerial`
+    /// 300 m up, behind and to the left, looking at its middle; `airstrip-side` standing at
+    /// the grass strip's edge 250 m in, looking along the runway; `airstrip-asphalt` standing
+    /// on the runway by the first aiming bar, looking 30° down at the paving.
+    static func structureViews() -> [(name: String, camera: GroundView.Camera, eye: Double?)] {
+        // From the bundle even with `--structures off`, so the same spots can be compared.
+        guard let s = IslandSource.bundle()?.structures().first(where: { $0.kind == "airstrip" }),
+              let runway = s.zones.first(where: { $0.surface == .paved }) else { return [] }
+        let radians = Double.pi / 180
+        func view(_ name: String, u: Double, v: Double, yaw: Double, pitch: Double, eye: Double?)
+            -> (name: String, camera: GroundView.Camera, eye: Double?) {
+            let p = s.world(u: u, v: v)
+            return (name, GroundView.Camera(x: p.x, y: p.y, z: 0, yaw: yaw * radians, pitch: pitch * radians), eye)
+        }
+        let L = runway.halfLength
+        let aerial = s.world(u: -L - 700, v: -800)
+        let dx = s.x - aerial.x, dy = s.y - aerial.y
+        return [
+            view("airstrip", u: -L - 25, v: 0, yaw: s.heading, pitch: -1.5, eye: nil),
+            view("airstrip-aerial", u: -L - 700, v: -800, yaw: atan2(dx, dy) / radians,
+                 pitch: -atan(300 / (dx * dx + dy * dy).squareRoot()) / radians, eye: 300),
+            view("airstrip-side", u: -L + 250, v: s.gradedHalfWidth - 1, yaw: s.heading - 8, pitch: -2, eye: nil),
+            view("airstrip-asphalt", u: -L + 290, v: 5, yaw: s.heading + 10, pitch: -30, eye: nil),
+        ]
+    }
 
     /// The automatic viewpoints (summit, ridge, coast, pali…) picked on `height`.
     static func viewpoints(_ height: Grid) -> [Viewpoints.Named] {
@@ -123,7 +152,9 @@ enum Snapshots {
                                                fineDetail: option("--detail") != "off",
                                                flora: IslandSource.floraMaps(),
                                                groundCover: GroundCoverSettings(arguments: CommandLine.arguments),
-                                               antialiasing: antialiasing())
+                                               antialiasing: antialiasing(),
+                                           structures: IslandSource.structures(),
+                                           structureUpkeep: Snapshots.option("--upkeep").flatMap(Float.init) ?? 0)
             renderer.jitterSign = option("--jitter-sign").flatMap(Float.init) ?? 1
             if option("--parallax") == "off" { renderer.parallax.x = 0 }
             print("shadows: \(renderer.shadows.rawValue); antialiasing: \(renderer.antialiasing)")
@@ -139,10 +170,27 @@ enum Snapshots {
                 (name: $0.name, camera: GroundView.Camera(x: $0.x, y: $0.y, z: 0, yaw: $0.yaw * .pi / 180, pitch: $0.pitch * .pi / 180),
                  eye: Optional($0.eye))
             } : []
-            let views = viewpoints(height).map { (name: $0.name, camera: $0.camera, eye: Double?.none) } + cameras() + sea
+            let views = viewpoints(height).map { (name: $0.name, camera: $0.camera, eye: Double?.none) } + structureViews()
+                + cameras() + sea
             for view in views where only?.contains(view.name) ?? true {
                 var c = view.camera
                 renderer.prepareGround(x: c.x, y: c.y)
+                // On a structure's graded ground the walker must stand on its grade line: how far
+                // the ground it reads (the fine detail) strays from it within 150 m of the camera.
+                let structures = IslandSource.structures()
+                if !structures.isEmpty {
+                    let map = StructureMap(structures)
+                    var worst = 0.0, count = 0
+                    for j in -30...30 {
+                        for i in -30...30 {
+                            let x = c.x + Double(i) * 5, y = c.y + Double(j) * 5
+                            guard let grade = map.sample(x: x, y: y).gradeHeight else { continue }
+                            worst = Swift.max(worst, abs(renderer.groundHeight(x: x, y: y) - grade))
+                            count += 1
+                        }
+                    }
+                    if count > 0 { print(String(format: "  %@: walker ground vs grade line at %d graded points: worst %.4f m", view.name, count, worst)) }
+                }
                 // Over the sea, the eye height is above the water (a boat), not the floor.
                 c.z = Swift.max(renderer.groundHeight(x: c.x, y: c.y), Double(renderer.seaLevel)) + (view.eye ?? option("--eye").flatMap(Double.init) ?? 1.7)
                 // Clear of a steep wall beside the eye, as the walker keeps it.

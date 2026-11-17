@@ -120,6 +120,8 @@ final class FloraRenderer {
     static let shadowMapSize = 1024
 
     let device: MTLDevice
+    /// The structure map: no tree, shrub or stand patch where only grass may grow.
+    let structures: MTLBuffer
     let scatterPipeline: MTLComputePipelineState
     let argumentsPipeline: MTLComputePipelineState
     let prepassPipeline: MTLRenderPipelineState
@@ -198,8 +200,9 @@ final class FloraRenderer {
 
     init(device: MTLDevice, library: MTLLibrary, constants: MTLFunctionConstantValues, colorFormat: MTLPixelFormat,
          depthFormat: MTLPixelFormat, rayTraced: Bool, treeShadows: Bool, maps: FloraMaps?, seed: UInt32,
-         seaLevel: Float, domainSize: Float) throws {
+         seaLevel: Float, domainSize: Float, structures: MTLBuffer) throws {
         self.device = device
+        self.structures = structures
         self.seed = seed
         self.seaLevel = seaLevel
         self.domainSize = domainSize
@@ -783,6 +786,7 @@ final class FloraRenderer {
         enc.setBuffer(instances, offset: 0, index: 6)
         enc.setBuffer(lodKeys, offset: 0, index: 10)
         enc.setBuffer(lodValues, offset: 0, index: 11)
+        enc.setBuffer(structures, offset: 0, index: StructureLookup.bufferIndex)
         var info = hzbInfo(eye: eye, forward: forward)
         enc.setBytes(&info, length: info.count * 16, index: 12)
         enc.setTexture(hzb ?? biomes[0], index: 5)
@@ -887,6 +891,7 @@ final class FloraRenderer {
         enc.setBuffer(casters.instances, offset: 0, index: 6)
         enc.setBytes(&sp, length: sp.count * 16, index: 8)
         enc.setBytes(&shadow, length: shadow.count * 16, index: 9)
+        enc.setBuffer(structures, offset: 0, index: StructureLookup.bufferIndex)
         enc.setTexture(tiles, index: 0)
         enc.setTexture(detail.texture, index: 1)
         enc.setTextures(biomes, range: 2..<5)

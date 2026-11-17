@@ -18,6 +18,9 @@ import Walker
 // (metres, degrees) at that spot, and `--flora off` draws no trees. `--cover off` draws no grasses and
 // sedges; `--cover-range M` (default 50) and `--cover-density X` (default 1) tune them.
 // `--parallax off` draws the ground textures flat; P toggles that live (ISLAND_PARALLAX tunes it).
+// `--view airstrip` (or `--camera airstrip`) starts at the runway's threshold looking down it; `--structures off`
+// draws the island as if it had none (its heights stay graded); `--upkeep 1` keeps structures whose bundle doesn't say
+// maintained (default 0: abandoned, cracked and overgrown).
 
 @main
 struct IslandApp: App {
@@ -108,7 +111,9 @@ final class Coordinator: NSObject, MTKViewDelegate {
                                            fineDetail: Snapshots.option("--detail") != "off",
                                            flora: IslandSource.floraMaps(),
                                            groundCover: GroundCoverSettings(arguments: CommandLine.arguments),
-                                           antialiasing: Snapshots.antialiasing())
+                                           antialiasing: Snapshots.antialiasing(),
+                                           structures: IslandSource.structures(),
+                                           structureUpkeep: Snapshots.option("--upkeep").flatMap(Float.init) ?? 0)
             renderer?.jitterSign = Snapshots.option("--jitter-sign").flatMap(Float.init) ?? 1
             if Snapshots.option("--parallax") == "off" { renderer?.parallax.x = 0 }
         } catch {
@@ -119,9 +124,13 @@ final class Coordinator: NSObject, MTKViewDelegate {
         day = Snapshots.option("--day").flatMap { Int($0) } ?? day
         guard let overview = try? tiles.grid(level: tiles.overviewLevel()) else { return }
         // `--camera X,Y,YAW,PITCH[,EYE]` or `--view coast` (or summit, ridge, pali…) starts there,
-        // facing that way (with EYE over 3 m, flying that high); otherwise at the highest point so the whole island is in view.
-        let named = Snapshots.option("--view").flatMap { name in Snapshots.viewpoints(overview).first { $0.name == name } }
-        if let view = Snapshots.cameras().first ?? named.map({ (name: $0.name, camera: $0.camera, eye: Double?.none) }) {
+        // facing that way (with EYE over 3 m, flying that high); `--view airstrip` (or `--camera airstrip`; also airstrip-aerial,
+        // airstrip-side) at the island's runway; otherwise at the highest point so the whole island is in view.
+        let named = Snapshots.option("--view").flatMap { name in
+            Snapshots.viewpoints(overview).first { $0.name == name }.map { (name: $0.name, camera: $0.camera, eye: Double?.none) }
+                ?? Snapshots.structureViews().first { $0.name == name }
+        }
+        if let view = Snapshots.cameras().first ?? named {
             renderer?.prepareGround(x: view.camera.x, y: view.camera.y)
             var w = Walker(x: view.camera.x, y: view.camera.y, ground: ground)
             w.yaw = view.camera.yaw

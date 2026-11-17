@@ -10,10 +10,10 @@ func usage() -> Never {
     print("""
     usage: islandgen --score HEIGHT.r32 --cell METRES [--width N] [--sea-level M]
              score an existing float32 heightfield (square unless --width; pits are filled first) and print realism metrics
-           islandgen --import HEIGHT.r32 --cell METRES --bundle DIR [--sea-level M] [--out DIR] [--refine N] [--fine FILE] [refine options]
+           islandgen --import HEIGHT.r32 --cell METRES --bundle DIR [--sea-level M] [--out DIR] [--refine N] [--fine FILE] [--structures on|off] [refine options]
              write a square float32 heightfield, such as the real Oahu DEM, as an island bundle (height, rain and plant communities; heights kept as they are,
              or refined N times finer with --refine), and with --out a biomes.png preview and biomes.json
-           islandgen [--seed N] [--size N] [--steps N] [--domain METRES] [--deposition G] [--slope-exponent N] [--reference-slope S] [--critical-slope S] [--knickpoint-slope S] [--waterfall-retreat R] [--headwall-retreat R] [--waterfall-min-q Q] [--land-exponent P] [--coast-slope A] [--rift-descent D] [--saddle-fill M] [--pond-time F] [--pond-hardness H] [--pond-share S] [--wave-retreat R] [--leeward-waves S] [--uplift U] [--flexure M] [--flexure-distance M] [--refine N] [--bundle DIR] [--profile] [--out DIR]
+           islandgen [--seed N] [--size N] [--steps N] [--domain METRES] [--deposition G] [--slope-exponent N] [--reference-slope S] [--critical-slope S] [--knickpoint-slope S] [--waterfall-retreat R] [--headwall-retreat R] [--waterfall-min-q Q] [--land-exponent P] [--coast-slope A] [--rift-descent D] [--saddle-fill M] [--pond-time F] [--pond-hardness H] [--pond-share S] [--wave-retreat R] [--leeward-waves S] [--uplift U] [--flexure M] [--flexure-distance M] [--refine N] [--bundle DIR] [--structures on|off] [--profile] [--out DIR]
       --seed    random seed (default 1)
       --size    grid samples per side (default 1024)
       --steps   erosion time steps (default 400)
@@ -59,6 +59,7 @@ func usage() -> Never {
       --flexure-distance   distance inland in metres at which flexure reaches its full height (default 1500)
       --headwall-retreat   retreat of every face steeper than 0.6, m/yr at 3 m/yr rain; 0 disables (default 0)
       --profile print time spent in each pipeline phase
+      --structures  place man-made structures (one airstrip) and grade the ground under them (default on)
       --out     output directory (default ./out)
     """)
     exit(2)
@@ -117,6 +118,43 @@ func parseRefine(_ flag: String, _ value: String) -> Bool {
     return true
 }
 var bundleDir: String? = nil
+var placeStructures = true
+
+/// Places the island's structures (SitePlanner), grades `fine` under them, and writes
+/// structures.json plus preview maps to `out` when given. Returns the structures and graded heights.
+func planStructures(fine: Grid, coarse: Grid, seaLevel: Float, drainage: Grid?, clouds: Grid?,
+                    vegetation: Vegetation.Result, windDirection: Double, seed: UInt64,
+                    out: URL?) throws -> (structures: [Structure], height: Grid) {
+    let context = SiteContext(fine: fine, coarse: coarse, seaLevel: seaLevel, drainage: drainage, clouds: clouds,
+                              communities: vegetation.weights, windDirection: windDirection, seed: seed)
+    let (structures, graded) = SitePlanner.plan(context)
+    for s in structures {
+        print(String(format: "  %@ at (%.0f, %.0f) m, heading %.0f°, %@ m, elevation %.1f m, grade %.2f%%, %@",
+                     s.id, s.x, s.y, s.heading, s.properties["length"] ?? "?", s.elevation, s.slope * 100,
+                     s.properties["designators"] ?? ""))
+    }
+    if let out {
+        try StructureManifest(structures: structures).write(to: out.appendingPathComponent(StructureManifest.fileName))
+        let domain = Double(coarse.width) * coarse.cellSize
+        try Preview.write(Preview.structures(structures, over: Preview.hillshade(coarse, seaLevel: seaLevel), domain: domain),
+                          to: out.appendingPathComponent("structures.png"))
+        for s in structures {
+            try Preview.write(Preview.structureCloseUp(s, height: fine, seaLevel: seaLevel),
+                              to: out.appendingPathComponent("\(s.id)-before.png"))
+            try Preview.write(Preview.structureCloseUp(s, height: graded, seaLevel: seaLevel),
+                              to: out.appendingPathComponent("\(s.id)-after.png"))
+        }
+    }
+    return (structures, graded)
+}
+
+func parseStructures(_ value: String) -> Bool {
+    switch value {
+    case "on": return true
+    case "off": return false
+    default: usage()
+    }
+}
 var timer: PhaseTimer?
 var args = CommandLine.arguments.dropFirst()
 
@@ -162,6 +200,7 @@ if args.first == "--import" {
         case "--bundle": bundleDir = value
         case "--sea-level": seaLevel = parsed(Float(value))
         case "--out": previewDir = value
+        case "--structures": placeStructures = parseStructures(value)
         default: if !parseRefine(flag, value) { usage() }
         }
     }
@@ -198,9 +237,21 @@ if args.first == "--import" {
     var vegetationParams = Vegetation.Params()
     vegetationParams.windDirection = params.climate.windDirection
     let vegetation = Vegetation.bake(height: coarse, rain: coarseRain, clouds: clouds, seaLevel: seaLevel, params: vegetationParams)
+    var importStructures: [Structure] = []
+    if placeStructures {
+        var filledCoarse = coarse
+        PriorityFlood.fill(&filledCoarse, seaLevel: seaLevel)
+        let outURL = previewDir.map { URL(fileURLWithPath: $0, isDirectory: true) }
+        if let outURL { try FileManager.default.createDirectory(at: outURL, withIntermediateDirectories: true) }
+        (importStructures, height) = try planStructures(fine: height, coarse: coarse, seaLevel: seaLevel,
+                                                  drainage: Realism.drainageArea(filledCoarse, seaLevel: seaLevel),
+                                                  clouds: clouds, vegetation: vegetation,
+                                                  windDirection: params.climate.windDirection, seed: params.seed, out: outURL)
+    }
     let channels: [(name: String, grid: Grid)] = [("height", height), ("rain", rain)] + vegetationChannels(vegetation)
     let bundle = try IslandBundle.write(channels, seaLevel: Double(seaLevel),
                                         to: URL(fileURLWithPath: bundleDir, isDirectory: true))
+    try StructureManifest(structures: importStructures).write(to: bundle.url.appendingPathComponent(StructureManifest.fileName))
     let h = try bundle.channel("height")
     print(String(format: "wrote bundle %@: height %d² at %.2f m in %d levels, in %.1f s", bundleDir, h.size, h.cellMetres, h.levels, Date().timeIntervalSince(start)))
     let shares = biomeShares(vegetation, height: coarse, seaLevel: seaLevel)
@@ -246,6 +297,7 @@ while let flag = args.popFirst() {
     case "--flexure": params.flexure = parsed(Double(value))
     case "--flexure-distance": params.flexureDistance = parsed(Double(value))
     case "--bundle": bundleDir = value
+    case "--structures": placeStructures = parseStructures(value)
     case "--out": outDir = value
     default: if !parseRefine(flag, value) { usage() }
     }
@@ -405,6 +457,13 @@ if refineFactor > 1 {
     try Preview.writeRaw(fine, to: out.appendingPathComponent("height-fine.r32"))
     bundleHeight = fine
 }
+// Man-made structures, sited on the final heights and graded into them.
+var structures: [Structure] = []
+if placeStructures {
+    (structures, bundleHeight) = try planStructures(fine: bundleHeight, coarse: island.height, seaLevel: sea,
+                                                    drainage: island.drainageArea, clouds: clouds, vegetation: vegetation,
+                                                    windDirection: params.climate.windDirection, seed: params.seed, out: out)
+}
 if let bundleDir {
     let bundleStart = Date()
     let channels: [(name: String, grid: Grid)] = [
@@ -415,6 +474,7 @@ if let bundleDir {
         ("clouds-trades", clouds),
     ] + vegetationChannels(vegetation)
     let bundle = try IslandBundle.write(channels, seaLevel: Double(sea), to: URL(fileURLWithPath: bundleDir, isDirectory: true))
+    try StructureManifest(structures: structures).write(to: bundle.url.appendingPathComponent(StructureManifest.fileName))
     let h = try bundle.channel("height")
     print(String(format: "wrote bundle %@: height %d² in %d levels, in %.1f s", bundleDir, h.size, h.levels, Date().timeIntervalSince(bundleStart)))
 }

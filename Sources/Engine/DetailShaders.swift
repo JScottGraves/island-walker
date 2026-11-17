@@ -241,14 +241,23 @@ BaseSurface baseSurface(constant TerrainParams &t, const device int *pages,
     return b;
 }
 
+// Over this many metres outside a structure's graded box the generated relief comes back
+// (StructureMap: the edge distance), so a runway's shoulder doesn't end at a seam.
+constant float kGradeFade = 6.0;
+
 // The fine surface at xy, holding wavelengths down to `lambdaMin`. What it adds follows
 // the baked island: broken rock on steep ground, crests, hard and dry rock; soft soil
 // hummocks elsewhere; rills down hillsides, deepest where it rains most; smooth sediment
-// on valley floors and along streams; nothing on beaches or under the sea.
+// on valley floors and along streams; nothing on beaches or under the sea. Inside a
+// structure's graded zones it is the grade line exactly (no noise, none of the baked
+// heights' 7 cm steps), the relief easing back in over kGradeFade outside them.
 float detailHeight(constant TerrainParams &t, constant DetailParams &d, const device int *pages,
                    texture2d_array<ushort, access::read> tiles,
                    texture2d<float> rainMap, texture2d<float> drainageMap, texture2d<float> hardnessMap,
-                   float2 xy, float lambdaMin) {
+                   const device uchar *structures, float2 xy, float lambdaMin) {
+    StructureSample built = structureAt(structures, xy);
+    bool nearGrade = built.structure >= 0 && built.edge < kGradeFade;
+    if (nearGrade && built.edge <= 0.0) return built.gradeHeight;
     BaseSurface b = baseSurface(t, pages, tiles, xy);
     constexpr sampler linear(filter::linear, address::clamp_to_edge);
     float2 uv = xy / t.domainSize;
@@ -281,6 +290,12 @@ float detailHeight(constant TerrainParams &t, constant DetailParams &d, const de
     if (soilAmp > 0.01) h += soilAmp * soilRelief(xy, lambdaMin, seed);
     if (gullyAmp > 0.01 && slope > 1e-3) h += gullyAmp * gullies(xy, b.gradient, lambdaMin, seed);
     if (land > 0.0) h += boulders(xy, boulderDensity * land, lambdaMin, seed);
+    if (nearGrade) {
+        // The baked bank already leaves the grade line here; within the first 3 m the base
+        // eases off the exact line, and the relief fades back in over the whole band.
+        float base = mix(built.gradeHeight, b.height, smoothstep(0.0, 3.0, built.edge));
+        return base + land * h * smoothstep(0.0, kGradeFade, built.edge);
+    }
     return b.height + land * h;
 }
 
@@ -295,13 +310,14 @@ kernel void detailUpdate(uint2 gid [[thread_position_in_grid]],
                          texture2d_array<float, access::write> detail [[texture(1)]],
                          texture2d<float> rainMap [[texture(2)]],
                          texture2d<float> drainageMap [[texture(3)]],
-                         texture2d<float> hardnessMap [[texture(4)]]) {
+                         texture2d<float> hardnessMap [[texture(4)]],
+                         const device uchar *structures [[buffer(20)]]) {
     int n = d.size;
     if (int(gid.x) >= n || int(gid.y) >= n) return;
     DetailLevel L = d.level[u.level];
     int2 j = L.origin + wrapIndex(int2(gid) - L.origin, n);
     if (u.oldValid != 0 && all(j >= u.oldOrigin) && all(j < u.oldOrigin + n)) return;
-    float h = detailHeight(t, d, pages, tiles, rainMap, drainageMap, hardnessMap,
+    float h = detailHeight(t, d, pages, tiles, rainMap, drainageMap, hardnessMap, structures,
                            float2(j) * L.spacing, 2.0 * L.spacing);
     detail.write(float4(h, 0.0, 0.0, 0.0), gid, uint(u.level));
 }

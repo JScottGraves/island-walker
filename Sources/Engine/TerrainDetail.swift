@@ -69,6 +69,8 @@ final class TerrainDetail {
     let texture: MTLTexture
     let maps: [MTLTexture]
     let pipeline: MTLComputePipelineState
+    /// The structure map: graded zones are flattened to their grade line.
+    let structures: MTLBuffer
     private(set) var params: Params
 
     /// Samples of each level the CPU can read now: those of its last completed update,
@@ -85,8 +87,9 @@ final class TerrainDetail {
     }
 
     init(device: MTLDevice, library: MTLLibrary, levels: Int, cellMetres: Double, seaLevel: Float,
-         seed: UInt32, maps: DetailMaps?) throws {
+         seed: UInt32, maps: DetailMaps?, structures: MTLBuffer) throws {
         precondition(levels <= 8)
+        self.structures = structures
         self.levels = levels
         self.cellMetres = cellMetres
         let desc = MTLTextureDescriptor()
@@ -193,6 +196,7 @@ final class TerrainDetail {
         enc.setTexture(streamer.tiles, index: 0)
         enc.setTexture(texture, index: 1)
         enc.setTextures(maps, range: 2..<5)
+        enc.setBuffer(structures, offset: 0, index: StructureLookup.bufferIndex)
         let n = Self.size
         var stamps: [(Int, Int, SIMD2<Int32>)] = []
         lock.lock()
