@@ -936,10 +936,21 @@ float surfFoam(constant OceanParams &o, float4 setting, float4 crests, float2 he
                             age1, wave1);
     float b2 = surfBreakers(o, crests.y, crests.w, setting.y, setting.z, o.waves.y, xy, ragged, footprint, drift, weight.y, f2,
                             age2, wave2);
-    float lace = 1.0 - smoothstep(0.02, 0.12, depth);
-    // No breakers over the last few decimetres of water (the shallows' own depth): there the
-    // front has become a sheet of swash and the waterline's lace.
-    float cover = saturate(max(b1, b2) * smoothstep(0.25, 0.5, depth) + lace * 0.6 * setting.w);
+    // In world axes, wrapped every 4 km and turned off the noise's lattice.
+    float2 local = xy - floor(xy / 4096.0) * 4096.0;
+    float2 rs = float2(0.8 * local.x - 0.6 * local.y, 0.6 * local.x + 0.8 * local.y);
+    // The whitewater runs on into the shallows as a thinning, ragged bore up to where it has run
+    // out, a depth that varies along the shore over metres (a few to ~35 cm: on a 1:20 beach
+    // the bore's end wanders by metres), not a contour line; past it the swash sheet on the sand
+    // carries the bore on (swashSheet). Thinning into clumps, not fading as a whole.
+    float n1 = swashNoise(rs / 1.4 + 2.7), n2 = swashNoise(rs / 7.0 + 9.1);
+    float runout = 0.03 + 0.22 * n2 + 0.1 * n1;
+    float run = smoothstep(runout - 0.02, runout + 0.3, depth);
+    float clumps = smoothstep(0.35, 0.7, swashNoise(rs / 0.8 + 5.3) + 0.35 * run);
+    float bore = max(b1, b2) * mix(0.7 * clumps, 1.0, run) * smoothstep(0.0, 0.03, depth);
+    // Residual foam at the waterline in patches and threads, not a strip.
+    float lace = (1.0 - smoothstep(0.02, 0.12, depth)) * smoothstep(0.45, 0.8, swashNoise(rs / 0.6 + 1.9) + 0.25 * n2);
+    float cover = saturate(bore + lace * 0.6 * setting.w);
     if (cover <= 0.02) return 0.0;
     roller = max(f1, f2);
     // A pixel this coarse sees only the foam's cover.
@@ -966,7 +977,8 @@ float surfFoam(constant OceanParams &o, float4 setting, float4 crests, float2 he
     float open = clamp(1.25 - 1.3 * thick + 0.35 * old - 1.5 * roller, 0.0, 1.5);
     float wide = smoothstep(-0.06, 0.06, patch.y + 0.5 * old - 0.2);
     float2 rw = r + 0.4 * warp;
-    float aaFine = max(0.03, 1.2 * footprint / 0.5), aaWide = max(0.02, 1.2 * footprint / 1.5);
+    // Soft edges, ~5–10 cm at the least: bubbles, not cut paper.
+    float aaFine = max(0.1, 1.2 * footprint / 0.5), aaWide = max(0.06, 1.2 * footprint / 1.5);
     float tight = wide < 1.0 ? foamRafts(rw / 0.5, open, aaFine) : 0.0;
     float loose = wide > 0.0 ? foamRafts(float2(0.5 * rw.x - 0.87 * rw.y, 0.87 * rw.x + 0.5 * rw.y) / 1.5 + 31.7, open, aaWide) : 0.0;
     // Where tight rafts meet wide ones both sets of holes are punched (a short way into each
@@ -975,6 +987,8 @@ float surfFoam(constant OceanParams &o, float4 setting, float4 crests, float2 he
     float lacy = rafts;
     // A pixel too coarse for the rafts sees their mean.
     lacy = mix(lacy, thick * (1.0 - 0.6 * open), smoothstep(0.12, 0.35, footprint / mix(0.5, 1.5, wide)));
+    // Thin foam is partly see-through (the water shows through it), dense foam opaque.
+    lacy *= mix(0.55, 1.0, saturate(1.4 * thick + roller));
     return mix(lacy, cover, smoothstep(0.08, 0.5, footprint));
 }
 
@@ -1334,7 +1348,7 @@ fragment float4 oceanFragment(OceanOut in [[stage_in]], constant Uniforms &u [[b
                               oceanFootprint(u, dist), in.drift, roller);
         if (foam > 0.0) {
             // The roller's churned water brighter (0.88) than the foam it leaves (0.75).
-            float albedo = mix(0.75, 0.88, roller);
+            float albedo = mix(0.75, 0.88, roller) * (0.92 + 0.12 * swashNoise(in.plane / 1.7 + 3.1));
             float3 white = albedo * (u.sunRadiance * (saturate(l.z) * sunLight) + skyIrradiance(u, float3(0.0, 0.0, 1.0)));
             color = mix(color, white, foam);
         }
