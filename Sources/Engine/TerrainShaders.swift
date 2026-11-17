@@ -722,6 +722,8 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
     float3 n = normalize(in.normal);
     float slope = 1.0 - n.z;
     float h = in.world.z - u.seaLevel;
+    // The height's change across the pixel for the swash's edges, here where every pixel runs.
+    float heightWidth = fwidth(h);
     float3 l = normalize(u.sunDirection);
 
     float3 albedo;
@@ -909,7 +911,7 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
             // carries, its thickness and moving ripples, up-beach.
             float footprint = d * 1.1547 / u.frame.y;
             float4 water = far < 1.0 ? swashSheet(ocean, hs, clock.y, in.world.xy, in.local - floor(in.local / 4096.0) * 4096.0, sand.z, front, runup, sand.w, up, footprint,
-                                                  ocean.time.x, sheetRipple) : float4(0.0);
+                                                  ocean.time.x, heightWidth, sheetRipple) : float4(0.0);
             sheet = reach * (1.0 - far) * water.x;
             lace = sheet * max(water.y, water.z);
             sheetDepth = water.w;

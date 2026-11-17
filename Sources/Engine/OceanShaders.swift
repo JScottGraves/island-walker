@@ -373,11 +373,14 @@ float foamCells(float2 q) {
 // tens of kilometres out steps by ~8 mm, and the patterns' contours showed those steps as
 // hairlines close up).
 float4 swashSheet(constant OceanParams &o, float hs, float period, float2 xy, float2 local, float above, float front, float runup, float phase,
-                  float2 up, float footprint, float time, thread float2 &ripple) {
+                  float2 up, float footprint, float time, float heightWidth, thread float2 &ripple) {
     ripple = 0.0;
     float4 r = 0.0;
     // A crisp edge, antialiased over the pixel (the front is a contour of the sand's height).
-    float aa = max(fwidth(above), 1e-4);
+    // `heightWidth` is fwidth of the sand's height, taken by the caller where every pixel of the
+    // quad runs it (the front moves little across a pixel): taken here, inside the swash's
+    // branch, quads on its edge read garbage from pixels that skipped it, a dotted contour line.
+    float aa = max(heightWidth, 1e-4);
     r.x = saturate(above / aa + 0.5) * (phase < kSwashShare ? 1.0 : 0.0);
     if (r.x <= 0.0) return r;
     float x = phase / kSwashShare;
