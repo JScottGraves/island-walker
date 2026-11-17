@@ -453,8 +453,11 @@ float2 parallaxShift(texture2d_array<float> normal, int layer, GroundPlane g, fl
     float2 dir = planeCoords(g, (v - n * dot(v, n)) / vn);
     float reach = length(dir);
     if (reach > kParallaxReach) dir *= kParallaxReach / reach;
-    // Fewer steps looking straight at the surface, where the shift is short.
-    int count = int(clamp(steps * saturate(reach / 3.0), 3.0, steps));
+    // The same count of steps everywhere. Fewer of them looking straight at the surface,
+    // where the shift is short, step over crests to lower hits there, and the self-shadow
+    // shows every change of count as a hard-edged dark patch along the terrain's
+    // triangles (rock walls at 10–20 m, parallax-out/rock/summary.md).
+    int count = int(steps);
     float dt = 1.0 / float(count);
     float2 stride = dir * depth * dt;
     // Each pixel starts its search at a different fraction of a step, changing every
