@@ -61,6 +61,13 @@ final class OceanRenderer {
     let displacement: [MTLTexture]
     let derivatives: MTLTexture
     let moments: MTLTexture
+    /// Whitecap foam (oceanFoam) of the cascades with whitecaps, in their patches' space (fixed
+    /// in the world, so a breaking crest moves on and leaves its foam to fade), this frame's
+    /// and last frame's in turn, with mips (their mean is the foam's cover far out).
+    let foam: [MTLTexture]
+    var foamCurrent = 0
+    var foamClock = FoamClock()
+    let foamPipeline: MTLComputePipelineState
     /// The sky the sea reflects, as an upper-hemisphere octahedral map with mips.
     let environment: MTLTexture
     /// Over the domain, from the overview, for the surf: signed distance to the shoreline (m,
@@ -219,6 +226,7 @@ final class OceanRenderer {
         rowsPipeline = try kernel("oceanRows")
         columnsPipeline = try kernel("oceanColumns")
         environmentPipeline = try kernel("oceanSkyEnvironment")
+        foamPipeline = try kernel("oceanFoam")
         writesMotion = motion
         let desc = MTLRenderPipelineDescriptor()
         desc.depthAttachmentPixelFormat = depthFormat
@@ -274,6 +282,20 @@ final class OceanRenderer {
         displacement = [try maps(), try maps()]
         derivatives = try maps()
         moments = try maps()
+        func foamMaps() throws -> MTLTexture {
+            let d = MTLTextureDescriptor()
+            d.textureType = .type2DArray
+            d.pixelFormat = .r32Float
+            d.width = n
+            d.height = n
+            d.arrayLength = OceanRenderer.foamCascades
+            d.mipmapLevelCount = Int(log2(Double(n))) + 1
+            d.usage = [.shaderRead, .shaderWrite]
+            d.storageMode = .private
+            guard let t = device.makeTexture(descriptor: d) else { throw RendererError.setup("ocean foam") }
+            return t
+        }
+        foam = [try foamMaps(), try foamMaps()]
         let envDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: 128, height: 128, mipmapped: true)
         envDesc.usage = [.shaderRead, .shaderWrite]
         envDesc.storageMode = .private
@@ -428,6 +450,7 @@ final class OceanRenderer {
         let rebuild = environmentKey.map { !$0.matches(key) } ?? true
         if rebuild { environmentKey = key }
         let usageBuffer = usageBuffers[frameIndex % usageBuffers.count]
+        var foamUpdated = false
         if !list.isEmpty || rebuild, let enc = cmd.makeComputeCommandEncoder() {
             enc.label = "ocean waves"
             if !list.isEmpty {
@@ -446,6 +469,19 @@ final class OceanRenderer {
                 enc.setBuffer(work, offset: 0, index: 1)
                 enc.setTextures([displacement[current], derivatives, moments], range: 0..<3)
                 enc.dispatchThreadgroups(lines, threadsPerThreadgroup: group)
+                // The whitecaps' foam: the updated cascades' folds added, faded by the time since.
+                var mask: UInt32 = 0
+                for c in list where c < UInt32(OceanRenderer.foamCascades) { mask |= 1 << c }
+                if mask != 0 {
+                    var step = foamClock.step(time: time, updated: mask).uniform
+                    foamCurrent = 1 - foamCurrent
+                    enc.setComputePipelineState(foamPipeline)
+                    enc.setBytes(&step, length: MemoryLayout<SIMD4<Float>>.stride, index: 1)
+                    enc.setTextures([derivatives, displacement[current], foam[1 - foamCurrent], foam[foamCurrent]], range: 0..<4)
+                    enc.dispatchThreads(MTLSize(width: n, height: n, depth: OceanRenderer.foamCascades),
+                                        threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
+                    foamUpdated = true
+                }
             }
             if rebuild {
                 enc.setComputePipelineState(environmentPipeline)
@@ -468,9 +504,55 @@ final class OceanRenderer {
         }
         blit.fill(buffer: usageBuffer, range: 0..<4, value: 0)
         if !list.isEmpty { for t in [displacement[current], derivatives, moments] { blit.generateMipmaps(for: t) } }
+        if foamUpdated { blit.generateMipmaps(for: foam[foamCurrent]) }
         if rebuild { blit.generateMipmaps(for: environment) }
         blit.endEncoding()
         previousValid = true
+    }
+
+    /// Cascades with whitecap foam (the shortest one's caps are lost in the others').
+    static let foamCascades = 3
+
+    /// One step of the whitecaps' foam: for each cascade, the seconds it fades by this frame
+    /// (since its own last update; −1 for a cascade not updated, whose foam is kept), and
+    /// whether the foam starts over from this moment's folds.
+    struct FoamStep {
+        var cascadeDts: SIMD4<Float>
+        var reset: Bool
+        /// Seconds since the last frame, clamped (0 after a reset).
+        var dt: Double
+
+        func cascadeDt(_ c: Int) -> Double { Double(cascadeDts[c]) }
+        /// oceanFoam's `step`.
+        var uniform: SIMD4<Float> { SIMD4(cascadeDts.x, cascadeDts.y, cascadeDts.z, reset ? 1 : 0) }
+    }
+
+    /// The foam's time step from the sea's clock (seconds, unwrapped): each cascade fades by the
+    /// time since its last update, clamped over a hitch; a jump of more than a couple of seconds
+    /// either way (a new hour, a snapshot of another moment) starts the foam over.
+    struct FoamClock {
+        var last: Double?
+        var cascadeLast = [Double](repeating: 0, count: OceanRenderer.foamCascades)
+
+        mutating func step(time: Double, updated: UInt32) -> FoamStep {
+            var dts = SIMD4<Float>(repeating: -1)
+            let reset: Bool
+            var frame = 0.0
+            if let last, time >= last, time - last < 2 {
+                reset = false
+                frame = Swift.min(time - last, 0.1)
+            } else {
+                reset = true
+                for c in 0..<cascadeLast.count { cascadeLast[c] = time }
+            }
+            for c in 0..<cascadeLast.count where updated & (UInt32(1) << UInt32(c)) != 0 {
+                let dt: Double = Swift.min(Swift.max(time - cascadeLast[c], 0), 0.1)
+                dts[c] = Float(dt)
+                cascadeLast[c] = time
+            }
+            last = time
+            return FoamStep(cascadeDts: dts, reset: reset, dt: frame)
+        }
     }
 
     /// What the sky environment was last built for.
@@ -555,7 +637,7 @@ final class OceanRenderer {
         bind(enc, uniforms: &uniforms)
         enc.setFragmentBytes(&uniforms, length: MemoryLayout<TerrainRenderer.Uniforms>.stride, index: 1)
         enc.setFragmentTextures([derivatives, moments, environment, tiles], range: 6..<10)
-        enc.setFragmentTexture(displacement[current], index: 11)
+        enc.setFragmentTexture(foam[foamCurrent], index: 12)
         enc.setFragmentBuffer(usageBuffers[frameIndex % usageBuffers.count], offset: 0, index: 8)
         var t = terrainParams
         enc.setFragmentBytes(&t, length: MemoryLayout<TerrainRenderer.TerrainParams>.stride, index: 3)
