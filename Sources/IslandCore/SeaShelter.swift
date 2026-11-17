@@ -149,10 +149,15 @@ public enum SeaShelter {
                 land[k] = Swift.max(land[k], z)
             }
         }
-        let fan: [(Double, Double)] = [-24.0, -12, 0, 12, 24].map { a in
-            (a * Double.pi / 180, exp(-0.5 * (a / 15) * (a / 15)))
+        // A named, fully typed helper: as one closure CI's compiler can't type-check it in time.
+        func ray(_ degrees: Double) -> (Double, Double) {
+            let x: Double = degrees / 15
+            let weight: Double = exp(-0.5 * x * x)
+            return (degrees * Double.pi / 180, weight)
         }
-        let weightSum = fan.reduce(0) { $0 + $1.1 }
+        let fan: [(Double, Double)] = [ray(-24), ray(-12), ray(0), ray(12), ray(24)]
+        var weightSum = 0.0
+        for entry in fan { weightSum += entry.1 }
         let leeReach = settings.leeLength * 1500
         let maxSteps = Int((Swift.max(maxFetch, leeReach) / cell).rounded(.up))
         var fetch = Grid(width: cw, height: ch, cellSize: cell)
