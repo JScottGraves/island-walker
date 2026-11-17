@@ -87,6 +87,8 @@ public struct Airstrip: StructureKind {
                          elevation: site.elevation, slope: site.slope, zones: zones,
                          properties: [
                             "designators": String(format: "%02d/%02d", low, high),
+                            // Long out of use: cracked paving, worn paint, the strip gone to seed.
+                            "condition": "abandoned",
                             "length": String(format: "%.0f", length),
                             "width": String(format: "%.0f", p.runwayWidth),
                             "meanCut": String(format: "%.2f", site.meanCut),

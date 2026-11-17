@@ -96,6 +96,8 @@ struct CoverParams {
 
 // Blades per m² of a mown grass strip: a dense lawn (the candidate grid's 64 per m² at most).
 constant float kCoverLawnDensity = 52.0;
+// Blades per m² of rank grass on an abandoned strip.
+constant float kCoverRankDensity = 58.0;
 constant float3 kCoverLawnRoot = float3(0.035, 0.060, 0.020);
 constant float3 kCoverLawnTip = float3(0.080, 0.135, 0.040);
 
@@ -170,17 +172,41 @@ kernel void coverGenerate(constant Uniforms &u [[buffer(0)]],
     // Structures (StructureMap): nothing on pavement; a mown lawn of short ʻakiʻaki on a
     // grass strip, whatever the biomes grow around it; grasses only on its cut and fill
     // slopes (the sedges there give way to kawelu).
+    // Abandoned (upkeep 0): grass in the paving's cracks and over its crumbled edges, and the
+    // strip and its slopes gone to long rank kawelu and ʻakiʻaki instead of lawn.
     StructureSample built = structureAt(structures, p);
-    if (built.plants == kPlantsNone) return;
-    bool mown = floraRandom(h, 12) < structureMownShare(built, p);
+    float neglect = built.structure >= 0 ? 1.0 - built.upkeep : 0.0;
+    float weeds = 0.0;
+    if (built.plants == kPlantsNone) {
+        if (neglect <= 0.0) return;
+        StructureZoneGPU z = structureZones(structures)[built.zone];
+        float2 q = built.uv + structureSeed(z);
+        PavementCracks k = pavementCracks(q, built.upkeep, 0.0);
+        float grown = smoothstep(0.35, 0.6, coverNoise(q / 2.9 + 6.6)) * (0.5 + 0.5 * k.heavy);
+        if (k.distance < k.halfWidth + 0.06) weeds = grown;
+        if (k.pothole > 0.3) weeds = max(weeds, 0.5);
+        weeds = max(weeds, smoothstep(-0.2, 0.3, pavementEdgeLoss(built.uv, structureSeed(z), z.b.y, z.b.x, built.upkeep)));
+        if (floraRandom(h, 13) >= weeds * neglect) return;
+    }
+    float lawnShare = structureMownShare(built, p);
+    bool lawn = floraRandom(h, 12) < lawnShare;
+    bool mown = lawn && floraRandom(h, 14) < built.upkeep;
+    bool rank = (lawn && !mown) || weeds > 0.0;
 
     constexpr sampler linear(filter::linear, address::clamp_to_edge);
     float2 uv = p / t.domainSize;
     float4 a = w0.sample(linear, uv, level(0)), b = w1.sample(linear, uv, level(0)), c = w2.sample(linear, uv, level(0));
     int community = floraPickCommunity(a, b, c, floraRandom(h, 2));
-    if (community < 0 && !mown) return;
+    if (community < 0 && !lawn && !rank) return;
     float4 cc = community >= 0 ? kCoverCommunity[community] : float4(0.0);
     if (mown) cc = float4(0.0, kCoverLawnDensity, 0.0, 1.0);
+    // Rank grass: kawelu bunches among ʻakiʻaki, thick but patchy; in cracks a dense line.
+    if (rank) cc = float4(floraRandom(h, 15) < 0.55 ? 1.0 : 0.0, weeds > 0.0 ? 60.0 : kCoverRankDensity, weeds > 0.0 ? 0.0 : 0.22, 1.0);
+    // Left alone, the cut and fill slopes grow as thick as the strip.
+    if (!lawn && !rank && built.plants == kPlantsGrassOnly && neglect > 0.0) {
+        cc.y = max(cc.y, kCoverRankDensity * neglect);
+        cc.z = min(cc.z, 0.35);
+    }
     int species = int(cc.x);
     if (built.plants == kPlantsGrassOnly && species >= 2) species = 1;
     float4 sa = kCoverShapeA[species], sb = kCoverShapeB[species];
@@ -239,8 +265,11 @@ kernel void coverGenerate(constant Uniforms &u [[buffer(0)]],
     if (index >= uint(cp.counts.y)) return;
     CoverSeed s;
     // Mown: an even 9–15 cm (coverCull's height for ʻakiʻaki at these factors), standing straighter.
+    // Rank grass a little taller than the wild's, and bending further under its own length.
+    float rankHeight = rank && weeds <= 0.0 ? 1.15 + 0.25 * floraRandom(h, 16) : 1.0;
     s.a = mown ? float4(p, 0.55 + 0.2 * floraRandom(h, 5), 0.4 + 0.3 * floraRandom(h, 6))
-               : float4(p, clumpHeight * centreFactor * (0.7 + 0.6 * floraRandom(h, 5)), 0.7 + 0.6 * floraRandom(h, 6));
+               : float4(p, rankHeight * clumpHeight * centreFactor * (0.7 + 0.6 * floraRandom(h, 5)),
+                        (rank ? 1.1 : 0.7) + 0.6 * floraRandom(h, 6));
     // Mown blades carry kCoverSpecies more in their species code (a lawn's green, coverFragment).
     s.b = float4(dir, 0.7 + 0.6 * floraRandom(h, 7), float(species + (mown ? kCoverSpecies : 0)) + 0.999 * floraRandom(h, 8));
     seeds[slot * uint(cp.counts.y) + index] = s;

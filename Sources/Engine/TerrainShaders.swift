@@ -951,46 +951,111 @@ float runwayPaint(float u, float v, float L, float W, int2 designators, float2 f
 }
 
 constant float3 kAsphalt = float3(0.085, 0.084, 0.080);      // weathered asphalt, sRGB ~82
+constant float3 kAsphaltBleached = float3(0.165, 0.160, 0.148);   // oxidised, sun-bleached asphalt, sRGB ~113
+constant float3 kAsphaltBase = float3(0.115, 0.100, 0.080);  // the broken-out base course: gravel and dirt
 constant float3 kRunwayPaint = float3(0.60, 0.60, 0.57);     // worn white paint
+constant float3 kPaintFaded = float3(0.34, 0.33, 0.31);      // paint chalked and faded by decades of sun
 constant float3 kMownGrass = float3(0.058, 0.110, 0.032);    // mown grass, sRGB ~68, 94, 50
 constant float3 kMownDry = float3(0.105, 0.110, 0.045);      // sun-dried turf, sRGB ~92, 94, 60
+constant float3 kRankGreen = float3(0.050, 0.082, 0.028);    // long uncut grass in leaf
+constant float3 kRankStraw = float3(0.175, 0.150, 0.080);    // standing dead grass and seed heads
+constant float3 kWeeds = float3(0.045, 0.075, 0.025);        // grass in the cracks
+
+// Unkempt grassland at p: green and straw in drifts metres to tens of metres across, darker
+// tussocks, a few bare scuffs.
+float3 rankGrass(float2 p, float footprint) {
+    float dry = 0.55 * groundNoise(p / 13.0 + 1.3) + 0.3 * groundNoise(p / 3.7 + 8.8) + 0.15 * groundNoise(p / 41.0 + 4.2);
+    float3 c = mix(kRankGreen, kRankStraw, smoothstep(0.3, 0.75, dry));
+    float tussock = mix(groundNoise(p / 0.9 + 2.7), 0.5, smoothstep(0.1, 0.5, footprint));
+    return c * (0.8 + 0.4 * tussock);
+}
 
 // The albedo of a built surface at `world` (StructureSample `s`, its zone `z`), with the
 // pixel's footprint along the structure's axes from the world-space derivatives; `n`
-// (the mesh's normal) gets a faint grain on asphalt near the camera.
+// (the mesh's normal) gets a faint grain on asphalt near the camera. How it has aged
+// follows the structure's upkeep: bleached, cracked and broken paving with faded, flaking
+// paint and grass in the cracks and over the edges, and the grass strip gone to seed.
 float3 builtSurface(int surface, StructureSample s, StructureZoneGPU z, float3 world, float3 dx, float3 dy, float distance,
                     thread float3 &n) {
     float2 axis = z.a.zw, across = float2(axis.y, -axis.x);
     float2 f = float2(abs(dot(dx.xy, axis)) + abs(dot(dy.xy, axis)), abs(dot(dx.xy, across)) + abs(dot(dy.xy, across)));
     float2 p = world.xy;
+    float neglect = 1.0 - s.upkeep;
+    // Ageing patterns in the structure's own frame, offset per structure.
+    float2 q = s.uv + structureSeed(z);
+    float footprint = 0.7 * length(f);
     if (surface == kSurfacePaved) {
         // Patching and wear tens of metres across, slabs of resurfacing, the aggregate's speckle
-        // (fading once a pixel spans it), rubber from tyres in the touchdown zones.
+        // (fading once a pixel spans it), rubber from tyres in the touchdown zones; abandoned,
+        // the binder oxidised pale and uneven, with stains.
         float patches = 0.75 * groundNoise(p / 37.0 + 4.1) + 0.25 * groundNoise(p / 9.0 + 1.7);
-        float3 albedo = kAsphalt * (0.82 + 0.36 * patches);
-        float grain = groundNoise(p / 0.06) - 0.5;
-        albedo *= 1.0 + 0.25 * grain * (1.0 - smoothstep(0.02, 0.08, max(f.x, f.y)));
+        float bleach = neglect * smoothstep(0.15, 0.85, 0.6 * groundNoise(p / 17.0 + 3.3) + 0.4 * patches);
+        float3 albedo = mix(kAsphalt, kAsphaltBleached, 0.55 * neglect + 0.45 * bleach) * (0.82 + 0.36 * patches);
+        float stain = neglect * smoothstep(0.62, 0.8, groundNoise(p / 6.1 + 12.4));
+        albedo *= 1.0 - 0.3 * stain;
+        // Aggregate: stones a centimetre or two across (local coordinates: the world's lose
+        // their centimetres to float precision this far from the origin).
+        float grainShows = 1.0 - smoothstep(0.008, 0.05, max(f.x, f.y));
+        if (grainShows > 0.0) {
+            float grain = 0.65 * (groundNoise(q / 0.018 + 3.1) - 0.5) + 0.35 * (groundNoise(q / 0.07 + 7.7) - 0.5);
+            albedo *= 1.0 + (0.3 + 0.25 * neglect) * grain * grainShows;
+        }
         float L = z.b.x, W = z.b.y;
         float fromEnd = L - abs(s.uv.x);
-        float rubber = smoothstep(150.0, 260.0, fromEnd) * (1.0 - smoothstep(550.0, 750.0, fromEnd))
+        float rubber = (1.0 - 0.7 * neglect) * smoothstep(150.0, 260.0, fromEnd) * (1.0 - smoothstep(550.0, 750.0, fromEnd))
                      * (1.0 - smoothstep(3.0, 8.0, abs(s.uv.y))) * (0.6 + 0.4 * groundNoise(float2(s.uv.x / 25.0, s.uv.y / 1.5)));
         albedo *= 1.0 - 0.45 * rubber;
-        float paint = runwayPaint(s.uv.x, s.uv.y, L, W, int2(z.d.zw), f);
-        // Worn: thinner in patches a few metres across and speckled where the binder shows
-        // through (the speckle fading once a pixel spans it), and over the rubber.
-        float speckle = mix(groundNoise(p / 0.21 + 3.7), 0.5, smoothstep(0.03, 0.12, max(f.x, f.y)));
+
+        // Cracks: dark open lines, a pixel's share of them once thinner than it, their mean
+        // darkening once a pixel spans the blocks; grass in many of them.
+        PavementCracks k = pavementCracks(q, s.upkeep, footprint);
+        float crack = 0.0, weeds = 0.0;
+        if (neglect > 0.0) {
+            crack = paintSpan(k.distance, -k.halfWidth, k.halfWidth, footprint);
+            // The crack's lips ravelled a little: a frayed, slightly paler band either side.
+            float lips = paintSpan(k.distance, -2.5 * k.halfWidth - 0.01, 2.5 * k.halfWidth + 0.01, footprint) - crack;
+            if (lips > 0.0) albedo *= 1.0 + 0.12 * lips * (groundNoise(q / 0.04 + 1.3) - 0.3);
+            // Moss and seedlings in tufts along some of the cracks (the blades stand in them).
+            float near = paintSpan(k.distance, -k.halfWidth - 0.025, k.halfWidth + 0.025, footprint);
+            if (near > 0.0) {
+                float grown = smoothstep(0.35, 0.6, groundNoise(q / 2.9 + 6.6)) * (0.5 + 0.5 * k.heavy);
+                float tufts = mix(smoothstep(0.55, 0.75, groundNoise(q / 0.3 + 4.9)), 0.3, smoothstep(0.05, 0.3, footprint));
+                weeds = grown * tufts * near;
+            }
+            float mean = neglect * (0.03 + 0.15 * k.heavy);
+            float far = smoothstep(0.08, 0.6, footprint);
+            crack = mix(crack, mean, far);
+            weeds = mix(weeds, 0.4 * mean, far);
+            albedo = mix(albedo, kAsphaltBase, k.pothole);
+            albedo *= 1.0 - 0.7 * crack;
+            albedo = mix(albedo, kWeeds, 0.8 * weeds);
+        }
+
+        // Paint: worn through in patches, flaking, broken by the cracks, chalky.
+        float paint = runwayPaint(s.uv.x, s.uv.y, L, W, int2(int(z.d.z) / 100, int(z.d.z) % 100), f);
+        if (paint > 0.0) {
+        float speckle = mix(groundNoise(q / 0.21 + 3.7), 0.5, smoothstep(0.03, 0.12, max(f.x, f.y)));
         float wear = (0.6 + 0.4 * groundNoise(p / 2.3 + 9.1)) * (0.8 + 0.3 * speckle);
-        albedo = mix(albedo, kRunwayPaint, paint * wear * (1.0 - 0.6 * rubber));
+        float patchy = smoothstep(0.38, 0.62, 0.6 * groundNoise(q / 3.7 + 1.9) + 0.4 * groundNoise(q / 0.95 + 7.3));
+        float flakes = mix(smoothstep(0.3, 0.55, groundNoise(q / 0.17 + 5.5)), 0.6, smoothstep(0.05, 0.25, footprint));
+        wear *= mix(1.0, (0.25 + 0.75 * patchy) * flakes, neglect);
+        float3 paintColour = mix(kRunwayPaint, kPaintFaded, 0.7 * neglect);
+        albedo = mix(albedo, paintColour, paint * wear * (1.0 - 0.6 * rubber) * (1.0 - min(1.0, 2.0 * crack)) * (1.0 - k.pothole));
+        }
+
+        // The edges crumbled back and grassed over.
+        float lost = pavementEdgeLoss(s.uv, structureSeed(z), W, L, s.upkeep);
+        if (lost > -0.3) albedo = mix(albedo, rankGrass(p, footprint), smoothstep(-0.15, 0.15, lost));
         // A faint grain in the surface's normal near the camera; otherwise flat.
         float near = 1.0 - smoothstep(5.0, 25.0, distance);
         if (near > 0.0) {
-            float2 bump = float2(groundNoise(p / 0.13) - 0.5, groundNoise(p / 0.13 + 31.0) - 0.5);
-            n = normalize(n + float3(0.04 * near * bump, 0.0));
+            float2 bump = float2(groundNoise(q / 0.13) - 0.5, groundNoise(q / 0.13 + 31.0) - 0.5);
+            n = normalize(n + float3((0.04 + 0.08 * k.pothole) * near * bump, 0.0));
         }
         return albedo;
     }
     // Mown grass: faint light and dark bands along the runway where the mower turned, and
-    // a drift in colour tens of metres across.
+    // a drift in colour tens of metres across; left alone, long unkempt grass instead.
     float band = sin(3.14159265 * s.uv.y / 4.5);
     float bands = mix(smoothstep(-0.25, 0.25, band), 0.5, smoothstep(1.5, 3.0, f.y));
     float drift = groundNoise(p / 23.0 + 7.3);
@@ -998,7 +1063,8 @@ float3 builtSurface(int surface, StructureSample s, StructureZoneGPU z, float3 w
     albedo *= float3(1.0 + 0.12 * (groundNoise(p / 5.0) - 0.5), 1.0, 1.0);
     // Drier, straw-tinted patches where the sun burns the turf, tens of metres across.
     float dry = smoothstep(0.55, 0.85, 0.65 * groundNoise(p / 41.0 + 2.9) + 0.35 * groundNoise(p / 11.0 + 6.1));
-    return mix(albedo, kMownDry, 0.55 * dry);
+    albedo = mix(albedo, kMownDry, 0.55 * dry);
+    return mix(albedo, rankGrass(p, footprint), neglect);
 }
 
 // Mirrors Look.lit and GroundView.shade; constants come from Look.metalPrelude, the sun

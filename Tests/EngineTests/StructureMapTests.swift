@@ -7,19 +7,19 @@ import IslandCore
 /// IslandCore.StructureMap says, everywhere: the bins only speed it up.
 final class StructureMapTests: XCTestCase {
     func airstrip(id: String, x: Double, y: Double, heading: Double, elevation: Double, slope: Double,
-                  embankment: Double) -> Structure {
+                  embankment: Double, upkeep: String? = nil) -> Structure {
         Structure(id: id, kind: "airstrip", x: x, y: y, heading: heading, elevation: elevation, slope: slope,
                   zones: [
                     StructureZone(name: "runway", halfLength: 750, halfWidth: 15, surface: .paved, plants: .none, graded: true),
                     StructureZone(name: "strip", halfLength: 810, halfWidth: 45, surface: .mownGrass, plants: .grassOnly, graded: true),
                   ],
-                  embankment: embankment, properties: ["designators": "06/24"])
+                  embankment: embankment, properties: ["designators": "06/24"].merging(upkeep.map { ["upkeep": $0] } ?? [:]) { a, _ in a })
     }
 
     var structures: [Structure] {
         [airstrip(id: "airstrip-1", x: 33285, y: 18405, heading: 61, elevation: 22.2, slope: 0.0141, embankment: 36),
          // A second one overlapping the first one's surroundings, to check the first-match order.
-         airstrip(id: "airstrip-2", x: 34100, y: 18900, heading: 128, elevation: 30, slope: -0.01, embankment: 20)]
+         airstrip(id: "airstrip-2", x: 34100, y: 18900, heading: 128, elevation: 30, slope: -0.01, embankment: 20, upkeep: "1")]
     }
 
     /// Distance of (u, v) from the nearest edge of any zone of any structure (to skip points
@@ -75,7 +75,7 @@ final class StructureMapTests: XCTestCase {
                                    device float4 *out [[buffer(2)]], device float *clear [[buffer(3)]],
                                    uint i [[thread_position_in_grid]]) {
             StructureSample s = structureAt(sm, points[i]);
-            out[i] = float4(float(s.surface) + 10.0 * float(s.plants) + 100.0 * float(s.graded ? 1 : 0),
+            out[i] = float4(float(s.surface) + 10.0 * float(s.plants) + 100.0 * float(s.graded ? 1 : 0) + 1000.0 * s.upkeep,
                             s.gradeHeight, float(s.structure), s.edge);
             clear[i] = structureClearance(sm, points[i]);
         }
@@ -106,7 +106,8 @@ final class StructureMapTests: XCTestCase {
         var found = 0
         for (k, p) in points.enumerated() {
             let s = lookup.sample(x: p.x, y: p.y)
-            let code = Float(s.surface) + 10 * Float(s.plants) + 100 * (s.graded ? 1 : 0)
+            let graded: Float = s.graded ? 100 : 0
+            let code: Float = Float(s.surface) + 10 * Float(s.plants) + graded + 1000 * s.upkeep
             XCTAssertEqual(o[k].x, code, "codes at \(p)")
             XCTAssertEqual(Int(o[k].z), s.structure, "structure at \(p)")
             if s.structure >= 0 {
@@ -138,6 +139,26 @@ final class StructureMapTests: XCTestCase {
         XCTAssertLessThan(lookup.clearance(x: Float(s.x), y: Float(s.y)), 0)
         // Far away: no restriction known.
         XCTAssertGreaterThan(lookup.clearance(x: Float(s.x + 5000), y: Float(s.y)), 30)
+    }
+
+    /// How kept a structure is (0 abandoned … 1 maintained): its "upkeep" or "condition"
+    /// property, else the lookup's default; every sample carries it, with the designators.
+    func testUpkeepAndDesignators() {
+        var kept = structures[0]
+        kept.properties["condition"] = "maintained"
+        var half = structures[1]
+        half.properties["upkeep"] = "0.5"
+        let plain = structures[0]
+        let lookup = StructureLookup(structures: [kept, half])
+        XCTAssertEqual(lookup.sample(x: Float(kept.x), y: Float(kept.y)).upkeep, 1)
+        XCTAssertEqual(lookup.sample(x: Float(half.x), y: Float(half.y)).upkeep, 0.5)
+        // No property: the default, abandoned unless asked otherwise.
+        XCTAssertEqual(StructureLookup(structures: [plain]).sample(x: Float(plain.x), y: Float(plain.y)).upkeep, 0)
+        XCTAssertEqual(StructureLookup(structures: [plain], upkeep: 1).sample(x: Float(plain.x), y: Float(plain.y)).upkeep, 1)
+        // Heading 61°: 06 is read travelling along it, so it is painted at the −u end.
+        let s = StructureLookup(structures: [plain]).sample(x: Float(plain.x), y: Float(plain.y))
+        XCTAssertEqual(s.designators.0, 6)
+        XCTAssertEqual(s.designators.1, 24)
     }
 
     /// The canopy cover is cut over the footprint where nothing tall may grow.

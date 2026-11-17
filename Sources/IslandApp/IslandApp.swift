@@ -19,7 +19,8 @@ import Walker
 // sedges; `--cover-range M` (default 50) and `--cover-density X` (default 1) tune them.
 // `--parallax off` draws the ground textures flat; P toggles that live (ISLAND_PARALLAX tunes it).
 // `--view airstrip` (or `--camera airstrip`) starts at the runway's threshold looking down it; `--structures off`
-// draws the island as if it had none (its heights stay graded).
+// draws the island as if it had none (its heights stay graded); `--upkeep 1` keeps structures whose bundle doesn't say
+// maintained (default 0: abandoned, cracked and overgrown).
 
 @main
 struct IslandApp: App {
@@ -111,7 +112,8 @@ final class Coordinator: NSObject, MTKViewDelegate {
                                            flora: IslandSource.floraMaps(),
                                            groundCover: GroundCoverSettings(arguments: CommandLine.arguments),
                                            antialiasing: Snapshots.antialiasing(),
-                                           structures: IslandSource.structures())
+                                           structures: IslandSource.structures(),
+                                           structureUpkeep: Snapshots.option("--upkeep").flatMap(Float.init) ?? 0)
             renderer?.jitterSign = Snapshots.option("--jitter-sign").flatMap(Float.init) ?? 1
             if Snapshots.option("--parallax") == "off" { renderer?.parallax.x = 0 }
         } catch {

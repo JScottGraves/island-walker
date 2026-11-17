@@ -83,7 +83,8 @@ enum Snapshots {
     /// Views of the island's airstrip, when it has one: `airstrip` at eye height on the
     /// centreline 25 m short of the runway's first end, looking down it; `airstrip-aerial`
     /// 300 m up, behind and to the left, looking at its middle; `airstrip-side` standing at
-    /// the grass strip's edge 250 m in, looking along the runway.
+    /// the grass strip's edge 250 m in, looking along the runway; `airstrip-asphalt` standing
+    /// on the runway by the first aiming bar, looking 30° down at the paving.
     static func structureViews() -> [(name: String, camera: GroundView.Camera, eye: Double?)] {
         // From the bundle even with `--structures off`, so the same spots can be compared.
         guard let s = IslandSource.bundle()?.structures().first(where: { $0.kind == "airstrip" }),
@@ -102,6 +103,7 @@ enum Snapshots {
             view("airstrip-aerial", u: -L - 700, v: -800, yaw: atan2(dx, dy) / radians,
                  pitch: -atan(300 / (dx * dx + dy * dy).squareRoot()) / radians, eye: 300),
             view("airstrip-side", u: -L + 250, v: s.gradedHalfWidth - 1, yaw: s.heading - 8, pitch: -2, eye: nil),
+            view("airstrip-asphalt", u: -L + 290, v: 5, yaw: s.heading + 10, pitch: -30, eye: nil),
         ]
     }
 
@@ -151,7 +153,8 @@ enum Snapshots {
                                                flora: IslandSource.floraMaps(),
                                                groundCover: GroundCoverSettings(arguments: CommandLine.arguments),
                                                antialiasing: antialiasing(),
-                                           structures: IslandSource.structures())
+                                           structures: IslandSource.structures(),
+                                           structureUpkeep: Snapshots.option("--upkeep").flatMap(Float.init) ?? 0)
             renderer.jitterSign = option("--jitter-sign").flatMap(Float.init) ?? 1
             if option("--parallax") == "off" { renderer.parallax.x = 0 }
             print("shadows: \(renderer.shadows.rawValue); antialiasing: \(renderer.antialiasing)")

@@ -247,11 +247,13 @@ public final class TerrainRenderer {
     ///   - flora: the plant-community maps the native trees are scattered from; nil draws
     ///     no trees. `floraSpecimens` places them by hand instead (floragen).
     ///   - structures: the bundle's man-made structures (none for a bundle without them).
+    ///   - structureUpkeep: how kept they are where their properties don't say (0 abandoned … 1 maintained).
     public init(device: MTLDevice, colorFormat: MTLPixelFormat, depthFormat: MTLPixelFormat,
                 terrain: TerrainTiles, shadows requested: Shadows = .rayTraced, clouds: Grid? = nil,
                 detailMaps: DetailMaps? = nil, fineDetail: Bool = true, flora floraMaps: FloraMaps? = nil,
                 floraSpecimens: Bool = false, groundCover coverSettings: GroundCover.Settings = .init(),
-                antialiasing requestedAA: Antialiasing = .off, structures: [Structure] = []) throws {
+                antialiasing requestedAA: Antialiasing = .off, structures: [Structure] = [],
+                structureUpkeep: Float = 0) throws {
         self.device = device
         var antialiasing = requestedAA
         if case .upscaled = antialiasing, !MTLFXTemporalScalerDescriptor.supportsDevice(device) { antialiasing = .temporal }
@@ -367,7 +369,7 @@ public final class TerrainRenderer {
         domainSize = Float(terrain.domainMetres)
         // The finest CDLOD levels draw generated detail, each half the spacing of the next.
         let detailLods = fineDetail ? TerrainDetail.levelCount(cellMetres: terrain.cellMetres) : 0
-        structureMap = StructureLookup(structures: structures)
+        structureMap = StructureLookup(structures: structures, upkeep: structureUpkeep)
         structureBuffer = try structureMap.makeBuffer(device: device)
         detail = try TerrainDetail(device: device, library: library, levels: detailLods, cellMetres: terrain.cellMetres,
                                    seaLevel: terrain.seaLevel, seed: TerrainDetail.seed(of: overview), maps: detailMaps,

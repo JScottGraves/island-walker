@@ -28,8 +28,9 @@ public struct StructureLookup: Sendable {
         public var b: SIMD4<Float>
         /// Surface code, plant code, graded (0/1), structure index.
         public var c: SIMD4<Float>
-        /// The structure's graded half length and width (m); runway designators painted at
-        /// the −u end (read travelling +u) and at the +u end, 0 for none.
+        /// The structure's graded half length and width (m); its runway designators as
+        /// 100 × the one painted at the −u end (read travelling +u) + the one at the +u end
+        /// (0 for none); its upkeep, 0 abandoned … 1 maintained.
         public var d: SIMD4<Float>
     }
 
@@ -46,6 +47,16 @@ public struct StructureLookup: Sendable {
         public var structure: Int
         /// Signed distance outside the structure's graded box (negative inside).
         public var edge: Float
+        /// How kept the structure is: 0 abandoned (cracked, worn, overgrown) … 1 maintained.
+        public var upkeep: Float = 1
+        /// Runway designators painted at its −u and +u ends, 0 for none.
+        public var designators: (Int, Int) = (0, 0)
+
+        public static func == (a: Sample, b: Sample) -> Bool {
+            a.surface == b.surface && a.plants == b.plants && a.graded == b.graded && a.gradeHeight == b.gradeHeight
+                && a.u == b.u && a.v == b.v && a.zone == b.zone && a.structure == b.structure && a.edge == b.edge
+                && a.upkeep == b.upkeep && a.designators == b.designators
+        }
 
         public static let open = Sample(surface: 0, plants: 0, graded: false, gradeHeight: 0, u: 0, v: 0, zone: -1,
                                         structure: -1, edge: 1e9)
@@ -61,18 +72,21 @@ public struct StructureLookup: Sendable {
     /// distance to ground where nothing tall grows) is exact out to it.
     public let margin: Float
 
-    public init(structures: [Structure], binSize: Float = 256, margin: Float = 64) {
+    /// - Parameter upkeep: how kept a structure is when its properties don't say ("upkeep"
+    ///   0…1, or "condition" abandoned / neglected / maintained): abandoned by default.
+    public init(structures: [Structure], binSize: Float = 256, margin: Float = 64, upkeep: Float = 0) {
         self.binSize = binSize
         self.margin = margin
         for (k, s) in structures.enumerated() {
             let axis = s.axis
             let ghl = Float(s.gradedHalfLength), ghw = Float(s.gradedHalfWidth)
             let designators = Self.designators(s)
+            let kept = Self.upkeep(s) ?? upkeep
             func zone(_ hl: Double, _ hw: Double, _ surface: StructureSurface, _ plants: PlantRule, _ graded: Bool) -> Zone {
                 Zone(a: SIMD4(Float(s.x), Float(s.y), Float(axis.x), Float(axis.y)),
                      b: SIMD4(Float(hl), Float(hw), Float(s.elevation), Float(s.slope)),
                      c: SIMD4(Float(surface.code), Float(plants.code), graded ? 1 : 0, Float(k)),
-                     d: SIMD4(ghl, ghw, Float(designators.0), Float(designators.1)))
+                     d: SIMD4(ghl, ghw, Float(100 * designators.0 + designators.1), kept))
             }
             for z in s.zones { zones.append(zone(z.halfLength, z.halfWidth, z.surface, z.plants, z.graded)) }
             if s.embankment > 0, s.gradedHalfLength > 0 {
@@ -119,6 +133,17 @@ public struct StructureLookup: Sendable {
         return turn(parts[0]) <= turn(parts[1]) ? (parts[0], parts[1]) : (parts[1], parts[0])
     }
 
+    /// A structure's own upkeep, from properties["upkeep"] (0…1) or ["condition"].
+    static func upkeep(_ s: Structure) -> Float? {
+        if let text = s.properties["upkeep"], let v = Float(text) { return Swift.min(Swift.max(v, 0), 1) }
+        switch s.properties["condition"] {
+        case "abandoned": return 0
+        case "neglected": return 0.4
+        case "maintained": return 1
+        default: return nil
+        }
+    }
+
     /// The buffer the shaders read.
     public func bytes() -> [UInt8] {
         var out = [UInt8]()
@@ -161,7 +186,8 @@ public struct StructureLookup: Sendable {
             guard abs(u) <= z.b.x && abs(v) <= z.b.y else { continue }
             return Sample(surface: Int(z.c.x), plants: Int(z.c.y), graded: z.c.z > 0.5,
                           gradeHeight: z.b.z + z.b.w * Swift.min(Swift.max(u, -z.d.x), z.d.x), u: u, v: v,
-                          zone: Int(k), structure: Int(z.c.w), edge: Self.boxDistance(u, v, z.d.x, z.d.y))
+                          zone: Int(k), structure: Int(z.c.w), edge: Self.boxDistance(u, v, z.d.x, z.d.y),
+                          upkeep: z.d.w, designators: (Int(z.d.z) / 100, Int(z.d.z) % 100))
         }
         return .open
     }
@@ -213,7 +239,7 @@ struct StructureZoneGPU {
     float4 a;   // centre xy, +u axis xy
     float4 b;   // half length, half width, grade line elevation, slope
     float4 c;   // surface, plants, graded, structure index
-    float4 d;   // graded half length, half width, designator at the −u end, at the +u end
+    float4 d;   // graded half length, half width, 100 × designator at the −u end + at the +u end, upkeep
 };
 
 constant int kSurfaceNatural = 0;
@@ -232,6 +258,7 @@ struct StructureSample {
     int zone;
     int structure;
     float edge;         // signed distance outside its graded box (m)
+    float upkeep;       // 0 abandoned (cracked, worn, overgrown) … 1 maintained
 };
 
 const device StructureZoneGPU *structureZones(const device uchar *sm) {
@@ -273,6 +300,7 @@ StructureSample structureAt(const device uchar *sm, float2 xy) {
     s.zone = -1;
     s.structure = -1;
     s.edge = 1e9;
+    s.upkeep = 1.0;
     uint2 bin = structureBin(sm, xy);
     if (bin.y == 0u) return s;
     const device StructureZoneGPU *zones = structureZones(sm);
@@ -290,6 +318,7 @@ StructureSample structureAt(const device uchar *sm, float2 xy) {
         s.zone = int(i);
         s.structure = int(z.c.w);
         s.edge = structureBoxDistance(uv, z.d.xy);
+        s.upkeep = z.d.w;
         return s;
     }
     return s;
@@ -313,9 +342,137 @@ float structureNoise(float2 q) {
 // mower-cut line instead of a ruled one. 0 on pavement and away from structures.
 float structureMownShare(StructureSample s, float2 xy) {
     if (s.structure < 0 || s.surface == kSurfacePaved) return 0.0;
-    if (s.surface != kSurfaceMownGrass && s.edge > 2.5) return 0.0;
+    if (s.surface != kSurfaceMownGrass && s.edge > 6.0) return 0.0;
     float ragged = 0.7 * structureNoise(xy / 1.7 + 3.1) + 0.3 * structureNoise(xy / 0.55 + 8.9) - 0.5;
-    return 1.0 - smoothstep(-1.5, 1.5, s.edge + 2.4 * ragged);
+    // An abandoned strip's edge has grown out into the scrub's and back: a wider, vaguer line.
+    float blur = 1.5 + 3.0 * (1.0 - s.upkeep);
+    return 1.0 - smoothstep(-blur, blur, s.edge + (2.4 + 3.0 * (1.0 - s.upkeep)) * ragged);
+}
+
+uint structureHash(int2 c, uint salt) {
+    uint h = uint(c.x) * 0x8da6b343u ^ uint(c.y) * 0xd8163841u ^ salt * 0xcb1ab31fu;
+    h ^= h >> 16; h *= 0x7feb352du; h ^= h >> 15; h *= 0x846ca68bu; h ^= h >> 16;
+    return h;
+}
+
+float structureUnit(uint h) { return float(h >> 8) * (1.0 / 16777216.0); }
+
+// Distance from q (in cells) to the nearest border of a jittered Voronoi tiling, the
+// nearest cell, and a 0…1 hash of the border's cell pair (to keep some borders uncracked).
+float voronoiBorder(float2 q, uint salt, thread int2 &cellOut, thread float &pairHash) {
+    int2 c0 = int2(floor(q));
+    float best = 1e9;
+    float2 site = 0.0;
+    int2 cell = c0;
+    for (int j = -1; j <= 1; j++) {
+        for (int i = -1; i <= 1; i++) {
+            int2 c = c0 + int2(i, j);
+            uint h = structureHash(c, salt);
+            float2 s = float2(c) + 0.15 + 0.7 * float2(structureUnit(h), structureUnit(h * 0x9e3779b9u));
+            float d = length_squared(s - q);
+            if (d < best) { best = d; site = s; cell = c; }
+        }
+    }
+    float border = 1e9;
+    pairHash = 1.0;
+    // Sites keep 0.15 of a cell from their cell's edges, so the nearest border lies with one
+    // of the eight cells around the nearest site's.
+    for (int j = -1; j <= 1; j++) {
+        for (int i = -1; i <= 1; i++) {
+            int2 c = cell + int2(i, j);
+            if (all(c == cell)) continue;
+            uint h = structureHash(c, salt);
+            float2 s = float2(c) + 0.15 + 0.7 * float2(structureUnit(h), structureUnit(h * 0x9e3779b9u));
+            float2 n = s - site;
+            float d = dot(0.5 * (s + site) - q, n) * rsqrt(dot(n, n));
+            if (d < border) {
+                border = d;
+                int2 lo = min(c, cell), hi = max(c, cell);
+                pairHash = structureUnit(structureHash(lo * 31 + hi, salt + 5u));
+            }
+        }
+    }
+    cellOut = cell;
+    return border;
+}
+
+// The cracks in a structure's paving at uv (its local metres), kept `upkeep` (0 abandoned
+// … 1 maintained): distance (m) to the nearest crack's centre line and that crack's half
+// width; how broken up the ground is here (alligator cracking, 0…1); and a pothole (0…1)
+// where a block of the alligator cracking has broken out.
+struct PavementCracks {
+    float distance;
+    float halfWidth;
+    float heavy;
+    float pothole;
+};
+
+PavementCracks pavementCracks(float2 uv, float upkeep, float footprint) {
+    PavementCracks k;
+    k.distance = 1e9;
+    k.halfWidth = 0.0;
+    k.heavy = 0.0;
+    k.pothole = 0.0;
+    float neglect = 1.0 - upkeep;
+    if (neglect <= 0.0) return k;
+    k.heavy = neglect * smoothstep(0.45, 0.78, 0.7 * structureNoise(uv / 31.0 + 5.3) + 0.3 * structureNoise(uv / 7.3 + 1.1));
+    // Cracks wander: the lines below are drawn through coordinates warped by noise at two
+    // scales, so no stretch runs straight for more than a few tens of centimetres.
+    float2 warp = 0.35 * (float2(structureNoise(uv / 0.9 + 3.3), structureNoise(uv / 0.9 + 17.1)) - 0.5);
+    // The fine wander only where a pixel can show it.
+    if (footprint < 0.05) warp += 0.1 * (float2(structureNoise(uv / 0.23 + 8.8), structureNoise(uv / 0.23 + 2.6)) - 0.5);
+    uv += warp;
+    float open = mix(0.006, 0.022, structureNoise(uv / 1.7 + 2.2));
+    // Transverse cracks across the runway every ~14 m, most of them right across, wandering.
+    float t = uv.x / 14.0;
+    float ti = floor(t + 0.5);
+    uint th = structureHash(int2(int(ti), 7), 11u);
+    if (structureUnit(th) < 0.35 + 0.6 * neglect) {
+        float line = (ti + 0.3 * (structureUnit(th * 0x27d4eb2fu) - 0.5)) * 14.0
+                   + 0.9 * (structureNoise(float2(uv.y / 3.1, ti * 7.3)) - 0.5);
+        float reach = mix(0.4, 1.0, structureUnit(th * 0x165667b1u)) * 20.0;
+        if (abs(uv.y + 6.0 * (structureUnit(th * 0x85ebca6bu) - 0.5)) < reach) {
+            float d = abs(uv.x - line);
+            if (d < k.distance) { k.distance = d; k.halfWidth = open * 1.4; }
+        }
+    }
+    // Longitudinal: the paving lanes' joints (centreline and ±7.5 m), in runs tens of metres long.
+    float lane = abs(uv.y) < 3.75 ? 0.0 : 7.5;
+    float joint = lane + 0.25 * (structureNoise(float2(uv.x / 4.3, lane)) - 0.5);
+    if (structureNoise(float2(uv.x / 37.0, 3.0 + lane)) < 0.35 + 0.5 * neglect) {
+        float d = abs(abs(uv.y) - joint);
+        if (d < k.distance) { k.distance = d; k.halfWidth = open * 1.2; }
+    }
+    // Block cracking everywhere it is old: borders of ~4 m blocks, about half of them open.
+    int2 cell;
+    float pair;
+    float d = voronoiBorder(uv / 4.2, 21u, cell, pair) * 4.2;
+    if (pair < 0.3 + 0.5 * neglect + 0.3 * k.heavy && d < k.distance) { k.distance = d; k.halfWidth = open; }
+    // Alligator cracking in the worst patches: ~1 m blocks, some broken out into potholes.
+    if (k.heavy > 0.05) {
+        float a = voronoiBorder(uv / 1.1, 37u, cell, pair) * 1.1;
+        if (pair < k.heavy * 1.3 && a < k.distance) { k.distance = a; k.halfWidth = open * 0.8; }
+        uint ph = structureHash(cell, 41u);
+        if (structureUnit(ph) < 0.07 * k.heavy * k.heavy) k.pothole = smoothstep(0.02, 0.12, a);
+    }
+    return k;
+}
+
+// An offset for the zone's structure's ageing patterns, from where it stands, so no two
+// runways crack alike.
+float2 structureSeed(StructureZoneGPU z) {
+    return float2(fmod(z.a.x * 0.37, 613.0), fmod(z.a.y * 0.53, 587.0));
+}
+
+// How far the grass has taken the paving's edges back (m), at uv on a runway of half width
+// `halfWidth` and half length `halfLength`: broken edges crumbled to a ragged line.
+float pavementEdgeLoss(float2 uv, float2 seed, float halfWidth, float halfLength, float upkeep) {
+    float neglect = 1.0 - upkeep;
+    if (neglect <= 0.0) return 0.0;
+    float edge = min(halfWidth - abs(uv.y), halfLength - abs(uv.x));
+    float2 q = uv + seed;
+    float ragged = neglect * (0.4 + 1.1 * (0.6 * structureNoise(q / 2.3 + 4.4) + 0.4 * structureNoise(q / 0.7 + 9.2)));
+    return ragged - edge;   // > 0: this point's paving is gone
 }
 
 // Signed distance (m) to the nearest ground where only grass or nothing may grow: exact
