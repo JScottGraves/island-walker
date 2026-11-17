@@ -262,9 +262,11 @@ float swashRunup(constant OceanParams &o, float hs, float period, float2 xy, flo
 }
 
 // Each wave's section along the shore (0…1, its own every wave; surfBreakers deals the
-// whitewater's sections from it and the fronts peel by it).
+// whitewater's sections from it and the fronts peel by it). Turned off the noise's lattice,
+// whose squares would show in the sections' ends.
 float surfSection(float2 xy, float n, float period) {
-    return groundNoise(xy / 160.0 + n * 1.37 + period);
+    float2 r = float2(0.866 * xy.x - 0.5 * xy.y, 0.5 * xy.x + 0.866 * xy.y);
+    return groundNoise(r / 160.0 + n * 1.37 + period);
 }
 
 // The surf's wave clock at xy: which wave's front the point is behind (the last to have passed
@@ -717,20 +719,26 @@ float surfBreakers(constant OceanParams &o, float arrival, float spacing, float 
     // Waves break near H/h ≈ 0.78: a set's biggest (~1.8 Hs) from Hs/h ≈ 0.43, ~0.72 of the bake's
     // saturated Hs/h (o.waves.z), where all of them have broken. Breakers also need waves of some
     // size (over ~0.2 m).
+    // The break line is ragged over tens of metres and dealt anew every wave, and the
+    // whitewater thickens over some metres from it: a crisp line along the (smooth) heights'
+    // contour would cut each wave's trail off in a straight edge across it.
     float depthHs = o.waves.z * max(h, 0.5);
-    float breaking = smoothstep(0.75, 0.85, hs * (0.6 + 0.5 * set) / depthHs) * smoothstep(0.15, 0.3, hs * set);
+    float2 r = float2(0.866 * xy.x - 0.5 * xy.y, 0.5 * xy.x + 0.866 * xy.y);
+    float onset = 0.9 + 0.2 * groundNoise(r / 35.0 + index * 0.71 + 2.9);
+    float breaking = smoothstep(0.7, 0.9, onset * hs * (0.6 + 0.5 * set) / depthHs) * smoothstep(0.15, 0.3, hs * set);
     // A solid roller 4–10 m wide.
     float width = clamp(4.0 * hs * set, 4.0, 10.0) / spacing;
     float f = 1.0 - smoothstep(0.6 * width, 1.4 * width, u0);
     // Dense whitewater right behind the roller, thinning into clumps over ~15 m, then a lace.
     float trail = 0.85 * exp(-u0 * spacing / 15.0) + 0.25 * exp(-u0 * spacing / 45.0);
-    // Section ends ragged, not cut straight across.
-    float on = smoothstep(0.3, 0.45, section + 0.15 * ragged);
+    // Section ends ragged, and tapering over some tens of metres (the foam thinning into
+    // clumps there), not cut straight across.
+    float on = smoothstep(0.25, 0.5, section + 0.15 * ragged);
     float bands = on * max(f, trail);
     // A pixel wider than a fraction of the spacing sees the mean whitewater over a set.
     float spread = smoothstep(0.05, 0.25, footprint / spacing);
     float mean = 0.55 * (width + (0.85 * 15.0 + 0.25 * 45.0) / spacing);
-    float meanBreaking = smoothstep(0.75, 0.85, 0.95 * hs / depthHs) * smoothstep(0.15, 0.3, 0.75 * hs);
+    float meanBreaking = smoothstep(0.7, 0.9, 0.95 * hs / depthHs) * smoothstep(0.15, 0.3, 0.75 * hs);
     front = weight * breaking * on * f * (1.0 - spread);
     return weight * mix(breaking * bands, meanBreaking * mean, spread);
 }
