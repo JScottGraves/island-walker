@@ -27,7 +27,7 @@ Requires an Apple Silicon Mac with macOS 14+ and Xcode 16.
 swift build -c release
 # Bake an island and write hillshade.png, flow.png, rain.png, hardness.png, height.r32
 .build/release/islandgen --seed 42 --size 1024 --steps 400 --out out
-# Walk it (WASD, Shift to run, drag to look, F to fly, Space/C up/down while flying)
+# Walk it (WASD, Shift to run, drag to look, F to fly, Space/C up/down while flying, R to the airstrip)
 swift run -c release IslandApp out/height.r32
 # Or render the app's view from the summit, a ridge and the coast to out/app-*.png and exit
 swift run -c release IslandApp out/height.r32 --snapshot out
