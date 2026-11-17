@@ -18,6 +18,7 @@ import Walker
 // (metres, degrees) at that spot, and `--flora off` draws no trees. `--cover off` draws no grasses and
 // sedges; `--cover-range M` (default 50) and `--cover-density X` (default 1) tune them.
 // `--parallax off` draws the ground textures flat; P toggles that live (ISLAND_PARALLAX tunes it).
+// R puts the walker on the airstrip, on the centreline short of the runway looking down it (on foot).
 // `--view airstrip` (or `--camera airstrip`) starts at the runway's threshold looking down it; `--structures off`
 // draws the island as if it had none (its heights stay graded); `--upkeep 1` keeps structures whose bundle doesn't say
 // maintained (default 0: abandoned, cracked and overgrown).
@@ -83,6 +84,9 @@ final class Coordinator: NSObject, MTKViewDelegate {
     var fWasDown = false
     var tWasDown = false
     var pWasDown = false
+    var rWasDown = false
+    /// Where R puts the walker: the `airstrip` snapshot view, read from the bundle once.
+    lazy var airstripView = Snapshots.structureViews().first { $0.name == "airstrip" }
     var savedParallax: Float = 1
     /// Local solar time of day and day of year; the sun follows them.
     var hour = 9.5
@@ -95,7 +99,7 @@ final class Coordinator: NSObject, MTKViewDelegate {
     // macOS virtual key codes
     let kW: UInt16 = 13, kA: UInt16 = 0, kS: UInt16 = 1, kD: UInt16 = 2
     let kF: UInt16 = 3, kSpace: UInt16 = 49, kC: UInt16 = 8
-    let kP: UInt16 = 35
+    let kP: UInt16 = 35, kR: UInt16 = 15
     let kT: UInt16 = 17, kLeftBracket: UInt16 = 33, kRightBracket: UInt16 = 30
 
     func attach(_ view: InputMTKView) {
@@ -182,6 +186,22 @@ final class Coordinator: NSObject, MTKViewDelegate {
             print("parallax \(renderer.parallax.x > 0 ? "on" : "off")")
         }
         pWasDown = pDown
+
+        // R jumps to the airstrip and lands on foot.
+        let rDown = view.keys.contains(kR)
+        if rDown && !rWasDown {
+            if let spot = airstripView {
+                renderer.prepareGround(x: spot.camera.x, y: spot.camera.y)
+                var moved = Walker(x: spot.camera.x, y: spot.camera.y, ground: ground)
+                moved.yaw = spot.camera.yaw
+                moved.pitch = spot.camera.pitch
+                w = moved
+                flying = false
+            } else {
+                print("this island has no airstrip")
+            }
+        }
+        rWasDown = rDown
 
         let tDown = view.keys.contains(kT)
         if tDown && !tWasDown { timeRuns.toggle() }
