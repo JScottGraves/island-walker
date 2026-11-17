@@ -64,13 +64,16 @@ final class OceanRenderer {
     /// The sky the sea reflects, as an upper-hemisphere octahedral map with mips.
     let environment: MTLTexture
     /// Over the domain, from the overview, for the surf: signed distance to the shoreline (m,
-    /// positive at sea), two channels unused (the systems' exposure before `waves` refracted
-    /// them), and the water's depth smoothed.
+    /// positive at sea), the capillary roughness's factor where the wind is in the lee
+    /// (SeaShelter), one channel unused, and the water's depth smoothed.
     let shore: MTLTexture
     /// Over the domain, for the surf, from the next finer level: the trade swell's and the north
     /// swell's arrival (in their periods), local significant heights (m, two halfs in one float)
     /// and the water's depth, refracted and shoaled (WaveRefraction.surfTexels).
     let waves: MTLTexture
+    /// Over the domain, from the overview: each cascade's amplitude factor where the sea is
+    /// sheltered (SeaShelter: fetch, the wind's lee, reefs, the swells' shadows), 1 on open sea.
+    let shelter: MTLTexture
     var current = 0
     var previousValid = false
     var frameIndex = 0
@@ -156,6 +159,57 @@ final class OceanRenderer {
                                  withBytes: raw.baseAddress!, bytesPerRow: floor.width * 16)
         }
         waves = wavesTexture
+        // How much of the open sea's waves each patch of water gets (SeaShelter): per cascade
+        // here, the capillary roughness's factor in the shore texture's y.
+        let shelterStart = Date()
+        var shelterTexels = [SIMD4<Float16>](repeating: SIMD4(repeating: 1), count: distance.values.count)
+        if (tuning["shelter"] ?? 1) > 0 {
+            var settings = SeaShelter.Settings()
+            if let v = tuning["lee"] { settings.lee = v }
+            if let v = tuning["leeL"] { settings.leeLength = v }
+            if let v = tuning["reef"] { settings.reefDepth = v }
+            var tradeH = Grid(width: floor.width, height: floor.height, cellSize: floor.cellSize)
+            var northH = tradeH, swellDepth = tradeH
+            for k in 0..<waveTexels.count {
+                let bits = waveTexels[k].z.bitPattern
+                tradeH.values[k] = Float(Float16(bitPattern: UInt16(bits & 0xFFFF)))
+                northH.values[k] = Float(Float16(bitPattern: UInt16(bits >> 16)))
+                swellDepth.values[k] = waveTexels[k].w
+            }
+            let shelter = SeaShelter.factors(height: overview, seaLevel: seaLevel, spectrum: spectrum,
+                                             swells: (tradeH, northH, swellDepth), tradeHeight: tradeHeight,
+                                             settings: settings)
+            for k in 0..<shelterTexels.count {
+                shelterTexels[k] = SIMD4<Float16>(shelter.cascades[k])
+                texels[4 * k + 1] = shelter.calm.values[k]
+            }
+            texels.withUnsafeBytes { raw in
+                shoreTexture.replace(region: MTLRegionMake2D(0, 0, distance.width, distance.height), mipmapLevel: 0,
+                                     withBytes: raw.baseAddress!, bytesPerRow: distance.width * 16)
+            }
+            if let dir = ProcessInfo.processInfo.environment["ISLAND_WAVE_DUMP"] {
+                let url = URL(fileURLWithPath: dir)
+                try? shelter.cascades.withUnsafeBytes { Data($0) }.write(to: url.appendingPathComponent("shelter.f32"))
+                try? shelter.calm.values.withUnsafeBytes { Data($0) }.write(to: url.appendingPathComponent("calm.f32"))
+            }
+        } else {
+            for k in 0..<distance.values.count { texels[4 * k + 1] = 1 }
+            texels.withUnsafeBytes { raw in
+                shoreTexture.replace(region: MTLRegionMake2D(0, 0, distance.width, distance.height), mipmapLevel: 0,
+                                     withBytes: raw.baseAddress!, bytesPerRow: distance.width * 16)
+            }
+        }
+        let shelterDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: distance.width,
+                                                                   height: distance.height, mipmapped: false)
+        shelterDesc.usage = [.shaderRead]
+        shelterDesc.storageMode = .shared
+        guard let shelterTexture = device.makeTexture(descriptor: shelterDesc) else { throw RendererError.setup("sea shelter") }
+        shelterTexels.withUnsafeBytes { raw in
+            shelterTexture.replace(region: MTLRegionMake2D(0, 0, distance.width, distance.height), mipmapLevel: 0,
+                                   withBytes: raw.baseAddress!, bytesPerRow: distance.width * 8)
+        }
+        shelter = shelterTexture
+        print(String(format: "sea shelter: %.2f s", Date().timeIntervalSince(shelterStart)))
         tree = OceanQuadtree(quads: OceanRenderer.nodeQuads, cellMetres: 0.5, centre: (domain / 2, domain / 2),
                              reach: domain / 2 + 160_000, rangeFactor: 2)
         func kernel(_ name: String) throws -> MTLComputePipelineState {
@@ -434,9 +488,11 @@ final class OceanRenderer {
     }
 
     /// Sea-state overrides for tuning, from the environment: ISLAND_OCEAN="trade=2,tradeT=8,
-    /// swell=1.5,fetch=40000,chop=1.2,shallow=0.6,surfwave=1.5" (trade swell height and period,
-    /// north swell height, local wind fetch (m), choppiness, the depth-limited Hs/h, and the
-    /// surf waves' height scale). Unset keys keep the defaults.
+    /// swell=1.5,fetch=40000,chop=1.2,shallow=0.6,surfwave=1.5,shelter=1,lee=0.6,leeL=12,reef=1"
+    /// (trade swell height and period, north swell height, local wind fetch (m), choppiness, the
+    /// depth-limited Hs/h, the surf waves' height scale; shelter=0 turns SeaShelter off, lee and
+    /// leeL its wind lee's strength and length (× the land's height), reef the depth (m) that
+    /// breaks the wind sea). Unset keys keep the defaults.
     static func tuning() -> [String: Double] {
         var out: [String: Double] = [:]
         for pair in (ProcessInfo.processInfo.environment["ISLAND_OCEAN"] ?? "").split(separator: ",") {
@@ -461,6 +517,7 @@ final class OceanRenderer {
         // The surf's waves lift the water near the shore, in every pass that draws it.
         enc.setVertexTexture(shore, index: 6)
         enc.setVertexTexture(waves, index: 7)
+        enc.setVertexTexture(shelter, index: 8)
     }
 
     private func drawNodes(_ enc: MTLRenderCommandEncoder) {
