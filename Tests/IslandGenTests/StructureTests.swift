@@ -34,7 +34,7 @@ final class StructureTests: XCTestCase {
         p.refineCount = 8
         let a = SitePlanner.plan(context(), kinds: [Airstrip(params: p)], log: { _ in })
         let b = SitePlanner.plan(context(), kinds: [Airstrip(params: p)], log: { _ in })
-        XCTAssertEqual(a.structures.count, 1)
+        XCTAssertEqual(a.structures.filter { $0.kind == "airstrip" }.count, 1)
         XCTAssertEqual(a.structures, b.structures)
         XCTAssertEqual(a.height.values, b.height.values)
         let s = a.structures[0]
@@ -67,9 +67,50 @@ final class StructureTests: XCTestCase {
         let centre = map.sample(x: s.x, y: s.y)
         XCTAssertEqual(centre.surface, .paved)
         XCTAssertEqual(centre.plants, .none)
-        let shoulder = s.world(u: 0, v: 40)
+        // (Clear of the taxiway, which crosses the strip at the middle or a quarter from an end.)
+        let shoulder = s.world(u: 200, v: 30)
         XCTAssertEqual(map.sample(x: shoulder.x, y: shoulder.y).plants, .grassOnly)
         XCTAssertEqual(map.sample(x: 10, y: 10), .open)
+    }
+
+    /// A concrete apron beside the strip, joined to the runway by a taxiway across it, both on
+    /// the runway's grade line: the runway, the taxiway and the apron meet without a step.
+    func testApronBesideTheStripOnTheGradeLine() {
+        var p = Airstrip.Params()
+        p.spacing = 300
+        p.refineCount = 8
+        let (structures, graded) = SitePlanner.plan(context(), kinds: [Airstrip(params: p)], log: { _ in })
+        let runway = structures.first { $0.kind == "airstrip" }!
+        guard let apron = structures.first(where: { $0.kind == "apron" }),
+              let taxiway = structures.first(where: { $0.kind == "taxiway" }) else { return XCTFail("no apron") }
+        XCTAssertEqual(apron.id, "apron-1")
+        XCTAssertEqual(apron.zones.first?.surface, .concrete)
+        // Just past the strip, on one side.
+        let a = runway.local(x: apron.x, y: apron.y)
+        XCTAssertEqual(abs(a.v) - apron.zones[0].halfWidth, runway.gradedHalfWidth, accuracy: 1e-6)
+        let map = StructureMap(structures)
+        // Walking out along the taxiway from the runway's centreline to the apron's far side:
+        // runway asphalt, then concrete all the way, on one grade line.
+        let side: Double = a.v > 0 ? 1 : -1
+        var surfaces: [StructureSurface] = []
+        var v = 0.0
+        while v < abs(a.v) + apron.zones[0].halfWidth - 1 {
+            let (x, y) = runway.world(u: a.u, v: side * v)
+            let s = map.sample(x: x, y: y)
+            if surfaces.last != s.surface { surfaces.append(s.surface) }
+            XCTAssertEqual(s.gradeHeight ?? -999, runway.gradeHeight(u: a.u), accuracy: 1e-6, "grade at v \(v)")
+            v += 0.5
+        }
+        XCTAssertEqual(surfaces, [.paved, .concrete])
+        XCTAssertEqual(taxiway.properties["edges"], "sides")
+        // The graded heights follow the line on the apron, and the strip is still exact beside it.
+        for (u, v) in [(a.u, a.v), (a.u + 50, a.v), (a.u + 100, side * 30)] {
+            let (x, y) = runway.world(u: u, v: v)
+            let i = Int(x / graded.cellSize), j = Int(y / graded.cellSize)
+            let cx = (Double(i) + 0.5) * graded.cellSize, cy = (Double(j) + 0.5) * graded.cellSize
+            guard let grade = map.sample(x: cx, y: cy).gradeHeight else { continue }
+            XCTAssertEqual(Double(graded[i, j]), grade, accuracy: 1e-3)
+        }
     }
 
     func testRunwayRunsCloseToTheTradeWind() {

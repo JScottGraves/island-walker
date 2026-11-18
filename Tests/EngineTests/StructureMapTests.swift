@@ -19,7 +19,47 @@ final class StructureMapTests: XCTestCase {
     var structures: [Structure] {
         [airstrip(id: "airstrip-1", x: 33285, y: 18405, heading: 61, elevation: 22.2, slope: 0.0141, embankment: 36),
          // A second one overlapping the first one's surroundings, to check the first-match order.
-         airstrip(id: "airstrip-2", x: 34100, y: 18900, heading: 128, elevation: 30, slope: -0.01, embankment: 20, upkeep: "1")]
+         airstrip(id: "airstrip-2", x: 34100, y: 18900, heading: 128, elevation: 30, slope: -0.01, embankment: 20, upkeep: "1"),
+         // An apron beside the first one's strip and a taxiway across the strip to it: smaller
+         // zones apply over bigger ones, whichever structure they belong to.
+         concrete("taxiway-1", u: 300, v: 29, halfLength: 7.5, halfWidth: 16, embankment: 5, edges: "sides"),
+         concrete("apron-1", u: 300, v: 80, halfLength: 60, halfWidth: 35, embankment: 18, edges: nil)]
+    }
+
+    func concrete(_ id: String, u: Double, v: Double, halfLength: Double, halfWidth: Double, embankment: Double,
+                  edges: String?) -> Structure {
+        let runway = airstrip(id: "airstrip-1", x: 33285, y: 18405, heading: 61, elevation: 22.2, slope: 0.0141, embankment: 36)
+        let (x, y) = runway.world(u: u, v: v)
+        return Structure(id: id, kind: String(id.split(separator: "-")[0]), x: x, y: y, heading: 61,
+                         elevation: runway.gradeHeight(u: u), slope: 0.0141,
+                         zones: [StructureZone(name: id, halfLength: halfLength, halfWidth: halfWidth, surface: .concrete,
+                                               plants: .none, graded: true)],
+                         embankment: embankment, properties: edges.map { ["edges": $0] } ?? [:])
+    }
+
+    /// The taxiway's concrete over the strip's grass, and the apron's embankment never over the strip.
+    func testSmallerZonesWinAcrossStructures() {
+        let all = structures
+        let runway = all[0]
+        let lookup = StructureLookup(structures: all)
+        let map = StructureMap(all)
+        for (v, surface) in [(20.0, StructureSurface.concrete), (40, .concrete), (80, .concrete), (44, .concrete),
+                             (-40, .mownGrass), (0, .paved)] {
+            let (x, y) = runway.world(u: 300, v: v)
+            XCTAssertEqual(map.sample(x: x, y: y).surface, surface, "CPU at v \(v)")
+            XCTAssertEqual(lookup.sample(x: Float(x), y: Float(y)).surface, surface.code, "lookup at v \(v)")
+        }
+        // Beside the apron on the strip: still the strip's grass, not the apron's embankment.
+        let (x, y) = runway.world(u: 380, v: 40)
+        XCTAssertEqual(map.sample(x: x, y: y).surface, .mownGrass)
+        // Off the apron's far side: its embankment, eased by the distance to the apron.
+        let (ex, ey) = runway.world(u: 300, v: 125)
+        let e = lookup.sample(x: Float(ex), y: Float(ey))
+        XCTAssertEqual(e.plants, PlantRule.grassOnly.code)
+        XCTAssertEqual(e.edge, 10, accuracy: 0.05)
+        // The taxiway paints no designators.
+        let (tx, ty) = runway.world(u: 300, v: 30)
+        XCTAssertEqual(lookup.sample(x: Float(tx), y: Float(ty)).designators.0, 0)
     }
 
     /// Distance of (u, v) from the nearest edge of any zone of any structure (to skip points

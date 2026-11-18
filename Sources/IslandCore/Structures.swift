@@ -20,6 +20,8 @@ public enum StructureSurface: String, Codable, Sendable, CaseIterable {
     case mownGrass
     case gravel
     case earth
+    /// Concrete slabs, such as an apron or a taxiway.
+    case concrete
 
     public var code: Int {
         switch self {
@@ -28,6 +30,7 @@ public enum StructureSurface: String, Codable, Sendable, CaseIterable {
         case .mownGrass: return 2
         case .gravel: return 3
         case .earth: return 4
+        case .concrete: return 5
         }
     }
 }
@@ -181,26 +184,50 @@ public struct StructureSample: Sendable, Equatable {
 }
 
 /// Point queries over an island's structures (CPU side; the renderer's StructureMap mirrors it).
+///
+/// Where zones of different structures overlap, the smaller zone applies (an apron's taxiway
+/// across a runway's grass strip), smallest first over all structures, so a structure's own
+/// zones keep their innermost-first order. Embankments come after every zone: a structure's
+/// cut or fill slope never covers another's ground.
 public struct StructureMap: Sendable {
     public let structures: [Structure]
+    /// Every structure's zones, smallest first (ties in structure, then zone order).
+    let order: [(structure: Int, zone: Int)]
 
-    public init(_ structures: [Structure]) { self.structures = structures }
+    public init(_ structures: [Structure]) {
+        self.structures = structures
+        order = Self.zoneOrder(structures)
+    }
+
+    /// The order zones are tried in: by area, ties by structure and zone index.
+    public static func zoneOrder(_ structures: [Structure]) -> [(structure: Int, zone: Int)] {
+        var all: [(structure: Int, zone: Int, area: Double)] = []
+        for (k, s) in structures.enumerated() {
+            for (i, z) in s.zones.enumerated() { all.append((k, i, z.halfLength * z.halfWidth)) }
+        }
+        all.sort { a, b in
+            a.area != b.area ? a.area < b.area : (a.structure != b.structure ? a.structure < b.structure : a.zone < b.zone)
+        }
+        return all.map { ($0.structure, $0.zone) }
+    }
 
     public func sample(x: Double, y: Double) -> StructureSample {
-        for (k, s) in structures.enumerated() {
+        for (k, i) in order {
+            let s = structures[k], z = s.zones[i]
             let dx = x - s.x, dy = y - s.y
-            // Every zone, and the embankment's box (square corners), within this circle.
-            let ehl = s.gradedHalfLength + s.embankment, ehw = s.gradedHalfWidth + s.embankment
-            let r = Swift.max(s.radius + s.embankment, (ehl * ehl + ehw * ehw).squareRoot())
+            let r = (z.halfLength * z.halfLength + z.halfWidth * z.halfWidth).squareRoot()
             guard dx * dx + dy * dy <= r * r else { continue }
             let (u, v) = s.local(x: x, y: y)
-            if let z = s.zone(atU: u, v: v) {
+            if z.contains(u: u, v: v) {
                 return StructureSample(surface: z.surface, plants: z.plants,
                                        gradeHeight: z.graded ? s.gradeHeight(u: u) : nil, structure: k)
             }
-            // The cut or fill slope around the graded zones grows grass only.
+        }
+        // The cut or fill slope around each structure's graded zones grows grass only.
+        for (k, s) in structures.enumerated() where s.embankment > 0 && s.gradedHalfLength > 0 {
+            let (u, v) = s.local(x: x, y: y)
             let du = abs(u) - s.gradedHalfLength, dv = abs(v) - s.gradedHalfWidth
-            if s.embankment > 0, s.gradedHalfLength > 0, du <= s.embankment, dv <= s.embankment {
+            if du <= s.embankment, dv <= s.embankment {
                 return StructureSample(surface: .natural, plants: .grassOnly, gradeHeight: nil, structure: k)
             }
         }

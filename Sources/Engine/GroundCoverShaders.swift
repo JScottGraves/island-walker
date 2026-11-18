@@ -181,11 +181,21 @@ kernel void coverGenerate(constant Uniforms &u [[buffer(0)]],
         if (neglect <= 0.0) return;
         StructureZoneGPU z = structureZones(structures)[built.zone];
         float2 q = built.uv + structureSeed(z);
-        PavementCracks k = pavementCracks(q, built.upkeep, 0.0);
-        float grown = smoothstep(0.35, 0.6, coverNoise(q / 2.9 + 6.6)) * (0.5 + 0.5 * k.heavy);
-        if (k.distance < k.halfWidth + 0.06) weeds = grown;
-        if (k.pothole > 0.3) weeds = max(weeds, 0.5);
-        weeds = max(weeds, smoothstep(-0.2, 0.3, pavementEdgeLoss(built.uv, structureSeed(z), z.b.y, z.b.x, built.upkeep)));
+        if (built.surface == kSurfaceConcrete) {
+            // Concrete: grass along the opened joints (where the slab shading draws weeds),
+            // and over the crumbled edges.
+            float open;
+            float joint = concreteJoint(built.uv, z.b.xy, structureSeed(z), built.upkeep, open);
+            float grown = smoothstep(0.35, 0.65, coverNoise(q / 2.6 + 3.3));
+            if (joint < open + 0.05) weeds = grown;
+            weeds = max(weeds, smoothstep(-0.2, 0.3, concreteEdgeLoss(built.uv, structureSeed(z), z, built.upkeep)));
+        } else {
+            PavementCracks k = pavementCracks(q, built.upkeep, 0.0);
+            float grown = smoothstep(0.35, 0.6, coverNoise(q / 2.9 + 6.6)) * (0.5 + 0.5 * k.heavy);
+            if (k.distance < k.halfWidth + 0.06) weeds = grown;
+            if (k.pothole > 0.3) weeds = max(weeds, 0.5);
+            weeds = max(weeds, smoothstep(-0.2, 0.3, pavementEdgeLoss(built.uv, structureSeed(z), z.b.y, z.b.x, built.upkeep)));
+        }
         if (floraRandom(h, 13) >= weeds * neglect) return;
     }
     float lawnShare = structureMownShare(built, p);
