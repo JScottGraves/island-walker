@@ -632,8 +632,8 @@ float buildingShelter(const device uchar *sm, float3 p) {
         float inward = max(g.b.y - g.c.y * q.y, 0.0);
         // Beside the door's edges the piers shade a little more.
         float edge = smoothstep(g.c.z - 2.0, g.c.z + 1.0, abs(q.x));
-        float door = 1.0 / (1.0 + (inward / 6.0) * (inward / 6.0) + 2.0 * edge * saturate(inward / 3.0));
-        return max(door, 0.07);
+        float door = 1.0 / (1.0 + (inward / 10.0) * (inward / 10.0) + 1.5 * edge * saturate(inward / 3.0));
+        return max(door, 0.15);
     }
     return 1.0;
 }
