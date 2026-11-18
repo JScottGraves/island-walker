@@ -954,7 +954,9 @@ constant float3 kAsphalt = float3(0.085, 0.084, 0.080);      // weathered asphal
 constant float3 kAsphaltBleached = float3(0.165, 0.160, 0.148);   // oxidised, sun-bleached asphalt, sRGB ~113
 constant float3 kAsphaltBase = float3(0.115, 0.100, 0.080);  // the broken-out base course: gravel and dirt
 constant float3 kRunwayPaint = float3(0.60, 0.60, 0.57);     // worn white paint
-constant float3 kPaintFaded = float3(0.34, 0.33, 0.31);      // paint chalked and faded by decades of sun
+constant float3 kPaintFaded = float3(0.34, 0.33, 0.31);
+constant float3 kConcrete = float3(0.36, 0.35, 0.32);         // weathered concrete, sRGB ~160
+constant float3 kConcreteDirty = float3(0.22, 0.205, 0.18);   // grimed, lichen-darkened concrete      // paint chalked and faded by decades of sun
 constant float3 kMownGrass = float3(0.058, 0.110, 0.032);    // mown grass, sRGB ~68, 94, 50
 constant float3 kMownDry = float3(0.105, 0.110, 0.045);      // sun-dried turf, sRGB ~92, 94, 60
 constant float3 kRankGreen = float3(0.050, 0.082, 0.028);    // long uncut grass in leaf
@@ -995,6 +997,71 @@ float3 rankGrass(float2 p, float footprint) {
     float3 c = mix(kRankGreen, kRankStraw, smoothstep(0.3, 0.75, dry));
     float tussock = mix(groundNoise(p / 0.9 + 2.7), 0.5, smoothstep(0.1, 0.5, footprint));
     return c * (0.8 + 0.4 * tussock);
+}
+
+// Concrete slabs (an apron, a taxiway): 5 m panels laid square to the zone's box, their
+// sealed joints; left alone, the slabs weathered unevenly and grimed, the joints opened
+// and grassed, some slabs cracked across or broken at a corner, the edges crumbled back
+// into the grass (only the sides of paving whose ends meet other paving). p: world xy;
+// q: the structure's ageing coordinates; f: the pixel's footprint along and across.
+float3 concreteSurface(StructureSample s, StructureZoneGPU z, float2 p, float2 q, float2 f, float footprint,
+                       float neglect, float distance, thread float3 &n) {
+    const float panel = 5.0;
+    float2 g = (s.uv + z.b.xy) / panel;     // the slabs' grid, a joint on every edge of the box
+    int2 slab = int2(floor(g));
+    uint sh = structureHash(slab + int2(z.a.xy * 0.1), 61u);
+    // Each slab its own shade (cement batch, curing), grime tens of metres across.
+    float tint = 0.9 + 0.2 * structureUnit(sh);
+    float grime = neglect * smoothstep(0.3, 0.8, 0.65 * groundNoise(p / 23.0 + 1.9) + 0.35 * groundNoise(p / 6.0 + 4.4));
+    float3 albedo = mix(kConcrete, kConcreteDirty, 0.35 * neglect + 0.55 * grime) * tint;
+    // Dark lichen blotches and water stains on the old slabs.
+    float lichen = neglect * smoothstep(0.66, 0.8, groundNoise(groundTurn(q) / 0.8 + 6.2)) * (0.4 + 0.6 * grime);
+    albedo *= 1.0 - 0.35 * lichen;
+    // Brushed surface and aggregate, close up only.
+    float grainShows = 1.0 - smoothstep(0.008, 0.05, max(f.x, f.y));
+    if (grainShows > 0.0) albedo *= 1.0 + 0.25 * aggregateGrain(q * 1.6) * grainShows;
+
+    // Joints: distance (m) to the nearest panel edge inside the box.
+    float2 c = abs(fract(g) - 0.5);
+    float joint = (0.5 - max(c.x, c.y)) * panel;
+    float open = 0.008 + neglect * mix(0.004, 0.02, groundNoise(q / 3.7 + 2.1));
+    float seam = paintSpan(joint, -open, open, footprint);
+    // Cracks across some of the old slabs, and corners broken off.
+    float crack = 0.0;
+    if (neglect > 0.0 && structureUnit(sh * 0x27d4eb2fu) < 0.45 * neglect) {
+        int2 cell;
+        float pair;
+        float2 w = q + 0.25 * (float2(structureNoise(q / 0.7 + 1.3), structureNoise(q / 0.7 + 7.7)) - 0.5);
+        float b = voronoiBorder(w / 2.3, 63u, cell, pair) * 2.3;
+        if (pair < 0.5) crack = paintSpan(b, -0.6 * open, 0.6 * open, footprint);
+    }
+    float far = smoothstep(0.08, 0.6, footprint);
+    float lines = mix(max(seam, crack), 0.02 + 0.03 * neglect, far);
+    // Grit and weeds in the joints, spreading a few centimetres onto the slab.
+    float weedy = neglect * smoothstep(0.35, 0.65, groundNoise(q / 2.6 + 3.3));
+    float tufts = paintSpan(joint, -open - 0.04, open + 0.04, footprint)
+                * mix(smoothstep(0.5, 0.75, groundNoise(q / 0.25 + 9.4)), 0.35, smoothstep(0.05, 0.3, footprint));
+    albedo = mix(albedo, kCrackWall * 1.3, lines);
+    albedo = mix(albedo, kWeeds, 0.6 * weedy * tufts * (1.0 - far) + 0.25 * weedy * far * 0.2);
+    // Spalled slab corners: the slab's corner chipped out, showing aggregate.
+    float corner = length(0.5 - c) * panel;
+    if (neglect > 0.0 && structureUnit(sh * 0x165667b1u) < 0.3 * neglect) {
+        float chip = 1.0 - smoothstep(0.15, 0.3, corner + 0.1 * groundNoise(q / 0.06));
+        albedo = mix(albedo, kAsphaltBase * 1.4, chip * (1.0 - far));
+    }
+
+    // The edges crumbled back and grassed over: all round, or only the sides (−1 marks).
+    float edge = z.d.z < 0.0 ? z.b.x - abs(s.uv.x) : min(z.b.y - abs(s.uv.y), z.b.x - abs(s.uv.x));
+    float ragged = neglect * (0.3 + 0.9 * (0.6 * structureNoise(q / 2.3 + 4.4) + 0.4 * structureNoise(q / 0.7 + 9.2)));
+    float lost = ragged - edge;
+    if (lost > -0.3) albedo = mix(albedo, rankGrass(p, footprint), smoothstep(-0.12, 0.12, lost));
+    // A faint brushed grain in the normal near the camera.
+    float near = 1.0 - smoothstep(5.0, 25.0, distance);
+    if (near > 0.0) {
+        float2 bump = float2(groundNoise(q / 0.2) - 0.5, groundNoise(q / 0.2 + 31.0) - 0.5);
+        n = normalize(n + float3(0.03 * near * bump, 0.0));
+    }
+    return albedo;
 }
 
 // How deep (m) the paving is broken in at q (the structure's ageing coordinates): cracks
@@ -1219,6 +1286,7 @@ float3 builtSurface(int surface, StructureSample s, StructureZoneGPU z, float3 w
         }
         return albedo;
     }
+    if (surface == kSurfaceConcrete) return concreteSurface(s, z, p, q, f, footprint, neglect, distance, n);
     // Mown grass: faint light and dark bands along the runway where the mower turned, and
     // a drift in colour tens of metres across; left alone, long unkempt grass instead.
     float band = sin(3.14159265 * s.uv.y / 4.5);
@@ -1289,7 +1357,7 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
         // only grass may grow.
         StructureSample built = structureAt(structures, in.world.xy);
         float mown = structureMownShare(built, in.world.xy);
-        bool builtGround = built.surface == kSurfacePaved || mown > 0.999;
+        bool builtGround = structurePaved(built.surface) || mown > 0.999;
         bool wooded = built.plants == kPlantsUntouched;
         // A 1×1 weight map: no communities in the bundle, so no ground textures.
         bool communities = groundWeights0.get_width() > 1;
@@ -1324,8 +1392,8 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
             albedo = mix(albedo, ground, near);
             n = normalize(mix(n, textured, near));
         }
-        if (built.surface == kSurfacePaved || mown > 0.0) {
-            int surface = built.surface == kSurfacePaved ? kSurfacePaved : kSurfaceMownGrass;
+        if (structurePaved(built.surface) || mown > 0.0) {
+            int surface = structurePaved(built.surface) ? built.surface : kSurfaceMownGrass;
             float3 meshNormal = normalize(in.normal);
             // Interleaved gradient noise, stepped by the frame, for the crack search's start.
             float2 jq = in.position.xy + 5.588238 * fmod(u.frame.z, 64.0);
@@ -1334,7 +1402,7 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
             float3 surfaceAlbedo = builtSurface(surface, built, structureZones(structures)[built.zone], in.world,
                                                 groundDx, groundDy, d, normalize(in.world - u.cameraPosition), l,
                                                 jitter, parallax, meshNormal, crackSun);
-            float share = surface == kSurfacePaved ? 1.0 : mown;
+            float share = structurePaved(surface) ? 1.0 : mown;
             groundSun = mix(groundSun, crackSun, share);
             albedo = mix(albedo, surfaceAlbedo, share);
             n = normalize(mix(n, meshNormal, share));

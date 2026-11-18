@@ -14,6 +14,7 @@ extension Preview {
                 switch zone.surface {
                 case .paved: colour = (230, 30, 40)
                 case .mownGrass: colour = (250, 220, 40)
+                case .concrete: colour = (60, 150, 255)
                 default: colour = (250, 250, 250)
                 }
                 let hw = Swift.max(zone.halfWidth, minPixels / 2 / scale)

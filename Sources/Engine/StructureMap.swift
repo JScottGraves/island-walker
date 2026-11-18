@@ -11,8 +11,10 @@ import IslandCore
 ///     header (32 B) | zones (64 B each) | bins (uint2 offset, count) | zone indices (uint)
 ///
 /// A zone is an oriented box with what the ground is, what grows on it and whether it is
-/// graded; each structure's zones are listed innermost first, then one extra zone for its
-/// cut and fill slopes (the graded box grown by `embankment`: natural ground, grass only).
+/// graded. Every structure's zones are listed smallest first (IslandCore.StructureMap.zoneOrder:
+/// a structure's own innermost first, and an apron's taxiway ahead of the runway's grass strip
+/// it crosses), then one extra zone per structure for its cut and fill slopes (the graded box
+/// grown by `embankment`: natural ground, grass only).
 /// A uniform grid of `binSize` bins over the structures' surroundings lists the zones that
 /// come within `margin` of each bin, in zone order, so the first zone containing a point is
 /// the one that applies (as IslandCore.StructureMap.sample has it). With no structures the
@@ -30,7 +32,8 @@ public struct StructureLookup: Sendable {
         public var c: SIMD4<Float>
         /// The structure's graded half length and width (m); its runway designators as
         /// 100 × the one painted at the −u end (read travelling +u) + the one at the +u end
-        /// (0 for none); its upkeep, 0 abandoned … 1 maintained.
+        /// (0 for none), or −1 for paving whose ends join other paving (only its sides crumble,
+        /// properties["edges"] = "sides"); its upkeep, 0 abandoned … 1 maintained.
         public var d: SIMD4<Float>
     }
 
@@ -45,7 +48,8 @@ public struct StructureLookup: Sendable {
         public var u: Float, v: Float
         public var zone: Int
         public var structure: Int
-        /// Signed distance outside the structure's graded box (negative inside).
+        /// Signed distance outside the structure's graded box (negative inside); outside every
+        /// graded zone, the distance to the nearest graded zone of any structure.
         public var edge: Float
         /// How kept the structure is: 0 abandoned (cracked, worn, overgrown) … 1 maintained.
         public var upkeep: Float = 1
@@ -77,21 +81,22 @@ public struct StructureLookup: Sendable {
     public init(structures: [Structure], binSize: Float = 256, margin: Float = 64, upkeep: Float = 0) {
         self.binSize = binSize
         self.margin = margin
-        for (k, s) in structures.enumerated() {
-            let axis = s.axis
-            let ghl = Float(s.gradedHalfLength), ghw = Float(s.gradedHalfWidth)
+        func zone(_ k: Int, _ hl: Double, _ hw: Double, _ surface: StructureSurface, _ plants: PlantRule,
+                  _ graded: Bool) -> Zone {
+            let s = structures[k], axis = s.axis
             let designators = Self.designators(s)
-            let kept = Self.upkeep(s) ?? upkeep
-            func zone(_ hl: Double, _ hw: Double, _ surface: StructureSurface, _ plants: PlantRule, _ graded: Bool) -> Zone {
-                Zone(a: SIMD4(Float(s.x), Float(s.y), Float(axis.x), Float(axis.y)),
-                     b: SIMD4(Float(hl), Float(hw), Float(s.elevation), Float(s.slope)),
-                     c: SIMD4(Float(surface.code), Float(plants.code), graded ? 1 : 0, Float(k)),
-                     d: SIMD4(ghl, ghw, Float(100 * designators.0 + designators.1), kept))
-            }
-            for z in s.zones { zones.append(zone(z.halfLength, z.halfWidth, z.surface, z.plants, z.graded)) }
-            if s.embankment > 0, s.gradedHalfLength > 0 {
-                zones.append(zone(s.gradedHalfLength + s.embankment, s.gradedHalfWidth + s.embankment, .natural, .grassOnly, false))
-            }
+            let marks = s.properties["edges"] == "sides" ? -1 : Float(100 * designators.0 + designators.1)
+            return Zone(a: SIMD4(Float(s.x), Float(s.y), Float(axis.x), Float(axis.y)),
+                        b: SIMD4(Float(hl), Float(hw), Float(s.elevation), Float(s.slope)),
+                        c: SIMD4(Float(surface.code), Float(plants.code), graded ? 1 : 0, Float(k)),
+                        d: SIMD4(Float(s.gradedHalfLength), Float(s.gradedHalfWidth), marks, Self.upkeep(s) ?? upkeep))
+        }
+        for (k, i) in StructureMap.zoneOrder(structures) {
+            let z = structures[k].zones[i]
+            zones.append(zone(k, z.halfLength, z.halfWidth, z.surface, z.plants, z.graded))
+        }
+        for (k, s) in structures.enumerated() where s.embankment > 0 && s.gradedHalfLength > 0 {
+            zones.append(zone(k, s.gradedHalfLength + s.embankment, s.gradedHalfWidth + s.embankment, .natural, .grassOnly, false))
         }
         guard !zones.isEmpty else { return }
         // Each zone's bounding box, grown by the margin.
@@ -123,7 +128,7 @@ public struct StructureLookup: Sendable {
     /// The runway designators to paint at the −u end (read by a pilot travelling +u, along
     /// the heading) and at the +u end, from properties["designators"] ("06/24"), or (0, 0).
     static func designators(_ s: Structure) -> (Int, Int) {
-        guard let text = s.properties["designators"] else { return (0, 0) }
+        guard s.properties["edges"] != "sides", let text = s.properties["designators"] else { return (0, 0) }
         let parts = text.split(separator: "/").compactMap { Int($0) }
         guard parts.count == 2 else { return (0, 0) }
         var n = Int((s.heading / 10).rounded()) % 36
@@ -184,10 +189,22 @@ public struct StructureLookup: Sendable {
             let z = zones[Int(k)]
             let (u, v) = Self.local(z, x, y)
             guard abs(u) <= z.b.x && abs(v) <= z.b.y else { continue }
-            return Sample(surface: Int(z.c.x), plants: Int(z.c.y), graded: z.c.z > 0.5,
+            let graded = z.c.z > 0.5
+            var edge = Self.boxDistance(u, v, z.d.x, z.d.y)
+            if !graded {
+                // Outside the graded ground: how far to the nearest graded zone of any structure,
+                // so the fine detail eases in the same way beside a runway's strip and an apron.
+                for j in binZones(x, y) where zones[Int(j)].c.z > 0.5 {
+                    let g = zones[Int(j)]
+                    let (gu, gv) = Self.local(g, x, y)
+                    edge = Swift.min(edge, Self.boxDistance(gu, gv, g.b.x, g.b.y))
+                }
+            }
+            let marks = Swift.max(Int(z.d.z), 0)
+            return Sample(surface: Int(z.c.x), plants: Int(z.c.y), graded: graded,
                           gradeHeight: z.b.z + z.b.w * Swift.min(Swift.max(u, -z.d.x), z.d.x), u: u, v: v,
-                          zone: Int(k), structure: Int(z.c.w), edge: Self.boxDistance(u, v, z.d.x, z.d.y),
-                          upkeep: z.d.w, designators: (Int(z.d.z) / 100, Int(z.d.z) % 100))
+                          zone: Int(k), structure: Int(z.c.w), edge: edge,
+                          upkeep: z.d.w, designators: (marks / 100, marks % 100))
         }
         return .open
     }
@@ -239,12 +256,15 @@ struct StructureZoneGPU {
     float4 a;   // centre xy, +u axis xy
     float4 b;   // half length, half width, grade line elevation, slope
     float4 c;   // surface, plants, graded, structure index
-    float4 d;   // graded half length, half width, 100 × designator at the −u end + at the +u end, upkeep
+    float4 d;   // graded half length, half width, 100 × designator at the −u end + at the +u end (−1: only the sides crumble), upkeep
 };
 
 constant int kSurfaceNatural = 0;
 constant int kSurfacePaved = 1;
 constant int kSurfaceMownGrass = 2;
+constant int kSurfaceConcrete = 5;
+// Hard paving: the runway's asphalt or concrete slabs.
+bool structurePaved(int surface) { return surface == kSurfacePaved || surface == kSurfaceConcrete; }
 constant int kPlantsUntouched = 0;
 constant int kPlantsGrassOnly = 1;
 constant int kPlantsNone = 2;
@@ -319,6 +339,14 @@ StructureSample structureAt(const device uchar *sm, float2 xy) {
         s.structure = int(z.c.w);
         s.edge = structureBoxDistance(uv, z.d.xy);
         s.upkeep = z.d.w;
+        if (!s.graded) {
+            // Outside the graded ground: the distance to the nearest graded zone of any structure.
+            for (uint j = 0u; j < bin.y; j++) {
+                StructureZoneGPU g = zones[indices[bin.x + j]];
+                if (g.c.z < 0.5) continue;
+                s.edge = min(s.edge, structureBoxDistance(structureLocal(g, xy), g.b.xy));
+            }
+        }
         return s;
     }
     return s;
@@ -341,7 +369,7 @@ float structureNoise(float2 q) {
 // grass zones, thinning out over a couple of metres across their outer edge with a ragged,
 // mower-cut line instead of a ruled one. 0 on pavement and away from structures.
 float structureMownShare(StructureSample s, float2 xy) {
-    if (s.structure < 0 || s.surface == kSurfacePaved) return 0.0;
+    if (s.structure < 0 || structurePaved(s.surface)) return 0.0;
     if (s.surface != kSurfaceMownGrass && s.edge > 6.0) return 0.0;
     float ragged = 0.7 * structureNoise(xy / 1.7 + 3.1) + 0.3 * structureNoise(xy / 0.55 + 8.9) - 0.5;
     // An abandoned strip's edge has grown out into the scrub's and back: a wider, vaguer line.

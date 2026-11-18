@@ -89,14 +89,23 @@ public enum SitePlanner {
             let start = Date()
             var placed = kind.place(in: context)
             for i in placed.indices {
-                counts[kind.name, default: 0] += 1
-                placed[i].id = "\(kind.name)-\(counts[kind.name]!)"
+                // Named by what each one is: a kind may place several sorts (the airstrip's apron).
+                let what = placed[i].kind
+                counts[what, default: 0] += 1
+                placed[i].id = "\(what)-\(counts[what]!)"
+            }
+            // Graded smallest first, so a bigger structure's graded ground stays exact where a
+            // smaller one's banks reach into it (an apron's beside a runway's strip).
+            let byArea = placed.indices.sorted { placed[$0].gradedHalfLength * placed[$0].gradedHalfWidth
+                < placed[$1].gradedHalfLength * placed[$1].gradedHalfWidth }
+            for i in byArea {
                 Grading.apply(&placed[i], to: &context.fine, seaLevel: context.seaLevel)
                 // Keep the coarse heights in step, so later kinds score the graded ground.
                 Grading.apply(placed[i], toCoarse: &context.coarse)
             }
             context.placed += placed
-            log(String(format: "structures: %d %@ in %.1f s", placed.count, kind.name, Date().timeIntervalSince(start)))
+            let names = placed.isEmpty ? "no \(kind.name)" : placed.map(\.id).joined(separator: ", ")
+            log("structures: \(names) in " + String(format: "%.1f s", Date().timeIntervalSince(start)))
         }
         return (context.placed, context.fine)
     }

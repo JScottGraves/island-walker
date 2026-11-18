@@ -84,7 +84,8 @@ enum Snapshots {
     /// centreline 25 m short of the runway's first end, looking down it; `airstrip-aerial`
     /// 300 m up, behind and to the left, looking at its middle; `airstrip-side` standing at
     /// the grass strip's edge 250 m in, looking along the runway; `airstrip-asphalt` standing
-    /// on the runway by the first aiming bar, looking 30° down at the paving.
+    /// on the runway by the first aiming bar, looking 30° down at the paving; `airstrip-apron`
+    /// standing on the apron's far side, looking across it and down the taxiway to the runway.
     static func structureViews() -> [(name: String, camera: GroundView.Camera, eye: Double?)] {
         // From the bundle even with `--structures off`, so the same spots can be compared.
         guard let s = IslandSource.bundle()?.structures().first(where: { $0.kind == "airstrip" }),
@@ -98,13 +99,25 @@ enum Snapshots {
         let L = runway.halfLength
         let aerial = s.world(u: -L - 700, v: -800)
         let dx = s.x - aerial.x, dy = s.y - aerial.y
-        return [
+        var views = [
             view("airstrip", u: -L - 25, v: 0, yaw: s.heading, pitch: -1.5, eye: nil),
             view("airstrip-aerial", u: -L - 700, v: -800, yaw: atan2(dx, dy) / radians,
                  pitch: -atan(300 / (dx * dx + dy * dy).squareRoot()) / radians, eye: 300),
             view("airstrip-side", u: -L + 250, v: s.gradedHalfWidth - 1, yaw: s.heading - 8, pitch: -2, eye: nil),
             view("airstrip-asphalt", u: -L + 290, v: 5, yaw: s.heading + 10, pitch: -30, eye: nil),
         ]
+        if let apron = IslandSource.bundle()?.structures().first(where: { $0.kind == "apron" }),
+           let slab = apron.zones.first {
+            // The apron's side away from the runway, and the runway's centreline beside it.
+            let side: Double = s.local(x: apron.x, y: apron.y).v > 0 ? 1 : -1
+            let along = s.local(x: apron.x, y: apron.y).u
+            let stand = apron.world(u: -0.3 * slab.halfLength, v: side * (slab.halfWidth - 12))
+            let target = s.world(u: along, v: 0)
+            let dx = target.x - stand.x, dy = target.y - stand.y
+            views.append(("airstrip-apron", GroundView.Camera(x: stand.x, y: stand.y, z: 0, yaw: atan2(dx, dy),
+                                                              pitch: -3 * radians), nil))
+        }
+        return views
     }
 
     /// The automatic viewpoints (summit, ridge, coast, pali…) picked on `height`.

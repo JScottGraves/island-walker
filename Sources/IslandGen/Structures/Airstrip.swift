@@ -8,6 +8,12 @@ import IslandCore
 /// the best `refineCount` distinct sites are then shifted and turned a little and scored
 /// on the fine grid. When no site passes the hard rules the rules relax rung by rung
 /// (`ladder`), so every island with land gets its airstrip.
+///
+/// Beside the runway it lays a concrete apron just past the grass strip, joined to the
+/// runway by a short taxiway across the strip, on whichever side and at whichever point
+/// along the runway needs the least earthwork. Both follow the runway's grade line, so
+/// grading them leaves the runway and its strip as they were. They are structures of their
+/// own (kinds "apron" and "taxiway", every zone a box around its own centre).
 public struct Airstrip: StructureKind {
     public struct Params: Sendable {
         public var runwayWidth = 30.0
@@ -28,6 +34,13 @@ public struct Airstrip: StructureKind {
         public var refineCount = 50
         /// Runway length (m) and deepest allowed cut or fill (m), tried in order.
         public var ladder: [(length: Double, maxCut: Double)] = [(1500, 8), (1200, 8), (1000, 12), (800, 16)]
+        /// Concrete apron beside the strip: this long along the runway and this deep away from it.
+        public var apronLength = 120.0
+        public var apronDepth = 70.0
+        /// Taxiway from the runway's edge to the apron.
+        public var taxiwayWidth = 15.0
+        /// Deepest cut or fill the apron may need; past it there is no apron.
+        public var apronMaxCut = 10.0
         public init() {}
     }
 
@@ -60,7 +73,8 @@ public struct Airstrip: StructureKind {
         rungs.append(Rules(length: 600, maxCut: 1000, minAboveSea: 0.5, maxStreamArea: .infinity))
         for rules in rungs {
             if let site = search(context, rules: rules) {
-                return [structure(site, length: rules.length)]
+                let runway = structure(site, length: rules.length)
+                return [runway] + apron(beside: runway, context)
             }
         }
         print("structures: no land for an airstrip")
@@ -96,6 +110,68 @@ public struct Airstrip: StructureKind {
                             "crosswind": String(format: "%.0f", site.crosswind),
                             "score": String(format: "%.3f", site.score),
                          ])
+    }
+
+    /// The apron and its taxiway beside `runway`: the side and the point along it (the middle
+    /// or a quarter of the way from either end) whose apron needs the least earthwork on the
+    /// fine heights. None when every choice runs into the sea or past `apronMaxCut`.
+    func apron(beside runway: Structure, _ ctx: SiteContext) -> [Structure] {
+        let p = params
+        let runwayHalfWidth = runway.zones.first { $0.surface == .paved }?.halfWidth ?? p.runwayWidth / 2
+        let stripHalfWidth = runway.gradedHalfWidth
+        let length = runway.zones.first { $0.surface == .paved }.map { 2 * $0.halfLength } ?? 1000
+        let sea = Double(ctx.seaLevel)
+        var best: (cost: Double, u: Double, side: Double)?
+        for side in [-1.0, 1.0] {
+            for along in [0.0, -0.25, 0.25] {
+                let u0 = along * length
+                let v0 = side * (stripHalfWidth + p.apronDepth / 2)
+                var sum = 0.0, worst = 0.0, n = 0.0
+                var wet = false
+                var a = -p.apronLength / 2
+                while a <= p.apronLength / 2 + 1e-6 {
+                    var b = -p.apronDepth / 2
+                    while b <= p.apronDepth / 2 + 1e-6 {
+                        let (x, y) = runway.world(u: u0 + a, v: v0 + b)
+                        if x < 0 || y < 0 || x > ctx.domain || y > ctx.domain { wet = true; break }
+                        let h = Double(ctx.at(ctx.fine, x, y))
+                        if h < sea + 0.5 { wet = true; break }
+                        let d = abs(h - runway.gradeHeight(u: u0 + a))
+                        sum += d; worst = Swift.max(worst, d); n += 1
+                        b += 10
+                    }
+                    if wet { break }
+                    a += 10
+                }
+                if wet || worst > p.apronMaxCut || n == 0 { continue }
+                let cost = sum / n + 0.3 * worst
+                if best == nil || cost < best!.cost { best = (cost, u0, side) }
+            }
+        }
+        guard let pick = best else {
+            print("structures: no room for an apron beside the runway")
+            return []
+        }
+        let condition = runway.properties["condition"] ?? "abandoned"
+        func piece(_ kind: String, u: Double, v: Double, halfLength: Double, halfWidth: Double,
+                   edges: String?) -> Structure {
+            let (x, y) = runway.world(u: u, v: v)
+            var properties = ["condition": condition]
+            if let edges { properties["edges"] = edges }
+            return Structure(id: kind, kind: kind, x: x, y: y, heading: runway.heading,
+                             elevation: runway.gradeHeight(u: u), slope: runway.slope,
+                             zones: [StructureZone(name: kind, halfLength: halfLength, halfWidth: halfWidth,
+                                                   surface: .concrete, plants: .none, graded: true)],
+                             properties: properties)
+        }
+        // The taxiway runs from 2 m inside the runway's edge to 2 m inside the apron, so its
+        // ends meet paving (they don't crumble: only its sides do).
+        let inner = runwayHalfWidth - 2, outer = stripHalfWidth + 2
+        let taxiway = piece("taxiway", u: pick.u, v: pick.side * (inner + outer) / 2,
+                            halfLength: p.taxiwayWidth / 2, halfWidth: (outer - inner) / 2, edges: "sides")
+        let apron = piece("apron", u: pick.u, v: pick.side * (stripHalfWidth + p.apronDepth / 2),
+                          halfLength: p.apronLength / 2, halfWidth: p.apronDepth / 2, edges: nil)
+        return [taxiway, apron]
     }
 
     /// The best site under `rules`, or nil when none passes them.
