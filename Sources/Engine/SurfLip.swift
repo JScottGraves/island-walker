@@ -1,4 +1,5 @@
 #if canImport(MetalKit)
+import Foundation
 import Metal
 import simd
 import IslandCore
@@ -27,13 +28,14 @@ final class SurfLip {
         var emit = SIMD4<Float>(0, 0, 0, 1)
     }
 
-    /// Points along the wave line (1 m apart) and rows of particles kept (one every row period).
-    static let slots = 512
+    /// Points along the wave line (`slotSpacing` apart) and rows of particles kept (one every row period).
+    static let slots = 256
+    static let slotSpacing: Float = 2
     static let rows = 32
     static let rowPeriod = 1.0 / 30
     /// A particle's longest flight (s), within the ring's span.
     static let lifetime: Float = 1.0
-    static let sprayCapacity = 16384
+    static let sprayCapacity = 8192
     static let sprayLifetime: Float = 1.4
     /// The impact foam grid: cells (m) and side, wrapped in the world (±200 m around the camera).
     static let foamCell: Float = 0.8
@@ -88,6 +90,48 @@ final class SurfLip {
         }
     }
 
+    /// The bed's slope along each swell system's heading (x trade, y north) at every texel of the
+    /// surf's wave texels (WaveRefraction.surfTexels: arrivals in xy, depth in w), worked out once
+    /// at load for surfSetting: from the depth the surf breaks against (the shallower of
+    /// `smoothedDepth`, bilinear as the shore texture samples it, and the texels' own), in
+    /// central differences 20 m either side, along the arrival's gradient.
+    static func bedSlopes(texels: [SIMD4<Float>], width n: Int, smoothedDepth: Grid, domain: Float) -> [SIMD2<Float>] {
+        func bilinear(_ size: Int, _ value: (Int, Int) -> Float, _ x: Float, _ y: Float) -> Float {
+            let sx = Swift.min(Swift.max(x / domain * Float(size) - 0.5, 0), Float(size) - 1.001)
+            let sy = Swift.min(Swift.max(y / domain * Float(size) - 0.5, 0), Float(size) - 1.001)
+            let i = Int(sx), j = Int(sy), fx = sx - Float(i), fy = sy - Float(j)
+            let a = value(i, j) + (value(i + 1, j) - value(i, j)) * fx
+            let b = value(i, j + 1) + (value(i + 1, j + 1) - value(i, j + 1)) * fx
+            return a + (b - a) * fy
+        }
+        let m = smoothedDepth.width
+        func depth(_ x: Float, _ y: Float) -> Float {
+            Swift.min(bilinear(m, { smoothedDepth.values[$1 * m + $0] }, x, y), bilinear(n, { texels[$1 * n + $0].w }, x, y))
+        }
+        let cell = domain / Float(n), e: Float = 20
+        var out = [SIMD2<Float>](repeating: SIMD2(0.02, 0.02), count: n * n)
+        out.withUnsafeMutableBufferPointer { buffer in
+            let base = buffer.baseAddress!
+            DispatchQueue.concurrentPerform(iterations: n) { j in
+                for i in 0..<n {
+                    let x = (Float(i) + 0.5) * cell, y = (Float(j) + 0.5) * cell
+                    guard texels[j * n + i].w <= 8.5 else { continue }
+                    let grad = SIMD2<Float>(depth(x + e, y) - depth(x - e, y), depth(x, y + e) - depth(x, y - e)) / (2 * e)
+                    var beta = SIMD2<Float>(0.02, 0.02)
+                    let i0 = Swift.max(i - 1, 0), i1 = Swift.min(i + 1, n - 1), j0 = Swift.max(j - 1, 0), j1 = Swift.min(j + 1, n - 1)
+                    for s in 0..<2 {
+                        let g = SIMD2<Float>(texels[j * n + i1][s] - texels[j * n + i0][s], texels[j1 * n + i][s] - texels[j0 * n + i][s])
+                        let length = simd_length(g)
+                        let heading = length.isFinite && length > 1e-9 ? g / length : SIMD2<Float>(0, 1)
+                        beta[s] = -simd_dot(grad, heading)
+                    }
+                    base[j * n + i] = beta
+                }
+            }
+        }
+        return out
+    }
+
     /// The rows' clock: one every row period on a fixed grid of moments, so rows emitted in
     /// different frames line up whatever the frame rate. A jump back or by more than the ring
     /// starts over with the last `rows` moments.
@@ -119,6 +163,15 @@ final class SurfLip {
     let sprayHead: MTLBuffer
     /// The impact foam (uint, 1/4096), read by oceanFragment at buffer 9.
     let foam: MTLBuffer
+    /// The sheet's live quads (lipQuads) and the indirect draw's arguments, reset each frame
+    /// from `argsReset` (no vertices, one instance).
+    let quads: MTLBuffer
+    let quadArgs: MTLBuffer
+    let argsReset: MTLBuffer
+    let quadPipeline: MTLComputePipelineState
+    /// Seconds of fading the impact foam owes (it fades every fourth frame).
+    var foamOwed = 0.0
+    var frameCount = 0
     let emitPipeline: MTLComputePipelineState
     let collidePipeline: MTLComputePipelineState
     let fadePipeline: MTLComputePipelineState
@@ -143,8 +196,14 @@ final class SurfLip {
         guard let p = device.makeBuffer(length: SurfLip.slots * SurfLip.rows * particleStride, options: .storageModeShared),
               let s = device.makeBuffer(length: SurfLip.sprayCapacity * sprayStride, options: .storageModePrivate),
               let h = device.makeBuffer(length: 16, options: .storageModePrivate),
-              let f = device.makeBuffer(length: SurfLip.foamSide * SurfLip.foamSide * 4, options: .storageModePrivate)
+              let f = device.makeBuffer(length: SurfLip.foamSide * SurfLip.foamSide * 4, options: .storageModePrivate),
+              let qs = device.makeBuffer(length: (SurfLip.slots - 1) * (SurfLip.rows - 1) * 4, options: .storageModePrivate),
+              let qa = device.makeBuffer(length: 16, options: .storageModePrivate),
+              let ar = device.makeBuffer(bytes: [UInt32(0), 1, 0, 0], length: 16, options: .storageModeShared)
         else { throw RendererError.setup("surf lip buffers") }
+        quads = qs
+        quadArgs = qa
+        argsReset = ar
         particles = p
         spray = s
         sprayHead = h
@@ -156,6 +215,7 @@ final class SurfLip {
         emitPipeline = try kernel("lipEmit")
         collidePipeline = try kernel("lipCollide")
         fadePipeline = try kernel("lipFoamFade")
+        quadPipeline = try kernel("lipQuads")
         func blended(_ vertex: String, _ fragment: String) throws -> MTLRenderPipelineState {
             let desc = MTLRenderPipelineDescriptor()
             desc.vertexFunction = library.makeFunction(name: vertex)
@@ -237,7 +297,8 @@ final class SurfLip {
     /// water (spray, foam) and fades the foam. `now` and `previous` are the sea's wrapped clock
     /// (OceanParams.time), `time` the same unwrapped.
     func update(_ cmd: MTLCommandBuffer, uniforms: inout TerrainRenderer.Uniforms, ocean: inout OceanRenderer.Params,
-                terrainParams: TerrainRenderer.TerrainParams, shore: MTLTexture, waves: MTLTexture, eye: SIMD3<Double>,
+                terrainParams: TerrainRenderer.TerrainParams, shore: MTLTexture, waves: MTLTexture, slopes: MTLTexture,
+                eye: SIMD3<Double>,
                 time: Double) {
         guard enabled else {
             active = false
@@ -285,21 +346,32 @@ final class SurfLip {
             blit.endEncoding()
             needsClear = false
         }
+        if let blit = cmd.makeBlitCommandEncoder() {
+            blit.label = "surf lip quads"
+            blit.copy(from: argsReset, sourceOffset: 0, to: quadArgs, destinationOffset: 0, size: 16)
+            blit.endEncoding()
+        }
         if step.count > 0 { newest = step.first + Int64(step.count) - 1 }
         let h = axis.heading, across = SIMD2<Float>(-h.y, h.x)
         let e = SIMD2<Float>(Float(eye.x), Float(eye.y))
         let dt = lastTime.map { Swift.min(Swift.max(time - $0, 0), 0.1) } ?? 0
         lastTime = time
+        // The foam fades every fourth frame by the time owed (it changes little in a frame).
+        foamOwed += dt
+        frameCount += 1
+        let fade = frameCount % 4 == 0 && foamOwed > 0
+        let fadeBy = foamOwed
+        if fade { foamOwed = 0 }
         let ring = Int64(SurfLip.rows)
         params.axis = SIMD4(h.x, h.y, across.x, across.y)
         params.frame = SIMD4(ocean.time.x, ocean.time.y, Float(SurfLip.rowPeriod), uniforms.seaLevel)
         params.march = SIMD4(e.x, e.y, simd_dot(e, h) - SurfLip.reach, 2 * SurfLip.reach)
-        params.slots = SIMD4(Int32((simd_dot(e, across) / 1).rounded()) - Int32(SurfLip.slots / 2), Int32(SurfLip.slots),
+        params.slots = SIMD4(Int32((simd_dot(e, across) / SurfLip.slotSpacing).rounded()) - Int32(SurfLip.slots / 2), Int32(SurfLip.slots),
                              Int32(SurfLip.rows), Int32(axis.system))
         params.rows = SIMD4(Int32(((newest % ring) + ring) % ring), Int32(step.count),
                             Int32(((step.first % ring) + ring) % ring), step.reset ? 1 : 0)
         params.emit = SIMD4(Float((Double(step.first) * SurfLip.rowPeriod).truncatingRemainder(dividingBy: wrap)),
-                            SurfLip.lifetime, SurfLip.sprayLifetime, Float(exp(-dt / SurfLip.foamFade)))
+                            SurfLip.lifetime, SurfLip.sprayLifetime, Float(exp(-fadeBy / SurfLip.foamFade)))
         guard let enc = cmd.makeComputeCommandEncoder() else { return }
         enc.label = "surf lip"
         enc.setBytes(&params, length: MemoryLayout<Params>.stride, index: 0)
@@ -311,7 +383,9 @@ final class SurfLip {
         enc.setBuffer(spray, offset: 0, index: 5)
         enc.setBuffer(sprayHead, offset: 0, index: 6)
         enc.setBuffer(foam, offset: 0, index: 7)
-        enc.setTextures([shore, waves], range: 0..<2)
+        enc.setTextures([shore, waves, slopes], range: 0..<3)
+        enc.setBuffer(quadArgs, offset: 0, index: 8)
+        enc.setBuffer(quads, offset: 0, index: 9)
         if step.count > 0 {
             enc.setComputePipelineState(emitPipeline)
             enc.dispatchThreads(MTLSize(width: SurfLip.slots, height: step.count, depth: 1),
@@ -320,7 +394,10 @@ final class SurfLip {
         enc.setComputePipelineState(collidePipeline)
         enc.dispatchThreads(MTLSize(width: SurfLip.slots * SurfLip.rows, height: 1, depth: 1),
                             threadsPerThreadgroup: MTLSize(width: 64, height: 1, depth: 1))
-        if dt > 0 {
+        enc.setComputePipelineState(quadPipeline)
+        enc.dispatchThreads(MTLSize(width: (SurfLip.slots - 1) * (SurfLip.rows - 1), height: 1, depth: 1),
+                            threadsPerThreadgroup: MTLSize(width: 64, height: 1, depth: 1))
+        if fade {
             enc.setComputePipelineState(fadePipeline)
             enc.dispatchThreads(MTLSize(width: SurfLip.foamSide * SurfLip.foamSide, height: 1, depth: 1),
                                 threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
@@ -339,8 +416,9 @@ final class SurfLip {
         enc.setVertexBytes(&params, length: MemoryLayout<Params>.stride, index: 2)
         enc.setVertexBuffer(particles, offset: 0, index: 3)
         enc.setVertexBuffer(spray, offset: 0, index: 4)
+        enc.setVertexBuffer(quads, offset: 0, index: 5)
         enc.setFragmentBytes(&uniforms, length: MemoryLayout<TerrainRenderer.Uniforms>.stride, index: 1)
-        enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6 * (SurfLip.slots - 1) * (SurfLip.rows - 1))
+        enc.drawPrimitives(type: .triangle, indirectBuffer: quadArgs, indirectBufferOffset: 0)
         guard sprayEnabled else { return }
         enc.setRenderPipelineState(sprayPipeline)
         enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6 * SurfLip.sprayCapacity)

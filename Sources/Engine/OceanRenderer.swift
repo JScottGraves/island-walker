@@ -84,6 +84,9 @@ final class OceanRenderer {
     let shelter: MTLTexture
     /// The lips of plunging breakers near the camera, their spray and impact foam (SurfLip).
     let lip: SurfLip
+    /// Over the domain at the wave texture's resolution: the bed's slope along each system's
+    /// heading (SurfLip.bedSlopes), for the breakers' progress and type.
+    let slopes: MTLTexture
     var current = 0
     var previousValid = false
     var frameIndex = 0
@@ -171,6 +174,20 @@ final class OceanRenderer {
         waves = wavesTexture
         // The lips (SurfLip) pick their wave line from the same texels.
         let lipField = SurfLip.Field(texels: waveTexels, width: floor.width, cell: Float(floor.cellSize))
+        let slopeStart = Date()
+        let slopeTexels = SurfLip.bedSlopes(texels: waveTexels, width: floor.width, smoothedDepth: depth,
+                                            domain: Float(domain)).map { SIMD2<Float16>($0) }
+        let slopesDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rg16Float, width: floor.width,
+                                                                  height: floor.height, mipmapped: false)
+        slopesDesc.usage = [.shaderRead]
+        slopesDesc.storageMode = .shared
+        guard let slopesTexture = device.makeTexture(descriptor: slopesDesc) else { throw RendererError.setup("bed slopes") }
+        slopeTexels.withUnsafeBytes { raw in
+            slopesTexture.replace(region: MTLRegionMake2D(0, 0, floor.width, floor.height), mipmapLevel: 0,
+                                  withBytes: raw.baseAddress!, bytesPerRow: floor.width * 4)
+        }
+        slopes = slopesTexture
+        print(String(format: "bed slopes: %.2f s", Date().timeIntervalSince(slopeStart)))
         // How much of the open sea's waves each patch of water gets (SeaShelter): per cascade
         // here, the capillary roughness's factor in the shore texture's y.
         let shelterStart = Date()
@@ -609,7 +626,7 @@ final class OceanRenderer {
     func updateLip(_ cmd: MTLCommandBuffer, uniforms: inout TerrainRenderer.Uniforms,
                    terrainParams: TerrainRenderer.TerrainParams, eye: SIMD3<Double>, time: Double) {
         lip.update(cmd, uniforms: &uniforms, ocean: &params, terrainParams: terrainParams, shore: shore, waves: waves,
-                   eye: eye, time: time)
+                   slopes: slopes, eye: eye, time: time)
     }
 
     /// The lips' sheets and spray, blended over the water (after `drawShading`, in the same pass).
@@ -626,6 +643,7 @@ final class OceanRenderer {
         enc.setVertexTexture(shore, index: 6)
         enc.setVertexTexture(waves, index: 7)
         enc.setVertexTexture(shelter, index: 8)
+        enc.setVertexTexture(slopes, index: 9)
     }
 
     private func drawNodes(_ enc: MTLRenderCommandEncoder) {

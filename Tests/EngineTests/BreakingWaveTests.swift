@@ -170,4 +170,24 @@ final class BreakingWaveTests: XCTestCase {
         let back = clock.step(time: 50)
         XCTAssertTrue(back.reset)
     }
+
+    /// The bed's slope along each swell's heading, baked once (SurfLip.bedSlopes) from the
+    /// depth the surf breaks against: on a plane beach it is the beach's slope, the way the waves run.
+    func testBedSlopeIsBakedAlongEachHeading() {
+        let n = 64, cell: Float = 40
+        var texels = [SIMD4<Float>](repeating: .zero, count: n * n)
+        for j in 0..<n {
+            for i in 0..<n {
+                let y = (Float(j) + 0.5) * cell, x = (Float(i) + 0.5) * cell
+                // Shallowing northward 1:40; system 0 runs north, system 1 east (along the beach).
+                texels[j * n + i] = SIMD4(y / 50, x / 50, 0, max((2400 - y) / 40, 0))
+            }
+        }
+        var smoothed = Grid(width: 32, height: 32, cellSize: 80)
+        for k in 0..<smoothed.values.count { smoothed.values[k] = 100 }
+        let slopes = SurfLip.bedSlopes(texels: texels, width: n, smoothedDepth: smoothed, domain: Float(n) * cell)
+        let mid = slopes[55 * n + 30]   // 4.5 m deep
+        XCTAssertEqual(Double(mid.x), 1.0 / 40, accuracy: 2e-3)
+        XCTAssertEqual(Double(mid.y), 0, accuracy: 2e-3)
+    }
 }

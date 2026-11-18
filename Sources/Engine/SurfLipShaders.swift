@@ -28,12 +28,12 @@ struct SprayParticle {
     float4 velocity;        // velocity (xyz), size (w, m)
 };
 
-constant float kLipSlot = 1.0;      // metres between the wave line's points
-constant float kLipStep = 4.0;      // the trace's step along the heading (m)
+constant float kLipSlot = 2.0;      // metres between the wave line's points
+constant float kLipStep = 8.0;      // the trace's step along the heading (m; crests are ≥ 25 m apart)
 constant float kLipReach = 300.0;   // no lip further than this from the camera (m)
 constant float3 kGravity = float3(0.0, 0.0, -9.81);
 constant uint kSpraySides = 6u;
-constant uint kSprayCapacity = 16384u;    // SurfLip.sprayCapacity
+constant uint kSprayCapacity = 8192u;     // SurfLip.sprayCapacity
 
 float lipHash(uint a, uint b) {
     uint h = a * 0x85ebca6bu + b * 0xc2b2ae35u + 0x27d4eb2fu;
@@ -44,22 +44,22 @@ float lipHash(uint a, uint b) {
 // The surf's setting at a point of the wave line, worked out from the textures alone (the
 // bake's depth for the water's).
 float4 lipSetting(constant Uniforms &u, constant OceanParams &o, constant TerrainParams &t, texture2d<float> shore,
-                  texture2d<float> waves, float2 xy, thread float4 &crests, thread float4 &heading, thread float &drift,
+                  texture2d<float> waves, texture2d<float> slopes, float2 xy, thread float4 &crests, thread float4 &heading, thread float &drift,
                   thread float2 &beta, thread float &depth) {
     float4 g;
     surfWavesAt(waves, xy, t.domainSize, g, depth);
-    return surfSetting(u, o, t, shore, waves, xy, depth, crests, heading, drift, beta);
+    return surfSetting(u, o, t, shore, waves, slopes, xy, depth, crests, heading, drift, beta);
 }
 
 // The water's surface height (m above the sea) at xy and `time` from the surf's waves alone (the
 // cascades' chop is left out), and its horizontal shift there.
 float lipWater(constant Uniforms &u, constant OceanParams &o, constant TerrainParams &t, texture2d<float> shore,
-               texture2d<float> waves, float2 xy, float time, thread float2 &shift) {
+               texture2d<float> waves, texture2d<float> slopes, float2 xy, float time, thread float2 &shift) {
     float4 crests, heading;
     float drift, depth;
     float2 beta, slope;
     float stretch;
-    float4 setting = lipSetting(u, o, t, shore, waves, xy, crests, heading, drift, beta, depth);
+    float4 setting = lipSetting(u, o, t, shore, waves, slopes, xy, crests, heading, drift, beta, depth);
     shift = 0.0;
     if (setting.x + setting.y <= 0.0) return 0.0;
     heading = float4(length(heading.xy) > 1e-3 ? normalize(heading.xy) : float2(0.0, 1.0),
@@ -73,7 +73,7 @@ float lipWater(constant Uniforms &u, constant OceanParams &o, constant TerrainPa
 // breaking, big enough). Its tip (the crest's top, thrown forward), the lip's launch velocity,
 // and the wave's number, type and progress.
 bool lipTrace(constant LipParams &l, constant Uniforms &u, constant OceanParams &o, constant TerrainParams &t,
-              texture2d<float> shore, texture2d<float> waves, int slot, float time, thread float3 &tip,
+              texture2d<float> shore, texture2d<float> waves, texture2d<float> slopes, int slot, float time, thread float3 &tip,
               thread float3 &velocity, thread float4 &tag) {
     float2 h = l.axis.xy, across = l.axis.zw * (float(slot) * kLipSlot);
     int system = l.slots.w;
@@ -110,7 +110,7 @@ bool lipTrace(constant LipParams &l, constant Uniforms &u, constant OceanParams 
             float4 crests, heading;
             float drift, cdepth;
             float2 beta;
-            float4 setting = lipSetting(u, o, t, shore, waves, c, crests, heading, drift, beta, cdepth);
+            float4 setting = lipSetting(u, o, t, shore, waves, slopes, c, crests, heading, drift, beta, cdepth);
             float hs = system == 0 ? setting.x : setting.y;
             float weight = surfWeights(setting)[system];
             float b = system == 0 ? beta.x : beta.y;
@@ -123,7 +123,7 @@ bool lipTrace(constant LipParams &l, constant Uniforms &u, constant OceanParams 
                 float2 dir = system == 0 ? heading.xy : heading.zw;
                 dir = length(dir) > 1e-3 ? normalize(dir) : h;
                 float2 shift;
-                float z = lipWater(u, o, t, shore, waves, c, time, shift);
+                float z = lipWater(u, o, t, shore, waves, slopes, c, time, shift);
                 tip = float3(c + shift, l.frame.w + z);
                 // Thrown faster than the wave runs (Thürey et al.: u_s = (1 + p_v g (H − H_i)) u_l),
                 // the more the more it plunges and the further on it is; a little upward at first.
@@ -146,6 +146,7 @@ kernel void lipEmit(constant LipParams &l [[buffer(0)]], constant Uniforms &u [[
                     constant OceanParams &o [[buffer(2)]], constant TerrainParams &t [[buffer(3)]],
                     device LipParticle *particles [[buffer(4)]],
                     texture2d<float> shore [[texture(0)]], texture2d<float> waves [[texture(1)]],
+                    texture2d<float> slopes [[texture(2)]],
                     uint2 g [[thread_position_in_grid]]) {
     int slots = l.slots.y, rows = l.slots.z;
     if (int(g.x) >= slots || int(g.y) >= l.rows.y) return;
@@ -156,7 +157,7 @@ kernel void lipEmit(constant LipParams &l [[buffer(0)]], constant Uniforms &u [[
     LipParticle q;
     float3 tip, velocity;
     float4 tag;
-    if (lipTrace(l, u, o, t, shore, waves, slot, te, tip, velocity, tag)) {
+    if (lipTrace(l, u, o, t, shore, waves, slopes, slot, te, tip, velocity, tag)) {
         q.start = float4(tip, te);
         q.velocity = float4(velocity, 1e30);
         q.tag = tag;
@@ -181,6 +182,7 @@ kernel void lipCollide(constant LipParams &l [[buffer(0)]], constant Uniforms &u
                        device LipParticle *particles [[buffer(4)]], device SprayParticle *spray [[buffer(5)]],
                        device atomic_uint *sprayHead [[buffer(6)]], device atomic_uint *foam [[buffer(7)]],
                        texture2d<float> shore [[texture(0)]], texture2d<float> waves [[texture(1)]],
+                    texture2d<float> slopes [[texture(2)]],
                        uint i [[thread_position_in_grid]]) {
     if (int(i) >= l.slots.y * l.slots.z) return;
     LipParticle q = particles[i];
@@ -190,7 +192,7 @@ kernel void lipCollide(constant LipParams &l [[buffer(0)]], constant Uniforms &u
     if (tau < 0.0) return;
     float3 p = lipPosition(q, now);
     float2 shift;
-    float water = l.frame.w + lipWater(u, o, t, shore, waves, p.xy, now, shift);
+    float water = l.frame.w + lipWater(u, o, t, shore, waves, slopes, p.xy, now, shift);
     bool old = tau > l.emit.y;
     if (p.z > water && !old) return;
     q.velocity.w = now;
@@ -259,32 +261,54 @@ float3 lipLivePosition(constant LipParams &l, LipParticle q) {
     return lipPosition(q, min(l.frame.x, q.velocity.w));
 }
 
-vertex LipOut lipVertex(uint vid [[vertex_id]], constant Uniforms &u [[buffer(1)]],
-                        constant LipParams &l [[buffer(2)]], const device LipParticle *particles [[buffer(3)]]) {
-    LipOut out;
-    int columns = l.slots.y - 1;
-    int quad = int(vid / 6u), corner = int(vid % 6u);
-    int j = quad % columns, k = quad / columns;
-    const int2 offsets[6] = { int2(0, 0), int2(1, 0), int2(1, 1), int2(0, 0), int2(1, 1), int2(0, 1) };
-    LipParticle c[4];
+// Whether quad (column j, row age k) of the sheet joins four flying particles of one wave line,
+// and their positions now.
+bool lipQuad(constant LipParams &l, const device LipParticle *particles, int j, int k, thread float3 *p,
+             thread LipParticle *c) {
     c[0] = lipAt(l, particles, j, k);
     c[1] = lipAt(l, particles, j + 1, k);
     c[2] = lipAt(l, particles, j, k + 1);
     c[3] = lipAt(l, particles, j + 1, k + 1);
     float wave = c[0].tag.y;
-    bool valid = lipLive(l, c[0], l.slots.x + j, wave) && lipLive(l, c[1], l.slots.x + j + 1, wave)
-                 && lipLive(l, c[2], l.slots.x + j, wave) && lipLive(l, c[3], l.slots.x + j + 1, wave);
-    float3 p[4];
+    if (!(lipLive(l, c[0], l.slots.x + j, wave) && lipLive(l, c[1], l.slots.x + j + 1, wave)
+          && lipLive(l, c[2], l.slots.x + j, wave) && lipLive(l, c[3], l.slots.x + j + 1, wave))) return false;
     for (int m = 0; m < 4; m++) p[m] = lipLivePosition(l, c[m]);
     // No bridges between wave lines that are not neighbours.
-    valid = valid && distance(p[0], p[1]) < 3.0 && distance(p[2], p[3]) < 3.0 && distance(p[0], p[2]) < 3.0
-            && distance(p[1], p[3]) < 3.0;
+    float along = 2.0 * kLipSlot;
+    return distance(p[0], p[1]) < along && distance(p[2], p[3]) < along && distance(p[0], p[2]) < 3.0
+           && distance(p[1], p[3]) < 3.0;
+}
+
+// The sheet's live quads, listed for an indirect draw: each adds its six vertices to the draw's
+// count (args[0], cleared before) and its index to `quads`.
+kernel void lipQuads(constant LipParams &l [[buffer(0)]], const device LipParticle *particles [[buffer(4)]],
+                     device atomic_uint *args [[buffer(8)]], device uint *quads [[buffer(9)]],
+                     uint i [[thread_position_in_grid]]) {
+    int columns = l.slots.y - 1;
+    if (int(i) >= columns * (l.slots.z - 1)) return;
+    float3 p[4];
+    LipParticle c[4];
+    if (!lipQuad(l, particles, int(i) % columns, int(i) / columns, p, c)) return;
+    uint at = atomic_fetch_add_explicit(&args[0], 6u, memory_order_relaxed);
+    quads[at / 6u] = i;
+}
+
+vertex LipOut lipVertex(uint vid [[vertex_id]], constant Uniforms &u [[buffer(1)]],
+                        constant LipParams &l [[buffer(2)]], const device LipParticle *particles [[buffer(3)]],
+                        const device uint *quads [[buffer(5)]]) {
+    LipOut out;
+    int columns = l.slots.y - 1;
+    int quad = int(quads[vid / 6u]), corner = int(vid % 6u);
+    int j = quad % columns, k = quad / columns;
+    const int2 offsets[6] = { int2(0, 0), int2(1, 0), int2(1, 1), int2(0, 0), int2(1, 1), int2(0, 1) };
+    float3 p[4];
+    LipParticle c[4];
     out.position = float4(0.0, 0.0, 2.0, 1.0);
     out.world = 0.0;
     out.normal = float3(0.0, 0.0, 1.0);
     out.age = 0.0;
     out.plunge = 0.0;
-    if (!valid) return out;
+    if (!lipQuad(l, particles, j, k, p, c)) return out;
     int2 o2 = offsets[corner];
     int m = o2.x + 2 * o2.y;
     float3 along = (p[1] - p[0]) + (p[3] - p[2]);
