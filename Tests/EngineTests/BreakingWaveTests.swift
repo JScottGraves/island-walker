@@ -84,7 +84,7 @@ final class BreakingWaveTests: XCTestCase {
     func testBreakerTypeFollowsIribarren() throws {
         // A steep shore break (1:12, 13 s, 1.25 m: ξ ≈ 1) plunges; a gentle sand flat (1:50,
         // 8 s, 1.1 m: ξ ≈ 0.2) spills.
-        let s = try run("breakProbe", probes: [SIMD4(1.25, 2, 1.0 / 12, 13), SIMD4(1.1, 2, 1.0 / 50, 8)], count: 2)
+        let s = try run("breakProbe", probes: [SIMD4<Float>(1.25, 2, 1.0 / 12, 13), SIMD4<Float>(1.1, 2, 1.0 / 50, 8)], count: 2)
         XCTAssertGreaterThan(s[0].y, 0.9)
         XCTAssertLessThan(s[1].y, 0.1)
     }
