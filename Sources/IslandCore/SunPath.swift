@@ -56,8 +56,8 @@ public enum SunPath {
     static let skyViewGain = 1.4
 
     /// Irradiance (renderer units) of the night sky's ambient: at night's exposure an 18%
-    /// ground comes out near linear 0.01.
-    static let nightAmbient = 0.0055
+    /// ground comes out near linear 0.005 (Scott: dimmer, barely visible).
+    static let nightAmbient = 0.0028
 
     static func luminance(_ c: RGB) -> Double { 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b }
 
