@@ -166,6 +166,8 @@ public final class TerrainRenderer {
     let structureBuffer: MTLBuffer
     public let seaLevel: Float
     let maxHeight: Float
+    /// Buildings standing on the structures (nil when there are none).
+    let buildings: BuildingRenderer?
     /// Native trees and shrubs (nil when drawn without them).
     let flora: FloraRenderer?
     /// Grasses and sedges near the walker (nil with `--cover off` or without community maps).
@@ -275,7 +277,7 @@ public final class TerrainRenderer {
         let options = MTLCompileOptions()
         options.preserveInvariance = true  // the depth prepass and shading pass must agree
         let library = try device.makeLibrary(source: terrainShaderSource + floraShaderSource + groundCoverShaderSource
-                                                 + oceanShaderSource, options: options)
+                                                 + oceanShaderSource + buildingShaderSource, options: options)
         let constants = MTLFunctionConstantValues()
         var rayTraced = shadows == .rayTraced
         constants.setConstantValue(&rayTraced, type: .bool, index: 0)
@@ -283,6 +285,9 @@ public final class TerrainRenderer {
         // hand-placed sheets) and the sun rays read them.
         var treeShadows = rayTraced && floraMaps != nil
         constants.setConstantValue(&treeShadows, type: .bool, index: 1)
+        // Buildings cast shadows through their own acceleration structure when there are any.
+        var buildingShadows = rayTraced && structures.contains { Hangar($0) != nil }
+        constants.setConstantValue(&buildingShadows, type: .bool, index: 2)
         let desc = MTLRenderPipelineDescriptor()
         desc.vertexFunction = library.makeFunction(name: "terrainVertex")
         desc.fragmentFunction = try library.makeFunction(name: "terrainFragment", constantValues: constants)
@@ -388,6 +393,9 @@ public final class TerrainRenderer {
         let communities = detailMaps?.communities ?? []
         groundWeights = try FloraRenderer.biomeTextures(device: device,
                                                         maps: communities.isEmpty ? nil : FloraMaps(weights: communities, site: nil))
+        buildings = try BuildingRenderer(device: device, queue: queue, library: library, constants: constants,
+                                         colorFormat: shadeFormat, depthFormat: depthFormat,
+                                         rayTraced: shadows == .rayTraced, structures: structures)
         flora = floraMaps != nil || floraSpecimens
             ? try FloraRenderer(device: device, library: library, constants: constants, colorFormat: shadeFormat,
                                 depthFormat: depthFormat, rayTraced: shadows == .rayTraced, treeShadows: treeShadows,
@@ -1072,6 +1080,7 @@ public final class TerrainRenderer {
         enc.setFragmentBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 1)
         bindTerrain(enc, frame: frameTerrain)
         drawTerrain(enc, frame: frameTerrain)
+        buildings?.drawPrepass(enc)
         flora?.drawPrepass(enc)
         groundCover?.drawPrepass(enc)
         // Then the sea, in the same depth and surface buffers, so sun rays, clouds, motion and
@@ -1130,6 +1139,10 @@ public final class TerrainRenderer {
                 rays.setTexture(maps, index: 6)
                 rays.setBytes(&trees, length: trees.count * 16, index: 3)
             }
+            if let accel = buildings?.accel {
+                rays.setAccelerationStructure(accel, bufferIndex: 4)
+                rays.setBuffer(structureBuffer, offset: 0, index: StructureLookup.bufferIndex)
+            }
             // The terrain at one pixel per 2×2 block, then the rest where those disagree.
             var pass: UInt32 = 0
             rays.setBytes(&pass, length: 4, index: 2)
@@ -1178,6 +1191,7 @@ public final class TerrainRenderer {
         shade.setFragmentBytes(&parallaxParams, length: 16, index: 4)
         shade.setFragmentBuffer(structureBuffer, offset: 0, index: StructureLookup.bufferIndex)
         drawTerrain(shade, frame: frameTerrain)
+        buildings?.drawShading(shade, skyVisibility: skyVisibility, horizons: horizons)
         flora?.drawShading(shade, skyVisibility: skyVisibility, horizons: horizons)
         groundCover?.drawShading(shade, skyVisibility: skyVisibility, horizons: horizons)
         // The sea, where the prepass left it nearest.

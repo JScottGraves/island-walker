@@ -85,7 +85,8 @@ enum Snapshots {
     /// 300 m up, behind and to the left, looking at its middle; `airstrip-side` standing at
     /// the grass strip's edge 250 m in, looking along the runway; `airstrip-asphalt` standing
     /// on the runway by the first aiming bar, looking 30° down at the paving; `airstrip-apron`
-    /// standing on the apron's far side, looking across it and down the taxiway to the runway.
+    /// standing on the apron's far side, looking across it and down the taxiway to the runway;
+    /// `hangar` and `hangar-inside` at the apron's hangar.
     static func structureViews() -> [(name: String, camera: GroundView.Camera, eye: Double?)] {
         // From the bundle even with `--structures off`, so the same spots can be compared.
         guard let s = IslandSource.bundle()?.structures().first(where: { $0.kind == "airstrip" }),
@@ -116,6 +117,21 @@ enum Snapshots {
             let dx = target.x - stand.x, dy = target.y - stand.y
             views.append(("airstrip-apron", GroundView.Camera(x: stand.x, y: stand.y, z: 0, yaw: atan2(dx, dy),
                                                               pitch: -3 * radians), nil))
+        }
+        if let hangar = IslandSource.bundle()?.structures().first(where: { $0.kind == "hangar" }),
+           let shed = Hangar(hangar) {
+            // `hangar` out on the apron 45 m from the door, a little to one side, looking at
+            // it; `hangar-inside` near the back wall looking out through the door, up a little
+            // into the roof.
+            func look(_ name: String, from: (u: Double, v: Double), at: (u: Double, v: Double), pitch: Double)
+                -> (name: String, camera: GroundView.Camera, eye: Double?) {
+                let a = hangar.world(u: from.u, v: from.v), b = hangar.world(u: at.u, v: at.v)
+                return (name, GroundView.Camera(x: a.x, y: a.y, z: 0, yaw: atan2(b.x - a.x, b.y - a.y),
+                                                pitch: pitch * radians), nil)
+            }
+            let door = shed.doorSide, half = shed.depth / 2
+            views.append(look("hangar", from: (12, door * (half + 45)), at: (0, 0), pitch: 4))
+            views.append(look("hangar-inside", from: (-5, -door * (half - 4)), at: (2, door * half), pitch: 7))
         }
         return views
     }
