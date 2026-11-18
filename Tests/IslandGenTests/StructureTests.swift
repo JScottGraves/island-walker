@@ -68,7 +68,7 @@ final class StructureTests: XCTestCase {
         XCTAssertEqual(centre.surface, .paved)
         XCTAssertEqual(centre.plants, .none)
         // (Clear of the taxiway, which crosses the strip at the middle or a quarter from an end.)
-        let shoulder = s.world(u: 200, v: 40)
+        let shoulder = s.world(u: 200, v: 30)
         XCTAssertEqual(map.sample(x: shoulder.x, y: shoulder.y).plants, .grassOnly)
         XCTAssertEqual(map.sample(x: 10, y: 10), .open)
     }
@@ -104,7 +104,7 @@ final class StructureTests: XCTestCase {
         XCTAssertEqual(surfaces, [.paved, .concrete])
         XCTAssertEqual(taxiway.properties["edges"], "sides")
         // The graded heights follow the line on the apron, and the strip is still exact beside it.
-        for (u, v) in [(a.u, a.v), (a.u + 50, a.v), (a.u + 100, side * 40)] {
+        for (u, v) in [(a.u, a.v), (a.u + 50, a.v), (a.u + 100, side * 30)] {
             let (x, y) = runway.world(u: u, v: v)
             let i = Int(x / graded.cellSize), j = Int(y / graded.cellSize)
             let cx = (Double(i) + 0.5) * graded.cellSize, cy = (Double(j) + 0.5) * graded.cellSize

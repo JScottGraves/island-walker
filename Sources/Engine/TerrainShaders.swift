@@ -905,13 +905,15 @@ float runwayEndPaint(float s, float w, float halfWidth, int designator, float2 f
     if (s < -f.x || s > 360.0) return 0.0;
     float aw = abs(w);
     float paint = 0.0;
-    // Threshold ("piano keys"): eight bars 30 m long and 1.8 m wide, four each side of the
-    // centreline at 3.6 m pitch; their average once a pixel spans one.
+    // Threshold ("piano keys"): bars 30 m long and 1.8 m wide each side of the centreline at
+    // 3.6 m pitch, as many as fit inside the edge lines (four a side on 30 m, three on 23 m);
+    // their average once a pixel spans one.
     if (s > 6.0 - f.x && s < 36.0 + f.x) {
-        float k = clamp(floor((aw - 1.35) / 3.6), 0.0, 3.0);
+        float last = clamp(floor((halfWidth - 4.15) / 3.6), 0.0, 3.0);
+        float k = clamp(floor((aw - 1.35) / 3.6), 0.0, last);
         float centre = 2.25 + 3.6 * k;
         float bars = paintSpan(aw, centre - 0.9, centre + 0.9, f.y);
-        bars = mix(bars, 0.5 * paintSpan(aw, 1.35, 13.95, f.y), smoothstep(0.9, 1.8, f.y));
+        bars = mix(bars, 0.5 * paintSpan(aw, 1.35, 3.15 + 3.6 * last, f.y), smoothstep(0.9, 1.8, f.y));
         paint = max(paint, bars * paintSpan(s, 6.0, 36.0, f.x));
     }
     // Designator: two digits 9 m tall from 48 m in, the first to the pilot's left.
@@ -954,9 +956,9 @@ constant float3 kAsphalt = float3(0.085, 0.084, 0.080);      // weathered asphal
 constant float3 kAsphaltBleached = float3(0.165, 0.160, 0.148);   // oxidised, sun-bleached asphalt, sRGB ~113
 constant float3 kAsphaltBase = float3(0.115, 0.100, 0.080);  // the broken-out base course: gravel and dirt
 constant float3 kRunwayPaint = float3(0.60, 0.60, 0.57);     // worn white paint
-constant float3 kPaintFaded = float3(0.34, 0.33, 0.31);
+constant float3 kPaintFaded = float3(0.34, 0.33, 0.31);      // paint chalked and faded by decades of sun
 constant float3 kConcrete = float3(0.40, 0.385, 0.35);        // weathered concrete, sRGB ~168
-constant float3 kConcreteDirty = float3(0.22, 0.205, 0.18);   // grimed, lichen-darkened concrete      // paint chalked and faded by decades of sun
+constant float3 kConcreteDirty = float3(0.22, 0.205, 0.18);   // grimed, lichen-darkened concrete
 constant float3 kMownGrass = float3(0.058, 0.110, 0.032);    // mown grass, sRGB ~68, 94, 50
 constant float3 kMownDry = float3(0.105, 0.110, 0.045);      // sun-dried turf, sRGB ~92, 94, 60
 constant float3 kRankGreen = float3(0.050, 0.082, 0.028);    // long uncut grass in leaf

@@ -16,9 +16,10 @@ import IslandCore
 /// own (kinds "apron" and "taxiway", every zone a box around its own centre).
 public struct Airstrip: StructureKind {
     public struct Params: Sendable {
-        public var runwayWidth = 30.0
+        /// A small island field's runway (Hāna, on Maui, is about 1,100 m).
+        public var runwayWidth = 23.0
         /// Graded grass strip: this wide, and this far past each runway end.
-        public var stripWidth = 90.0
+        public var stripWidth = 75.0
         public var stripOverrun = 60.0
         /// Steepest grade line along the runway (rise per metre).
         public var maxGrade = 0.015
@@ -33,10 +34,10 @@ public struct Airstrip: StructureKind {
         public var headingStep = 5.0
         public var refineCount = 50
         /// Runway length (m) and deepest allowed cut or fill (m), tried in order.
-        public var ladder: [(length: Double, maxCut: Double)] = [(1500, 8), (1200, 8), (1000, 12), (800, 16)]
+        public var ladder: [(length: Double, maxCut: Double)] = [(1100, 8), (1000, 8), (900, 12), (800, 16)]
         /// Concrete apron beside the strip: this long along the runway and this deep away from it.
-        public var apronLength = 120.0
-        public var apronDepth = 70.0
+        public var apronLength = 150.0
+        public var apronDepth = 90.0
         /// Taxiway from the runway's edge to the apron.
         public var taxiwayWidth = 15.0
         /// Deepest cut or fill the apron may need; past it there is no apron.
