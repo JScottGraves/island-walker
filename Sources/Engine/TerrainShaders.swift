@@ -1015,12 +1015,15 @@ float pavementDepth(float2 q, float upkeep, float footprint) {
 // how deep that is (m). A point not over an opening stays put, so only the openings pay
 // for the search.
 constant float kPavementDepth = 0.07;
+// The longest run across the paving per metre down: past it, grazing rays step so far between
+// samples that slot edges stair-step.
+constant float kPavementReach = 4.0;
 float2 pavementParallax(float2 q, float2 dir, float upkeep, float footprint, float jitter, thread float &depthOut) {
     depthOut = 0.0;
     float d0 = pavementDepth(q, upkeep, footprint);
     if (d0 <= 0.0) return 0.0;
     // Down through the opening in even drops to the deepest the paving goes.
-    const int count = 10;
+    const int count = 8;
     float dt = kPavementDepth / float(count);
     float t = dt * jitter, prevT = 0.0, prevGap = d0;
     float gap = d0 - t;
@@ -1045,7 +1048,8 @@ float pavementSun(float2 q, float depth, float2 sunDir, float upkeep, float foot
         float rise = depth * (float(i) - 0.5) / float(count);
         float above = depth - rise;                        // the ray's depth there
         float ground = pavementDepth(q + sunDir * rise, upkeep, footprint);
-        block = max(block, saturate((above - ground) / 0.006));
+        // A few millimetres' allowance, so the wall the point sits on doesn't shade itself.
+        block = max(block, saturate((above - ground - 0.003) / 0.006));
     }
     return 1.0 - block;
 }
@@ -1078,7 +1082,9 @@ float3 builtSurface(int surface, StructureSample s, StructureZoneGPU z, float3 w
             float2 local = float2(dot(v.xy, axis), dot(v.xy, across));
             float2 dir = local / max(-v.z, 0.05);
             float reach = length(dir);
-            if (reach > kParallaxReach) dir *= kParallaxReach / reach;
+            if (reach > kPavementReach) dir *= kPavementReach / reach;
+            // Fades out as a pixel grows towards a slot's width, before the depth reads as a dark line.
+            fade *= 1.0 - smoothstep(0.006, 0.02, footprint);
             float2 shift = fade * pavementParallax(q, dir, s.upkeep, footprint, jitter, sunk);
             sunk *= fade;
             q += shift;
@@ -1087,7 +1093,7 @@ float3 builtSurface(int surface, StructureSample s, StructureZoneGPU z, float3 w
             if (sunk > 0.0 && l.z > 0.02) {
                 float2 sunDir = float2(dot(l.xy, axis), dot(l.xy, across)) / l.z;
                 float sunReach = length(sunDir);
-                if (sunReach > kParallaxReach) sunDir *= kParallaxReach / sunReach;
+                if (sunReach > kPavementReach) sunDir *= kPavementReach / sunReach;
                 sun = mix(1.0, pavementSun(q, sunk, sunDir, s.upkeep, footprint), relief.shadow);
             }
         }
@@ -1152,8 +1158,11 @@ float3 builtSurface(int surface, StructureSample s, StructureZoneGPU z, float3 w
             albedo = mix(albedo, fill, crack * (1.0 - far));
             albedo *= 1.0 - 0.6 * crack * far;
             albedo = mix(albedo, kWeeds, 0.55 * weeds);
-            // Down in a slot the walls hide most of the sky.
-            albedo *= 1.0 - 0.55 * smoothstep(0.0, 0.04, sunk);
+            // Down in a slot: dust and grit on the walls and floor rather than the crack's dark
+            // sealant line (the depth now does the darkening), a little dimmer the deeper.
+            float inSlot = smoothstep(0.002, 0.012, sunk);
+            albedo = mix(albedo, kCrackFloor * (0.9 + 0.3 * groundNoise(groundTurn(q) / 0.02 + 5.1)), 0.6 * inSlot);
+            albedo *= 1.0 - 0.25 * smoothstep(0.01, 0.05, sunk);
         }
 
         // Paint: its edges eroded a few centimetres; worn through in irregular chips with crisp
