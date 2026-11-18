@@ -997,13 +997,72 @@ float3 rankGrass(float2 p, float footprint) {
     return c * (0.8 + 0.4 * tussock);
 }
 
+// How deep (m) the paving is broken in at q (the structure's ageing coordinates): cracks
+// as narrow U-shaped slots, deeper the wider they open, and potholes down to the base course.
+float pavementDepth(float2 q, float upkeep, float footprint) {
+    PavementCracks k = pavementCracks(q, upkeep, footprint);
+    float slot = 0.0;
+    if (k.halfWidth > 0.0) {
+        float deep = min(0.012 + 1.6 * k.halfWidth, 0.05);
+        slot = deep * (1.0 - smoothstep(0.55 * k.halfWidth, k.halfWidth, k.distance));
+    }
+    return max(slot, 0.07 * k.pothole);
+}
+
+// Parallax through the paving's cracks and potholes near the camera. dir: the view ray's
+// run across the paving per metre it drops, in the structure's (along, across) axes;
+// returns the shift of q to where the ray meets the broken paving, and through `depthOut`
+// how deep that is (m). A point not over an opening stays put, so only the openings pay
+// for the search.
+constant float kPavementDepth = 0.07;
+float2 pavementParallax(float2 q, float2 dir, float upkeep, float footprint, float jitter, thread float &depthOut) {
+    depthOut = 0.0;
+    float d0 = pavementDepth(q, upkeep, footprint);
+    if (d0 <= 0.0) return 0.0;
+    // Down through the opening in even drops to the deepest the paving goes.
+    const int count = 10;
+    float dt = kPavementDepth / float(count);
+    float t = dt * jitter, prevT = 0.0, prevGap = d0;
+    float gap = d0 - t;
+    for (int i = 0; i < count && gap > 0.0; i++) {
+        prevT = t; prevGap = gap;
+        t += dt;
+        gap = pavementDepth(q + dir * t, upkeep, footprint) - t;   // the ray above the paving while positive
+    }
+    if (gap > 0.0) { depthOut = t; return dir * t; }
+    float hitT = mix(prevT, t, prevGap / max(prevGap - gap, 1e-5));
+    depthOut = hitT;
+    return dir * hitT;
+}
+
+// Sun on a point `depth` metres down in an opening: blocked where the paving beside it rises
+// over the ray towards the sun (sunDir: run per metre risen, in the structure's axes).
+float pavementSun(float2 q, float depth, float2 sunDir, float upkeep, float footprint) {
+    if (depth <= 0.002) return 1.0;
+    float block = 0.0;
+    const int count = 4;
+    for (int i = 1; i <= count; i++) {
+        float rise = depth * (float(i) - 0.5) / float(count);
+        float above = depth - rise;                        // the ray's depth there
+        float ground = pavementDepth(q + sunDir * rise, upkeep, footprint);
+        block = max(block, saturate((above - ground) / 0.006));
+    }
+    return 1.0 - block;
+}
+
 // The albedo of a built surface at `world` (StructureSample `s`, its zone `z`), with the
 // pixel's footprint along the structure's axes from the world-space derivatives; `n`
 // (the mesh's normal) gets a faint grain on asphalt near the camera. How it has aged
 // follows the structure's upkeep: bleached, cracked and broken paving with faded, flaking
 // paint and grass in the cracks and over the edges, and the grass strip gone to seed.
+//
+// Abandoned paving near the camera has depth: the view ray is followed down into the cracks
+// and potholes (v: from the camera to the point, l: towards the sun, `relief` the ground
+// parallax's settings, so P and --parallax off switch this off too), their walls hide their
+// floors at a glance and the sun reaches into them only partway, through `sun`.
 float3 builtSurface(int surface, StructureSample s, StructureZoneGPU z, float3 world, float3 dx, float3 dy, float distance,
-                    thread float3 &n) {
+                    float3 v, float3 l, float jitter, ParallaxParams relief, thread float3 &n, thread float &sun) {
+    sun = 1.0;
     float2 axis = z.a.zw, across = float2(axis.y, -axis.x);
     float2 f = float2(abs(dot(dx.xy, axis)) + abs(dot(dy.xy, axis)), abs(dot(dx.xy, across)) + abs(dot(dy.xy, across)));
     float2 p = world.xy;
@@ -1011,6 +1070,28 @@ float3 builtSurface(int surface, StructureSample s, StructureZoneGPU z, float3 w
     // Ageing patterns in the structure's own frame, offset per structure.
     float2 q = s.uv + structureSeed(z);
     float footprint = 0.7 * length(f);
+    // How far down into a crack or pothole the view ray reaches before it meets the paving.
+    float sunk = 0.0;
+    if (surface == kSurfacePaved && neglect > 0.0 && relief.depthScale > 0.0 && footprint < 0.02) {
+        float fade = 1.0 - smoothstep(0.6 * relief.end, relief.end, distance);
+        if (fade > 0.0) {
+            float2 local = float2(dot(v.xy, axis), dot(v.xy, across));
+            float2 dir = local / max(-v.z, 0.05);
+            float reach = length(dir);
+            if (reach > kParallaxReach) dir *= kParallaxReach / reach;
+            float2 shift = fade * pavementParallax(q, dir, s.upkeep, footprint, jitter, sunk);
+            sunk *= fade;
+            q += shift;
+            s.uv += shift;
+            p += axis * shift.x + across * shift.y;
+            if (sunk > 0.0 && l.z > 0.02) {
+                float2 sunDir = float2(dot(l.xy, axis), dot(l.xy, across)) / l.z;
+                float sunReach = length(sunDir);
+                if (sunReach > kParallaxReach) sunDir *= kParallaxReach / sunReach;
+                sun = mix(1.0, pavementSun(q, sunk, sunDir, s.upkeep, footprint), relief.shadow);
+            }
+        }
+    }
     if (surface == kSurfacePaved) {
         // Patching and wear tens of metres across, slabs of resurfacing, the aggregate's speckle
         // (fading once a pixel spans it), rubber from tyres in the touchdown zones; abandoned,
@@ -1071,6 +1152,8 @@ float3 builtSurface(int surface, StructureSample s, StructureZoneGPU z, float3 w
             albedo = mix(albedo, fill, crack * (1.0 - far));
             albedo *= 1.0 - 0.6 * crack * far;
             albedo = mix(albedo, kWeeds, 0.55 * weeds);
+            // Down in a slot the walls hide most of the sky.
+            albedo *= 1.0 - 0.55 * smoothstep(0.0, 0.04, sunk);
         }
 
         // Paint: its edges eroded a few centimetres; worn through in irregular chips with crisp
@@ -1232,9 +1315,15 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
         if (built.surface == kSurfacePaved || mown > 0.0) {
             int surface = built.surface == kSurfacePaved ? kSurfacePaved : kSurfaceMownGrass;
             float3 meshNormal = normalize(in.normal);
+            // Interleaved gradient noise, stepped by the frame, for the crack search's start.
+            float2 jq = in.position.xy + 5.588238 * fmod(u.frame.z, 64.0);
+            float jitter = fract(52.9829189 * fract(0.06711056 * jq.x + 0.00583715 * jq.y));
+            float crackSun = 1.0;
             float3 surfaceAlbedo = builtSurface(surface, built, structureZones(structures)[built.zone], in.world,
-                                                groundDx, groundDy, d, meshNormal);
+                                                groundDx, groundDy, d, normalize(in.world - u.cameraPosition), l,
+                                                jitter, parallax, meshNormal, crackSun);
             float share = surface == kSurfacePaved ? 1.0 : mown;
+            groundSun = mix(groundSun, crackSun, share);
             albedo = mix(albedo, surfaceAlbedo, share);
             n = normalize(mix(n, meshNormal, share));
         }
