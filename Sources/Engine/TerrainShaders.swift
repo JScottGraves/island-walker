@@ -1017,7 +1017,7 @@ float pavementDepth(float2 q, float upkeep, float footprint) {
 constant float kPavementDepth = 0.07;
 // The longest run across the paving per metre down: past it, grazing rays step so far between
 // samples that slot edges stair-step.
-constant float kPavementReach = 4.0;
+constant float kPavementReach = 6.0;
 float2 pavementParallax(float2 q, float2 dir, float upkeep, float footprint, float jitter, thread float &depthOut) {
     depthOut = 0.0;
     float d0 = pavementDepth(q, upkeep, footprint);
@@ -1076,7 +1076,10 @@ float3 builtSurface(int surface, StructureSample s, StructureZoneGPU z, float3 w
     float footprint = 0.7 * length(f);
     // How far down into a crack or pothole the view ray reaches before it meets the paving.
     float sunk = 0.0;
-    if (surface == kSurfacePaved && neglect > 0.0 && relief.depthScale > 0.0 && footprint < 0.02) {
+    // A grazing view stretches a pixel along the line of sight while it stays narrow across it,
+    // where a slot's depth still shows: judge by their geometric mean, not the longer one.
+    float slotFootprint = sqrt(f.x * f.y);
+    if (surface == kSurfacePaved && neglect > 0.0 && relief.depthScale > 0.0 && slotFootprint < 0.035) {
         float fade = 1.0 - smoothstep(0.6 * relief.end, relief.end, distance);
         if (fade > 0.0) {
             float2 local = float2(dot(v.xy, axis), dot(v.xy, across));
@@ -1084,7 +1087,7 @@ float3 builtSurface(int surface, StructureSample s, StructureZoneGPU z, float3 w
             float reach = length(dir);
             if (reach > kPavementReach) dir *= kPavementReach / reach;
             // Fades out as a pixel grows towards a slot's width, before the depth reads as a dark line.
-            fade *= 1.0 - smoothstep(0.006, 0.02, footprint);
+            fade *= 1.0 - smoothstep(0.012, 0.035, slotFootprint);
             float2 shift = fade * pavementParallax(q, dir, s.upkeep, footprint, jitter, sunk);
             sunk *= fade;
             q += shift;
