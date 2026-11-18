@@ -37,6 +37,7 @@ final class OceanRenderer {
         var surf: SIMD4<Float>
         var surfFrom: SIMD4<Float>
         var waves: SIMD4<Float>
+        var breaking: SIMD4<Float>
     }
 
     let spectrum: OceanSpectrum
@@ -81,6 +82,8 @@ final class OceanRenderer {
     /// Over the domain, from the overview: each cascade's amplitude factor where the sea is
     /// sheltered (SeaShelter: fetch, the wind's lee, reefs, the swells' shadows), 1 on open sea.
     let shelter: MTLTexture
+    /// The lips of plunging breakers near the camera, their spray and impact foam (SurfLip).
+    let lip: SurfLip
     var current = 0
     var previousValid = false
     var frameIndex = 0
@@ -166,6 +169,8 @@ final class OceanRenderer {
                                  withBytes: raw.baseAddress!, bytesPerRow: floor.width * 16)
         }
         waves = wavesTexture
+        // The lips (SurfLip) pick their wave line from the same texels.
+        let lipField = SurfLip.Field(texels: waveTexels, width: floor.width, cell: Float(floor.cellSize))
         // How much of the open sea's waves each patch of water gets (SeaShelter): per cascade
         // here, the capillary roughness's factor in the shore texture's y.
         let shelterStart = Date()
@@ -218,7 +223,7 @@ final class OceanRenderer {
         shelter = shelterTexture
         print(String(format: "sea shelter: %.2f s", Date().timeIntervalSince(shelterStart)))
         tree = OceanQuadtree(quads: OceanRenderer.nodeQuads, cellMetres: 0.5, centre: (domain / 2, domain / 2),
-                             reach: domain / 2 + 160_000, rangeFactor: 2)
+                             reach: domain / 2 + 160_000, rangeFactor: tuning["range"] ?? 2)
         func kernel(_ name: String) throws -> MTLComputePipelineState {
             guard let f = library.makeFunction(name: name) else { throw RendererError.setup("ocean \(name)") }
             return try device.makeComputePipelineState(function: f)
@@ -243,6 +248,9 @@ final class OceanRenderer {
         desc.fragmentFunction = try library.makeFunction(name: "oceanFragment", constantValues: constants)
         desc.colorAttachments[0].pixelFormat = colorFormat
         shadePipeline = try device.makeRenderPipelineState(descriptor: desc)
+        lip = try SurfLip(device: device, library: library, colorFormat: colorFormat, depthFormat: depthFormat, field: lipField,
+                          enabled: (tuning["lip"] ?? 1) > 0)
+        lip.sprayEnabled = (tuning["spray"] ?? 1) > 0
 
         // Initial amplitudes and frequencies of every cascade, once.
         let n = OceanSpectrum.resolution, cascades = OceanSpectrum.cascadeCount
@@ -359,7 +367,10 @@ final class OceanRenderer {
             // Waves come from the opposite of where they travel (unused since the surf is refracted).
             surfFrom: SIMD4(Float(-cos(spectrum.swell.direction)), Float(-sin(spectrum.swell.direction)),
                             Float(-cos(windTowards)), Float(-sin(windTowards))),
-            waves: SIMD4(Float(tradePeriod), Float(swellPeriod), Float(WaveRefraction.breakerIndex), 7))
+            waves: SIMD4(Float(tradePeriod), Float(swellPeriod), Float(WaveRefraction.breakerIndex), 7),
+            // The bathymetry (10 m grid, the surf's bake 40 m) smooths reef edges and bars into
+            // gentler slopes than the real bed's: their Iribarren numbers ×1.5.
+            breaking: SIMD4(Float(tuning["plunge"] ?? 1.5), Float(tuning["lip"] ?? 1), SurfLip.foamCell, Float(SurfLip.foamSide)))
     }
 
     /// Picks this frame's sea nodes and runs the waves forward to `time` (seconds), then
@@ -570,11 +581,13 @@ final class OceanRenderer {
     }
 
     /// Sea-state overrides for tuning, from the environment: ISLAND_OCEAN="trade=2,tradeT=8,
-    /// swell=1.5,fetch=40000,chop=1.2,shallow=0.6,surfwave=1.5,shelter=1,lee=0.6,leeL=12,reef=1"
+    /// swell=1.5,fetch=40000,chop=1.2,shallow=0.6,surfwave=1.5,shelter=1,lee=0.6,leeL=12,reef=1,
+    /// plunge=1,lip=1,range=2"
     /// (trade swell height and period, north swell height, local wind fetch (m), choppiness, the
     /// depth-limited Hs/h, the surf waves' height scale; shelter=0 turns SeaShelter off, lee and
     /// leeL its wind lee's strength and length (× the land's height), reef the depth (m) that
-    /// breaks the wind sea). Unset keys keep the defaults.
+    /// breaks the wind sea; plunge scales the breakers' Iribarren number, lip=0 leaves out their
+    /// lips (SurfLip), range is the sea mesh's ring radius in nodes). Unset keys keep the defaults.
     static func tuning() -> [String: Double] {
         var out: [String: Double] = [:]
         for pair in (ProcessInfo.processInfo.environment["ISLAND_OCEAN"] ?? "").split(separator: ",") {
@@ -589,6 +602,19 @@ final class OceanRenderer {
     func resetHistory() {
         previousValid = false
         environmentKey = nil
+        lip.reset()
+    }
+
+    /// The breakers' lips for this frame (after `update`, which sets the sea's clock).
+    func updateLip(_ cmd: MTLCommandBuffer, uniforms: inout TerrainRenderer.Uniforms,
+                   terrainParams: TerrainRenderer.TerrainParams, eye: SIMD3<Double>, time: Double) {
+        lip.update(cmd, uniforms: &uniforms, ocean: &params, terrainParams: terrainParams, shore: shore, waves: waves,
+                   eye: eye, time: time)
+    }
+
+    /// The lips' sheets and spray, blended over the water (after `drawShading`, in the same pass).
+    func drawLip(_ enc: MTLRenderCommandEncoder, uniforms: inout TerrainRenderer.Uniforms) {
+        lip.draw(enc, uniforms: &uniforms)
     }
 
     private func bind(_ enc: MTLRenderCommandEncoder, uniforms: inout TerrainRenderer.Uniforms) {
@@ -639,6 +665,7 @@ final class OceanRenderer {
         enc.setFragmentTextures([derivatives, moments, environment, tiles], range: 6..<10)
         enc.setFragmentTexture(foam[foamCurrent], index: 12)
         enc.setFragmentBuffer(usageBuffers[frameIndex % usageBuffers.count], offset: 0, index: 8)
+        enc.setFragmentBuffer(lip.foam, offset: 0, index: 9)
         var t = terrainParams
         enc.setFragmentBytes(&t, length: MemoryLayout<TerrainRenderer.TerrainParams>.stride, index: 3)
         enc.setFragmentBuffer(pages, offset: 0, index: 5)
