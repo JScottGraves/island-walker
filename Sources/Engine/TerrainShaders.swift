@@ -955,7 +955,7 @@ constant float3 kAsphaltBleached = float3(0.165, 0.160, 0.148);   // oxidised, s
 constant float3 kAsphaltBase = float3(0.115, 0.100, 0.080);  // the broken-out base course: gravel and dirt
 constant float3 kRunwayPaint = float3(0.60, 0.60, 0.57);     // worn white paint
 constant float3 kPaintFaded = float3(0.34, 0.33, 0.31);
-constant float3 kConcrete = float3(0.36, 0.35, 0.32);         // weathered concrete, sRGB ~160
+constant float3 kConcrete = float3(0.40, 0.385, 0.35);        // weathered concrete, sRGB ~168
 constant float3 kConcreteDirty = float3(0.22, 0.205, 0.18);   // grimed, lichen-darkened concrete      // paint chalked and faded by decades of sun
 constant float3 kMownGrass = float3(0.058, 0.110, 0.032);    // mown grass, sRGB ~68, 94, 50
 constant float3 kMownDry = float3(0.105, 0.110, 0.045);      // sun-dried turf, sRGB ~92, 94, 60
@@ -1006,25 +1006,32 @@ float3 rankGrass(float2 p, float footprint) {
 // q: the structure's ageing coordinates; f: the pixel's footprint along and across.
 float3 concreteSurface(StructureSample s, StructureZoneGPU z, float2 p, float2 q, float2 f, float footprint,
                        float neglect, float distance, thread float3 &n) {
-    const float panel = 5.0;
-    float2 g = (s.uv + z.b.xy) / panel;     // the slabs' grid, a joint on every edge of the box
+    float2 g = (s.uv + z.b.xy) / kConcretePanel;     // the slabs' grid
     int2 slab = int2(floor(g));
     uint sh = structureHash(slab + int2(z.a.xy * 0.1), 61u);
     // Each slab its own shade (cement batch, curing), grime tens of metres across.
     float tint = 0.9 + 0.2 * structureUnit(sh);
-    float grime = neglect * smoothstep(0.3, 0.8, 0.65 * groundNoise(p / 23.0 + 1.9) + 0.35 * groundNoise(p / 6.0 + 4.4));
-    float3 albedo = mix(kConcrete, kConcreteDirty, 0.35 * neglect + 0.55 * grime) * tint;
-    // Dark lichen blotches and water stains on the old slabs.
-    float lichen = neglect * smoothstep(0.66, 0.8, groundNoise(groundTurn(q) / 0.8 + 6.2)) * (0.4 + 0.6 * grime);
-    albedo *= 1.0 - 0.35 * lichen;
-    // Brushed surface and aggregate, close up only.
-    float grainShows = 1.0 - smoothstep(0.008, 0.05, max(f.x, f.y));
-    if (grainShows > 0.0) albedo *= 1.0 + 0.25 * aggregateGrain(q * 1.6) * grainShows;
+    // Grime and water staining in organic drifts (warped noise, nothing oval or repeating),
+    // gathering towards the joints where water ran.
+    float drift = wornNoise(q / 9.0, 111u);
+    float grime = neglect * smoothstep(-0.15, 0.35, drift + 0.25 * wornNoise(q / 1.7, 113u));
+    float3 albedo = mix(kConcrete, kConcreteDirty, 0.2 * neglect + 0.45 * grime) * tint;
+    // Dark lichen spots, in colonies.
+    float lichen = neglect * smoothstep(0.25, 0.45, wornNoise(q / 0.6, 117u)) * smoothstep(-0.1, 0.3, drift);
+    albedo *= 1.0 - 0.3 * lichen;
+    // The surface weathered down to its aggregate: pale and dark stones a few millimetres to
+    // a couple of centimetres across in the cement, close up only.
+    float grainShows = 1.0 - smoothstep(0.006, 0.04, max(f.x, f.y));
+    if (grainShows > 0.0) {
+        float stones = aggregateGrain(q * 0.8) + 0.6 * aggregateGrain(groundTurn(q) * 2.3 + 1.7);
+        float pits = smoothstep(0.32, 0.42, groundNoise(groundTurn(q) / 0.006 + 2.2));
+        albedo *= (1.0 + (0.35 + 0.25 * neglect) * stones * grainShows) * (1.0 - 0.35 * pits * grainShows);
+    }
 
     // Joints: distance (m) to the nearest panel edge inside the box.
     float2 c = abs(fract(g) - 0.5);
-    float joint = (0.5 - max(c.x, c.y)) * panel;
-    float open = 0.008 + neglect * mix(0.004, 0.02, groundNoise(q / 3.7 + 2.1));
+    float open;
+    float joint = concreteJoint(s.uv, z.b.xy, structureSeed(z), s.upkeep, open);
     float seam = paintSpan(joint, -open, open, footprint);
     // Cracks across some of the old slabs, and corners broken off.
     float crack = 0.0;
@@ -1042,18 +1049,16 @@ float3 concreteSurface(StructureSample s, StructureZoneGPU z, float2 p, float2 q
     float tufts = paintSpan(joint, -open - 0.04, open + 0.04, footprint)
                 * mix(smoothstep(0.5, 0.75, groundNoise(q / 0.25 + 9.4)), 0.35, smoothstep(0.05, 0.3, footprint));
     albedo = mix(albedo, kCrackWall * 1.3, lines);
-    albedo = mix(albedo, kWeeds, 0.6 * weedy * tufts * (1.0 - far) + 0.25 * weedy * far * 0.2);
+    albedo = mix(albedo, kWeeds, 0.6 * weedy * tufts);
     // Spalled slab corners: the slab's corner chipped out, showing aggregate.
-    float corner = length(0.5 - c) * panel;
+    float corner = length(0.5 - c) * kConcretePanel;
     if (neglect > 0.0 && structureUnit(sh * 0x165667b1u) < 0.3 * neglect) {
         float chip = 1.0 - smoothstep(0.15, 0.3, corner + 0.1 * groundNoise(q / 0.06));
         albedo = mix(albedo, kAsphaltBase * 1.4, chip * (1.0 - far));
     }
 
     // The edges crumbled back and grassed over: all round, or only the sides (−1 marks).
-    float edge = z.d.z < 0.0 ? z.b.x - abs(s.uv.x) : min(z.b.y - abs(s.uv.y), z.b.x - abs(s.uv.x));
-    float ragged = neglect * (0.3 + 0.9 * (0.6 * structureNoise(q / 2.3 + 4.4) + 0.4 * structureNoise(q / 0.7 + 9.2)));
-    float lost = ragged - edge;
+    float lost = concreteEdgeLoss(s.uv, structureSeed(z), z, s.upkeep);
     if (lost > -0.3) albedo = mix(albedo, rankGrass(p, footprint), smoothstep(-0.12, 0.12, lost));
     // A faint brushed grain in the normal near the camera.
     float near = 1.0 - smoothstep(5.0, 25.0, distance);

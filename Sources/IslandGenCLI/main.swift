@@ -130,7 +130,7 @@ func planStructures(fine: Grid, coarse: Grid, seaLevel: Float, drainage: Grid?, 
     let (structures, graded) = SitePlanner.plan(context)
     for s in structures {
         print(String(format: "  %@ at (%.0f, %.0f) m, heading %.0f°, %@ m, elevation %.1f m, grade %.2f%%, %@",
-                     s.id, s.x, s.y, s.heading, s.properties["length"] ?? "?", s.elevation, s.slope * 100,
+                     s.id, s.x, s.y, s.heading, s.zones.first.map { String(format: "%.0f × %.0f", 2 * $0.halfLength, 2 * $0.halfWidth) } ?? "?", s.elevation, s.slope * 100,
                      s.properties["designators"] ?? ""))
     }
     if let out {

@@ -512,6 +512,28 @@ float pavementEdgeLoss(float2 uv, float2 seed, float halfWidth, float halfLength
     return ragged - edge;   // > 0: this point's paving is gone
 }
 
+// Concrete slabs (StructureSurface.concrete): 5 m panels laid square to the zone's box.
+// Distance (m) from uv (the zone's own local metres, half extents `extent`) to the nearest
+// joint, and the joint's half opening, kept `upkeep` (sealed when kept, opened when not).
+constant float kConcretePanel = 5.0;
+float concreteJoint(float2 uv, float2 extent, float2 seed, float upkeep, thread float &open) {
+    float2 g = (uv + extent) / kConcretePanel;
+    float2 c = abs(fract(g) - 0.5);
+    open = 0.008 + (1.0 - upkeep) * mix(0.004, 0.02, structureNoise((uv + seed) / 3.7 + 2.1));
+    return (0.5 - max(c.x, c.y)) * kConcretePanel;
+}
+
+// How far the grass has taken concrete's edges back (m; > 0: this point's slab is gone):
+// all round, or only along the sides when the zone's ends meet other paving (d.z < 0).
+float concreteEdgeLoss(float2 uv, float2 seed, StructureZoneGPU z, float upkeep) {
+    float neglect = 1.0 - upkeep;
+    if (neglect <= 0.0) return -1e9;
+    float edge = z.d.z < 0.0 ? z.b.x - abs(uv.x) : min(z.b.y - abs(uv.y), z.b.x - abs(uv.x));
+    float2 q = uv + seed;
+    float ragged = neglect * (0.3 + 0.9 * (0.6 * structureNoise(q / 2.3 + 4.4) + 0.4 * structureNoise(q / 0.7 + 9.2)));
+    return ragged - edge;
+}
+
 // Signed distance (m) to the nearest ground where only grass or nothing may grow: exact
 // within the map's margin (64 m), 1e9 where none is that near.
 float structureClearance(const device uchar *sm, float2 xy) {
