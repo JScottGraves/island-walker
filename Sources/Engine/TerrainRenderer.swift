@@ -104,6 +104,8 @@ public final class TerrainRenderer {
     /// detail (64³), both mipmapped.
     let cloudShapeNoise: MTLTexture
     let cloudDetailNoise: MTLTexture
+    /// The Milky Way's glow over galactic longitude and latitude (bakeGalaxy), for the night sky.
+    let galaxy: MTLTexture
     /// Per-size render targets: terrain depth (read by the cloud march), this frame's
     /// reduced-resolution clouds, and the two cloud histories the resolve ping-pongs between.
     struct Targets {
@@ -337,6 +339,9 @@ public final class TerrainRenderer {
                                                         kernel: try device.makeComputePipelineState(function: shapeBake))
         cloudDetailNoise = try TerrainRenderer.bakeNoise(device: device, queue: queue, side: 64,
                                                          kernel: try device.makeComputePipelineState(function: detailBake))
+        guard let galaxyBake = library.makeFunction(name: "bakeGalaxy") else { throw RendererError.setup("galaxy kernel") }
+        galaxy = try TerrainRenderer.bakeGalaxy(device: device, queue: queue,
+                                                kernel: try device.makeComputePipelineState(function: galaxyBake))
 
         let prepassDesc = MTLDepthStencilDescriptor()
         prepassDesc.depthCompareFunction = .less
@@ -519,6 +524,22 @@ public final class TerrainRenderer {
     }
 
     /// A cube of tiling noise written by `kernel`, with its mip chain.
+    /// ~0.09° texels over galactic latitudes within ±48°: about two pixels at 1440p.
+    static func bakeGalaxy(device: MTLDevice, queue: MTLCommandQueue, kernel: MTLComputePipelineState) throws -> MTLTexture {
+        let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: 4096, height: 1024, mipmapped: false)
+        desc.usage = [.shaderRead, .shaderWrite]
+        desc.storageMode = .private
+        guard let texture = device.makeTexture(descriptor: desc), let cmd = queue.makeCommandBuffer(),
+              let compute = cmd.makeComputeCommandEncoder() else { throw RendererError.setup("galaxy") }
+        compute.setComputePipelineState(kernel)
+        compute.setTexture(texture, index: 0)
+        compute.dispatchThreads(MTLSize(width: 4096, height: 1024, depth: 1), threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
+        compute.endEncoding()
+        cmd.commit()
+        cmd.waitUntilCompleted()
+        return texture
+    }
+
     static func bakeNoise(device: MTLDevice, queue: MTLCommandQueue, side: Int,
                           kernel: MTLComputePipelineState) throws -> MTLTexture {
         let desc = MTLTextureDescriptor()
@@ -1007,7 +1028,8 @@ public final class TerrainRenderer {
                               // Wrapped to keep the noise coordinates small enough for Float.
                               Float(clock.truncatingRemainder(dividingBy: 86_400 * 4)), domainSize),
             cloudWind: SIMD4(Float(cos(windDirection) * windSpeed), Float(sin(windDirection) * windSpeed),
-                             Float(orographicGain), 0),
+                             // The night sky's turn: the sun's hour angle (radians).
+                             Float(orographicGain), Float((hour - 12) * Double.pi / 12)),
             previousViewProjection: previousViewProjection,
             previousCamera: SIMD4(previousCamera, 0),
             frame: SIMD4(Float(width), Float(height), Float(frameNumber % 4096), historyValid ? 1 : 0),
@@ -1137,6 +1159,7 @@ public final class TerrainRenderer {
         shade.setFragmentTextures([skyView, cloudMap, targets.history[next], targets.historyDistance[next], cloudShadows],
                                   range: 0..<5)
         ocean.bindSky(shade)
+        shade.setFragmentTexture(galaxy, index: 20)
         shade.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
 
         shade.setRenderPipelineState(pipeline)
@@ -1203,6 +1226,8 @@ public final class TerrainRenderer {
             resolve.setComputePipelineState(taaPipeline)
             var valid: Float = historyValid ? 1 : 0
             resolve.setBytes(&valid, length: 4, index: 0)
+            var sunHeight = u.sunDirection.z
+            resolve.setBytes(&sunHeight, length: 4, index: 1)
             resolve.setTextures([drawn, motion, targets.depth, history, output], range: 0..<5)
             resolve.dispatchThreads(MTLSize(width: width, height: height, depth: 1), threadsPerThreadgroup: group)
             resolve.endEncoding()

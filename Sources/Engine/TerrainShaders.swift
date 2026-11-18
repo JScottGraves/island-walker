@@ -92,7 +92,7 @@ struct Uniforms {
     float exposure;
     float4 skySH[9];        // SunLight.skySH: sky irradiance for any normal (rgb)
     float4 cloudLayer;      // cloud base, inversion (m above sea), clock (s), domain size (m)
-    float4 cloudWind;       // trade wind velocity xy (m/s), orographic coverage gain, unused
+    float4 cloudWind;       // trade wind velocity xy (m/s), orographic coverage gain, the sky's hour angle (rad)
     float4x4 previousViewProjection; // last frame's, without its jitter (reprojection, motion)
     float4 previousCamera;  // last frame's camera position (xyz)
     float4 frame;           // render target width, height (px), frame number, history valid (0/1)
@@ -1907,6 +1907,206 @@ kernel void sunShadow(constant Uniforms &u [[buffer(0)]],
     out.write(float4(visibility, leaves, 0.0, 0.0), g);
 }
 
+// Night sky: procedural stars and a Milky Way (not real star positions), on a celestial
+// sphere that turns about the pole at Oʻahu's latitude with the hour (u.cloudWind.w).
+constant float kLatitude = 21.4 * M_PI_F / 180.0;
+// The galaxy's frame in celestial coordinates (x towards the sun's hour circle, y 90° east
+// of it, z the pole): its centre at declination −29°, 135° east of the sun, so in autumn
+// it stands over the south early in the evening; its pole at +27°, 61° east.
+constant float3 kGalacticCentre = float3(-0.618450, 0.618450, -0.484810);
+constant float3 kGalacticL90 = float3(-0.660051, -0.074027, 0.747564);
+constant float3 kGalacticPole = float3(0.426442, 0.782330, 0.453991);
+// The baked glow covers galactic latitudes within this (radians); it is dark beyond.
+constant float kGalaxyLatitude = 48.0 * M_PI_F / 180.0;
+// Radiance of the glow's brightest parts per baked unit, of a magnitude 0 star (as a
+// pixel's sum), and of airglow at the zenith: at night's exposure the band comes out
+// near linear 0.008, the galactic centre brighter (Scott: a quarter of the first tuning), and a
+// magnitude 6 star's centre near 0.03.
+constant float kGalaxyRadiance = 0.0016;
+constant float kStarFlux = 1.7;
+constant float kAirglow = 0.0004;
+
+// Stars come out as the sun sinks from 4° to 12.5° below the horizon.
+float nightStarVisibility(float sinSun) { return 1.0 - smoothstep(-0.22, -0.07, sinSun); }
+
+uint nightHash(uint x) {
+    x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16;
+    return x;
+}
+float nightRandom(uint x) { return float(nightHash(x) >> 8) * (1.0 / 16777216.0); }
+float nightRandom3(int3 p) {
+    return nightRandom(uint(p.x) ^ nightHash(uint(p.y) ^ nightHash(uint(p.z) + 0x9e3779b9u)));
+}
+float nightNoise(float3 p) {
+    int3 i = int3(floor(p));
+    float3 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    float x00 = mix(nightRandom3(i), nightRandom3(i + int3(1, 0, 0)), f.x);
+    float x10 = mix(nightRandom3(i + int3(0, 1, 0)), nightRandom3(i + int3(1, 1, 0)), f.x);
+    float x01 = mix(nightRandom3(i + int3(0, 0, 1)), nightRandom3(i + int3(1, 0, 1)), f.x);
+    float x11 = mix(nightRandom3(i + int3(0, 1, 1)), nightRandom3(i + int3(1, 1, 1)), f.x);
+    return mix(mix(x00, x10, f.y), mix(x01, x11, f.y), f.z);
+}
+// Sum of octaves, 0–1 with mean ~0.5.
+float nightFbm(float3 p, int octaves) {
+    float sum = 0.0, amplitude = 0.5, total = 0.0;
+    for (int k = 0; k < octaves; k++) {
+        sum += amplitude * nightNoise(p);
+        total += amplitude;
+        p = p * 2.03 + 17.1;
+        amplitude *= 0.5;
+    }
+    return sum / total;
+}
+// Smooth noise over time, 0–1.
+float nightNoise1(float t, uint seed) {
+    float i = floor(t);
+    float f = t - i;
+    uint k = uint(int(i));
+    return mix(nightRandom(k ^ seed), nightRandom((k + 1u) ^ seed), f * f * (3.0 - 2.0 * f));
+}
+
+// A world direction on the celestial sphere at hour angle `hourAngle` (radians, of the
+// sun's hour circle).
+float3 celestialFromWorld(float hourAngle, float3 d) {
+    float3 meridian = float3(0.0, -sin(kLatitude), cos(kLatitude));
+    float3 east = float3(1.0, 0.0, 0.0);
+    float3 pole = float3(0.0, cos(kLatitude), sin(kLatitude));
+    float3 x = cos(hourAngle) * meridian - sin(hourAngle) * east;
+    float3 y = sin(hourAngle) * meridian + cos(hourAngle) * east;
+    return float3(dot(d, x), dot(d, y), dot(d, pole));
+}
+
+float nightSquare(float x) { return x * x; }
+
+// How densely stars crowd the galaxy's plane (0–1), smooth so it can decide which
+// candidate stars exist; the baked glow adds the clumps and dust.
+float galaxyDensity(float lDeg, float bDeg) {
+    float disk = (0.30 + 0.70 * exp(-nightSquare(lDeg / 55.0)) + 0.30 * exp(-nightSquare((lDeg - 75.0) / 20.0)))
+        * exp(-0.5 * nightSquare(bDeg / 6.5));
+    float bulge = exp(-0.5 * (nightSquare(lDeg / 11.0) + nightSquare(bDeg / 8.0)));
+    return saturate(disk + 0.8 * bulge);
+}
+
+// The galaxy's glow over galactic longitude (x, −180°…180°) and latitude (y, +48° at the
+// top to −48°), rgb in units of kGalaxyRadiance; alpha is how much of the faint stars'
+// light the dust lets through.
+kernel void bakeGalaxy(texture2d<float, access::write> out [[texture(0)]],
+                       uint2 gid [[thread_position_in_grid]]) {
+    uint2 size = uint2(out.get_width(), out.get_height());
+    if (any(gid >= size)) return;
+    float2 uv = (float2(gid) + 0.5) / float2(size);
+    float l = (uv.x - 0.5) * 2.0 * M_PI_F;
+    float b = (0.5 - uv.y) * 2.0 * kGalaxyLatitude;
+    float lDeg = l * 57.29578, bDeg = b * 57.29578;
+    float3 g = float3(cos(b) * cos(l), cos(b) * sin(l), sin(b));
+    float disk = (0.30 + 0.70 * exp(-nightSquare(lDeg / 55.0)) + 0.30 * exp(-nightSquare((lDeg - 75.0) / 20.0)))
+        * exp(-0.5 * nightSquare(bDeg / 6.5));
+    float bulge = 1.1 * exp(-0.5 * (nightSquare(lDeg / 11.0) + nightSquare(bDeg / 8.0)));
+    float halo = 0.10 * exp(-0.5 * nightSquare(bDeg / 18.0));
+    // Star clouds: the band breaks into bright patches and gaps.
+    float clouds = nightFbm(g * 7.0, 6);
+    float clump = nightSquare(saturate(0.2 + 1.4 * clouds));
+    float fine = nightFbm(g * 40.0 + 5.3, 3);
+    float stars = disk * clump * (0.7 + 0.6 * fine);
+    float core = bulge * (0.6 + 0.8 * clouds);
+    // Dust: a rift just above the plane from the centre to l ≈ 80°, wandering, plus dark
+    // patches scattered along the band.
+    float dust = nightFbm(g * 18.0 + 3.7, 5);
+    float wander = 5.0 * (nightFbm(g * 5.0 + 11.0, 4) - 0.5);
+    float rift = exp(-0.5 * nightSquare((bDeg - 1.2 + wander) / 2.2))
+        * smoothstep(-40.0, -15.0, lDeg) * (1.0 - smoothstep(60.0, 95.0, lDeg));
+    float tau = 2.2 * rift * saturate(1.6 * dust - 0.15)
+        + 7.5 * exp(-0.5 * nightSquare(bDeg / 7.0)) * saturate(dust - 0.58);
+    float3 diskColour = float3(0.80, 0.86, 1.00);
+    float3 coreColour = float3(1.00, 0.86, 0.68);
+    float3 colour = mix(diskColour, coreColour, saturate(core / (core + stars + 1e-4)));
+    colour *= (stars + core + halo) * exp(-tau * float3(0.75, 1.0, 1.3));
+    // Unresolved stars give the glow a fine grain.
+    colour *= 0.8 + 0.4 * nightRandom(gid.x * 7919u + gid.y * 104729u);
+    out.write(float4(colour, saturate(clump * exp(-0.8 * tau))), gid);
+}
+
+// One layer of stars: at most one per cell of an equal-angle cube map over the celestial
+// sphere (`cells` per face edge), kept with `probability`, magnitudes following the
+// naked-eye counts (ten times more for every 2.2 fainter) down to `faintest`. Each lights
+// the pixels within about two pixels (`pixel` is a pixel's angle) and twinkles by
+// `scintillation`, in colour near the horizon (`chroma`).
+float3 starLayer(float3 c, float cells, uint seed, float probability, float faintest,
+                 float pixel, float clock, float scintillation, float chroma) {
+    float3 a = abs(c);
+    uint face;
+    float2 uv;
+    if (a.x >= a.y && a.x >= a.z) { face = c.x > 0.0 ? 0u : 1u; uv = c.yz / a.x; }
+    else if (a.y >= a.z) { face = c.y > 0.0 ? 2u : 3u; uv = c.xz / a.y; }
+    else { face = c.z > 0.0 ? 4u : 5u; uv = c.xy / a.z; }
+    float2 q = (atan(uv) * (2.0 / M_PI_F) + 0.5) * cells - 0.5;
+    int2 base = int2(floor(q));
+    float3 sum = 0.0;
+    for (int k = 0; k < 4; k++) {
+        int2 cell = clamp(base + int2(k & 1, k >> 1), int2(0), int2(int(cells) - 1));
+        uint h = nightHash(seed * 0x9e3779b9u ^ nightHash(face * 0x85ebca6bu ^ nightHash(uint(cell.x) | (uint(cell.y) << 16))));
+        if (float(h >> 8) * (1.0 / 16777216.0) >= probability) continue;
+        float r1 = nightRandom(h ^ 0x68e31da4u), r2 = nightRandom(h ^ 0xb5297a4du);
+        float r3 = nightRandom(h ^ 0x1b56c4e9u), r4 = nightRandom(h ^ 0x2f1e7a63u), r5 = nightRandom(h ^ 0x7c3b5f21u);
+        float2 s = tan(((float2(cell) + float2(r1, r2)) / cells - 0.5) * (M_PI_F / 2.0));
+        float3 d = face < 2u ? float3(face == 0u ? 1.0 : -1.0, s.x, s.y)
+                 : face < 4u ? float3(s.x, face == 2u ? 1.0 : -1.0, s.y)
+                             : float3(s.x, s.y, face == 4u ? 1.0 : -1.0);
+        float r = length(c - normalize(d)) / pixel;
+        if (r > 4.5) continue;
+        float magnitude = max(faintest + log10(max(r3, 1e-7)) / 0.45, -1.5);
+        float flux = kStarFlux * exp2(-1.3288 * magnitude);
+        // Colour from the star's temperature: mostly white, some blue, some orange.
+        float3 tint = r4 < 0.2 ? mix(float3(0.72, 0.82, 1.0), float3(1.0), r4 * 5.0)
+                    : r4 < 0.75 ? mix(float3(1.0), float3(1.0, 0.92, 0.80), (r4 - 0.2) / 0.55)
+                                : mix(float3(1.0, 0.92, 0.80), float3(1.0, 0.76, 0.55), (r4 - 0.75) * 4.0);
+        // Scintillation: brightness flickering a few times a second, the colours apart
+        // where the light crosses more air.
+        float t = clock * (2.0 + 4.0 * r5) + r1 * 97.0;
+        float n = nightNoise1(t, h);
+        float3 twinkle = 1.0 + scintillation * (2.0 * mix(float3(n),
+            float3(n, nightNoise1(t + 31.7, h), nightNoise1(t + 63.1, h)), chroma) - 1.0);
+        // A filtered point (σ 0.6 px) holding the star's light, and a faint glow around it.
+        float core = exp(-0.5 * r * r / 0.36) * (1.0 / (2.0 * M_PI_F * 0.36));
+        float glow = 0.08 * exp(-0.5 * r * r / 2.25) * (1.0 / (2.0 * M_PI_F * 2.25));
+        sum += tint * twinkle * (flux * (core + glow));
+    }
+    return sum;
+}
+
+// The night sky's light along `dir` (world, unit), before clouds: airglow, the galaxy's
+// glow and the stars, dimmed by the air towards the horizon.
+float3 nightSky(constant Uniforms &u, texture2d<float> galaxy, float3 dir, float pixel) {
+    float visible = nightStarVisibility(u.sunDirection.z);
+    float above = smoothstep(0.0, 0.01, dir.z);
+    if (visible <= 0.0 || above <= 0.0) return 0.0;
+    float h = saturate(dir.z);
+    // Air mass (Kasten & Young) and extinction, the blue lost first.
+    float airmass = 1.0 / (h + 0.50572 * pow(asin(h) * 57.29578 + 6.07995, -1.6364));
+    float3 extinction = exp(-airmass * float3(0.11, 0.17, 0.28));
+    float3 c = celestialFromWorld(u.cloudWind.w, dir);
+    float3 g = float3(dot(c, kGalacticCentre), dot(c, kGalacticL90), dot(c, kGalacticPole));
+    float l = atan2(g.y, g.x), b = asin(clamp(g.z, -1.0, 1.0));
+    float4 glow = float4(0.0, 0.0, 0.0, 1.0);
+    if (abs(b) < kGalaxyLatitude) {
+        constexpr sampler s(filter::linear, s_address::repeat, t_address::clamp_to_edge);
+        glow = galaxy.sample(s, float2(0.5 + l / (2.0 * M_PI_F), 0.5 - 0.5 * b / kGalaxyLatitude), level(0.0));
+    }
+    // The galaxy's glow needs a darker sky than the brighter stars.
+    float3 light = glow.rgb * (kGalaxyRadiance * (1.0 - smoothstep(-0.31, -0.20, u.sunDirection.z)));
+    float clock = fmod(u.cloudLayer.z, 997.0);
+    float scintillation = 0.15 + 0.5 * pow(1.0 - h, 3.0);
+    float chroma = pow(1.0 - h, 4.0);
+    light += starLayer(c, 200.0, 1u, 0.03, 6.3, pixel, clock, scintillation, chroma);
+    // Fainter stars crowd the galaxy's band, behind its dust.
+    float density = galaxyDensity(l * 57.29578, b * 57.29578);
+    light += glow.a * starLayer(c, 400.0, 2u, 0.25 * density, 8.0, pixel, clock, scintillation, chroma);
+    // Airglow brightens towards the horizon, where the line of sight crosses more of it.
+    float3 air = kAirglow * float3(0.55, 0.70, 1.0) * (1.0 + 2.5 * pow(1.0 - h, 4.0));
+    return (light * extinction + air) * (visible * above);
+}
+
 // Sky: one full-screen triangle at the far plane, drawn after the terrain's depth prepass
 // so it shades only where no terrain covers it.
 struct SkyOut {
@@ -1927,10 +2127,17 @@ fragment float4 skyFragment(SkyOut in [[stage_in]], constant Uniforms &u [[buffe
                             texture2d<float> clouds [[texture(2)]],
                             texture2d<float> cloudDistance [[texture(3)]],
                             constant OceanParams &ocean [[buffer(7)]],
-                            texture2d<float> environment [[texture(8)]]) {
+                            texture2d<float> environment [[texture(8)]],
+                            texture2d<float> galaxy [[texture(20)]]) {
     float4 far = u.inverseViewProjection * float4(in.ndc, 1.0, 1.0);
     float3 dir = normalize(far.xyz / far.w);
-    float3 color = skyRadiance(skyView, dir);
+    // Stars are drawn where they'd fall without this frame's jitter: they're filtered
+    // points already, so they hold still for the TAA (which passes the night sky through).
+    float2 still = in.ndc + float2(-2.0 * u.jitter.x / u.frame.x, 2.0 * u.jitter.y / u.frame.y);
+    float4 starFar = u.inverseViewProjection * float4(still, 1.0, 1.0);
+    float3 starDir = normalize(starFar.xyz / starFar.w);
+    float pixel = length(fwidth(starDir)) * 0.7071;
+    float3 color = skyRadiance(skyView, dir) + nightSky(u, galaxy, starDir, pixel);
     if (dir.z < 0.0) {
         // The sea past the ocean mesh (beyond the far plane, just under the horizon): the
         // ocean's own shading with every wave turned to slope variance, so the two meet.
@@ -1997,9 +2204,22 @@ kernel void motionVectors(constant MotionParams &m [[buffer(0)]],
 }
 
 // The upscaled frame into the drawable (or a snapshot's target), which applies its sRGB
-// encoding on write.
+// encoding on write. Dithered by about one 8-bit step first, so dark smooth gradients
+// (night clouds and sky) don't break into flat bands.
+float3 toSrgb(float3 c) {
+    return select(1.055 * pow(c, 1.0 / 2.4) - 0.055, 12.92 * c, c <= 0.0031308);
+}
+float3 fromSrgb(float3 c) {
+    return select(pow((c + 0.055) / 1.055, 2.4), c / 12.92, c <= 0.04045);
+}
 fragment float4 presentFragment(SkyOut in [[stage_in]], texture2d<float, access::read> frame [[texture(0)]]) {
-    return float4(frame.read(uint2(in.position.xy)).rgb, 1.0);
+    float3 c = max(frame.read(uint2(in.position.xy)).rgb, 0.0);
+    // Triangular noise (−1…1 steps) from two interleaved-gradient patterns.
+    float2 p = in.position.xy;
+    float a = fract(52.9829189 * fract(dot(p, float2(0.06711056, 0.00583715))));
+    float b = fract(52.9829189 * fract(dot(p + float2(47.0, 17.0), float2(0.06711056, 0.00583715))));
+    float3 srgb = saturate(toSrgb(c) + (a + b - 1.0) / 255.0);
+    return float4(fromSrgb(srgb), 1.0);
 }
 // Temporal antialiasing at the output size (TerrainRenderer.Antialiasing.temporal): the
 // jittered frame blended into the history at the place each pixel's motion says it was.
@@ -2044,6 +2264,7 @@ float3 historyCatmullRom(texture2d<float> tex, float2 uv, float2 size) {
 constant float kTaaBlend = 0.1;
 
 kernel void taaResolve(constant float &historyValid [[buffer(0)]],
+                       constant float &sunHeight [[buffer(1)]],
                        texture2d<float, access::read> current [[texture(0)]],
                        texture2d<float, access::read> motion [[texture(1)]],
                        depth2d<float, access::read> depth [[texture(2)]],
@@ -2084,6 +2305,9 @@ kernel void taaResolve(constant float &historyValid [[buffer(0)]],
     float3 h = toYCoCg(historyCatmullRom(history, uv, float2(size)));
     h = clamp(h, m1 - 1.25 * sigma, m1 + 1.25 * sigma);
     float blend = mix(kTaaBlend, 0.5, saturate(length(moved * float2(size)) / 25.0));
+    // Where only sky surrounds the pixel at night, this frame as it is: the stars hold still
+    // and are filtered already (skyFragment), and their twinkle is faster than the history.
+    if (nearest >= 1.0) blend = mix(blend, 1.0, nightStarVisibility(sunHeight));
     out.write(float4(mix(fromYCoCg(h), c, blend), 1.0), g);
 }
 """

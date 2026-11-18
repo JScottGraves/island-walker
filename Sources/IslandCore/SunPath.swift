@@ -55,6 +55,10 @@ public enum SunPath {
     /// and noon renders read as dusk without it.
     static let skyViewGain = 1.4
 
+    /// Irradiance (renderer units) of the night sky's ambient: at night's exposure an 18%
+    /// ground comes out near linear 0.005 (Scott: dimmer, barely visible).
+    static let nightAmbient = 0.0028
+
     static func luminance(_ c: RGB) -> Double { 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b }
 
     /// Horizontal illuminance the eye adapts to; the reference sun's is the fixed point.
@@ -83,7 +87,13 @@ public enum SunPath {
         // Adapt to the square root of the change, capped so night isn't amplified to grey.
         let level = adaptationLevel(sun: sun, sky: sky, sinElevation: d.z)
         let exposure = exposureKey * Swift.min(8, Swift.max(0.8, pow(referenceLevel / Swift.max(level, 1e-5), 0.5)))
-        return SunLight(direction: d, sun: sun, sky: sky, skySH: skySH, skyView: skyView, exposure: exposure)
+        // Starlight and airglow once the stars are out (nightSky in the shaders): a faint blue
+        // ambient so the land at night reads as dark ground, not as nothing. Kept out of the
+        // exposure, which night already caps.
+        let night = 1 - Look.smoothstep(-0.22, -0.07, d.z)
+        var lit = skySH
+        lit[0] = lit[0] + RGB(0.6, 0.7, 1.0) * (nightAmbient * night / 0.282095)
+        return SunLight(direction: d, sun: sun, sky: sky, skySH: lit, skyView: skyView, exposure: exposure)
     }
 
     public static func light(hour: Double, day: Int = defaultDay) -> SunLight {
