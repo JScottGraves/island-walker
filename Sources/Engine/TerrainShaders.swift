@@ -1010,7 +1010,9 @@ float3 concreteSurface(StructureSample s, StructureZoneGPU z, float2 p, float2 q
     int2 slab = int2(floor(g));
     uint sh = structureHash(slab + int2(z.a.xy * 0.1), 61u);
     // Each slab its own shade (cement batch, curing), grime tens of metres across.
-    float tint = 0.9 + 0.2 * structureUnit(sh);
+    // Each slab its own shade (cement batch, curing): faint, and gone once several slabs share
+    // a pixel's worth of view, so the apron doesn't read as a checkerboard from a distance.
+    float tint = 1.0 + 0.06 * (structureUnit(sh) - 0.5) * (1.0 - smoothstep(0.01, 0.05, footprint));
     // Grime and water staining in organic drifts (warped noise, nothing oval or repeating),
     // gathering towards the joints where water ran.
     float drift = wornNoise(q / 9.0, 111u);
