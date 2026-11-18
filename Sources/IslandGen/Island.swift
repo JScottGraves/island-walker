@@ -48,11 +48,18 @@ public enum Island {
         /// seeds 7, 42 and 123. 0 disables it.
         public var flexure: Double = 20
         public var flexureDistance: Double = 1500
+        /// Re-impose an Oahu-like reef and shelf measured from the eroded shoreline in place
+        /// of the wave-cut platform erosion leaves just below sea level (see `shelve`).
+        public var shelf = true
         public init() {}
     }
 
     public struct Result {
         public var height: Grid
+        /// `height` before `shelve`: the same land, over the wave-cut platform erosion left.
+        /// Refine shapes the land and coastline from this, so the coast at 10 m is the same
+        /// with or without the shelf (see Refine.refine's `seaFloor`).
+        public var unshelved: Grid
         public var hardness: Grid
         public var rain: Grid
         public var drainageArea: Grid
@@ -108,7 +115,11 @@ public enum Island {
         if p.steps == 0 || p.flexure > 0 {
             PriorityFlood.fill(&height, seaLevel: erosion.seaLevel)
         }
-        return Result(height: height, hardness: base.hardness, rain: rain, drainageArea: area, params: p, scarp: scarp)
+        let unshelved = height
+        if p.shelf {
+            phase("shelf") { Self.shelve(&height, seaLevel: erosion.seaLevel, seed: p.seed, windDirection: p.climate.windDirection) }
+        }
+        return Result(height: height, unshelved: unshelved, hardness: base.hardness, rain: rain, drainageArea: area, params: p, scarp: scarp)
     }
 
     /// Raises land by `lift` × min(1, distance to the sea / `distance`), using a chamfer

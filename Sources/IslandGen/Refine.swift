@@ -56,6 +56,13 @@ public enum Refine {
         public var gentleAlong: Double = 400
         public var gentleRoughness: Double = 0.5
         /// Drainage area (m²) over which the residual fades out into a channel bed.
+        /// With a separate sea floor (`refine`'s `seaFloor`), the water deepens from the
+        /// waterline at no more than this slope (rise over run; 1:67, varying ±40% along the
+        /// coast: Oahu has as much water under 0.5 m as under 0.5–1 m, on beaches and reef flats), so
+        /// the surf's bore and swash have their first decimetres of water (only within ~100 m
+        /// of the shore; the cap opens up beyond it). Without it the
+        /// coast refined from the unshelved grid would meet the shelf's water in a step.
+        public var shoreSlope: Double = 0.015
         public var channelStart: Double = 1e5
         public var channelFull: Double = 1e7
         public var seed: UInt64 = 0
@@ -66,9 +73,14 @@ public enum Refine {
     /// downslope direction, so no coordinate frame is bent across the island.
     static let orientations = 6
 
-    public static func refine(_ h: Grid, drainageArea area: Grid, seaLevel: Float, params p: Params = Params()) -> Grid {
+    /// - Parameter seaFloor: if given, the sea floor is interpolated from it instead of from
+    ///   `h`, which then only shapes the land and the coastline (`Island.Result.unshelved`:
+    ///   the shelf's deeper water must not pull the refined coast down).
+    public static func refine(_ h: Grid, drainageArea area: Grid, seaLevel: Float, params p: Params = Params(),
+                              seaFloor: Grid? = nil) -> Grid {
         precondition(p.factor >= 1)
         precondition(area.width == h.width && area.height == h.height)
+        precondition(seaFloor.map { $0.width == h.width && $0.height == h.height } ?? true)
         let f = p.factor
         let fineCell = h.cellSize / Double(f)
         var fine = Grid(width: h.width * f, height: h.height * f, cellSize: fineCell)
@@ -164,7 +176,7 @@ public enum Refine {
                         let isLand = h.sample(x: cx, y: cy) > seaLevel
                         let base = h.sampleCubic(x: cx, y: cy)
                         let above = Swift.max(0, Double(base - seaLevel))
-                        var value = isLand ? base : Swift.min(base, seaLevel - 0.01)
+                        var value = isLand ? base : Swift.min(seaFloor?.sampleCubic(x: cx, y: cy) ?? base, seaLevel - 0.01)
                         if isLand {
                             let gx = Double(gradX.sample(x: cx, y: cy)), gy = Double(gradY.sample(x: cx, y: cy))
                             let s = (gx * gx + gy * gy).squareRoot()
@@ -213,6 +225,20 @@ public enum Refine {
                         out[y * width + x] = value
                     }
                 }
+            }
+        }
+        if seaFloor != nil && p.shoreSlope > 0 {
+            let values = fine.values
+            let d = ShelfProfile.distanceTransform(width: width, height: rowCount) { values[$0] > seaLevel }
+            let beachSeed = Hash.mix(p.seed ^ 0x4245_4143_48)
+            for i in 0..<fine.count where values[i] <= seaLevel {
+                // Only the beach: past 60 m the cap opens up quickly (×20 by 150 m).
+                let metres = Swift.max(0.5, Double(d[i]) - 0.5) * fineCell
+                guard metres < 200 else { continue }
+                let px = (Double(i % width) + 0.5) * fineCell, py = (Double(i / width) + 0.5) * fineCell
+                let slope = p.shoreSlope * exp(0.7 * Noise.fbm(px / 800, py / 800, seed: beachSeed, octaves: 3))
+                let ramp = seaLevel - Float(slope * metres * exp(Swift.max(0, metres - 60) / 30))
+                fine.values[i] = Swift.min(seaLevel - 0.01, Swift.max(values[i], ramp))
             }
         }
         PriorityFlood.fill(&fine, seaLevel: seaLevel)

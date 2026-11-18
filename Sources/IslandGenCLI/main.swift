@@ -8,12 +8,14 @@ import IslandGen
 
 func usage() -> Never {
     print("""
-    usage: islandgen --score HEIGHT.r32 --cell METRES [--width N] [--sea-level M]
+    usage: islandgen --shelf BUNDLE [BUNDLE ...]
+             print the offshore depth profile of each island bundle's height (at half resolution)
+           islandgen --score HEIGHT.r32 --cell METRES [--width N] [--sea-level M]
              score an existing float32 heightfield (square unless --width; pits are filled first) and print realism metrics
            islandgen --import HEIGHT.r32 --cell METRES --bundle DIR [--sea-level M] [--out DIR] [--refine N] [--fine FILE] [--structures on|off] [refine options]
              write a square float32 heightfield, such as the real Oahu DEM, as an island bundle (height, rain and plant communities; heights kept as they are,
              or refined N times finer with --refine), and with --out a biomes.png preview and biomes.json
-           islandgen [--seed N] [--size N] [--steps N] [--domain METRES] [--deposition G] [--slope-exponent N] [--reference-slope S] [--critical-slope S] [--knickpoint-slope S] [--waterfall-retreat R] [--headwall-retreat R] [--waterfall-min-q Q] [--land-exponent P] [--coast-slope A] [--rift-descent D] [--saddle-fill M] [--pond-time F] [--pond-hardness H] [--pond-share S] [--wave-retreat R] [--leeward-waves S] [--uplift U] [--flexure M] [--flexure-distance M] [--refine N] [--bundle DIR] [--structures on|off] [--profile] [--out DIR]
+           islandgen [--seed N] [--size N] [--steps N] [--domain METRES] [--deposition G] [--slope-exponent N] [--reference-slope S] [--critical-slope S] [--knickpoint-slope S] [--waterfall-retreat R] [--headwall-retreat R] [--waterfall-min-q Q] [--land-exponent P] [--coast-slope A] [--rift-descent D] [--saddle-fill M] [--pond-time F] [--pond-hardness H] [--pond-share S] [--wave-retreat R] [--leeward-waves S] [--uplift U] [--flexure M] [--flexure-distance M] [--sea-shelf on|off] [--refine N] [--bundle DIR] [--structures on|off] [--profile] [--out DIR]
       --seed    random seed (default 1)
       --size    grid samples per side (default 1024)
       --steps   erosion time steps (default 400)
@@ -36,6 +38,7 @@ func usage() -> Never {
       --leeward-waves      share of wave retreat on coasts facing away from the wind (default 0.2)
       --uplift             uplift in m/yr, negative for subsidence (default 0)
       --flexure            flexural uplift in metres after erosion, growing inland from the coast (default 20)
+      --sea-shelf          on: re-impose Oahu's reef and shelf from the eroded shoreline in place of the wave-cut platform (default on)
       --refine             also refine the height N times finer (8 takes 1024² at 78 m to 8192² at 10 m) with detail and pit filling
     refine options (with --refine, here or with --import; --fine FILE also writes the refined height):
       --detail             RMS flute amplitude in metres per unit of --flute-base plus coarse slope (rise/run) on typically dissected ground (default 10)
@@ -148,7 +151,7 @@ func planStructures(fine: Grid, coarse: Grid, seaLevel: Float, drainage: Grid?, 
     return (structures, graded)
 }
 
-func parseStructures(_ value: String) -> Bool {
+func parseOnOff(_ value: String) -> Bool {
     switch value {
     case "on": return true
     case "off": return false
@@ -157,6 +160,23 @@ func parseStructures(_ value: String) -> Bool {
 }
 var timer: PhaseTimer?
 var args = CommandLine.arguments.dropFirst()
+
+// Shelf mode: how the sea floor falls away from the shore, for any island bundle.
+if args.first == "--shelf" {
+    args.removeFirst()
+    guard !args.isEmpty else { usage() }
+    for path in args {
+        do {
+            let bundle = try IslandBundle(url: URL(fileURLWithPath: path))
+            let level = (try bundle.channel("height")).size > 4096 ? 1 : 0
+            let h = try bundle.grid("height", level: level)
+            print(ShelfProfile.measure(h, seaLevel: Float(bundle.manifest.seaLevel)).table(path))
+        } catch {
+            print("\(path): \(error)"); exit(1)
+        }
+    }
+    exit(0)
+}
 
 // Scoring mode: realism metrics for any heightfield, such as a real DEM.
 if args.first == "--score" {
@@ -200,7 +220,7 @@ if args.first == "--import" {
         case "--bundle": bundleDir = value
         case "--sea-level": seaLevel = parsed(Float(value))
         case "--out": previewDir = value
-        case "--structures": placeStructures = parseStructures(value)
+        case "--structures": placeStructures = parseOnOff(value)
         default: if !parseRefine(flag, value) { usage() }
         }
     }
@@ -296,8 +316,9 @@ while let flag = args.popFirst() {
     case "--uplift": params.erosion.uplift = parsed(Double(value))
     case "--flexure": params.flexure = parsed(Double(value))
     case "--flexure-distance": params.flexureDistance = parsed(Double(value))
+    case "--sea-shelf": params.shelf = parseOnOff(value)
     case "--bundle": bundleDir = value
-    case "--structures": placeStructures = parseStructures(value)
+    case "--structures": placeStructures = parseOnOff(value)
     case "--out": outDir = value
     default: if !parseRefine(flag, value) { usage() }
     }
@@ -429,6 +450,7 @@ let info: [String: Any] = [
     "leewardWaves": params.erosion.leewardWaves,
     "uplift": params.erosion.uplift,
     "flexure": params.flexure,
+    "seaShelf": params.shelf,
     "flexureDistance": params.flexureDistance,
     "landAreaKm2": (landKm2 * 10).rounded() / 10,
     "maxHeightMetres": Double(island.height.range.max),
@@ -452,7 +474,8 @@ if refineFactor > 1 {
     refineParams.factor = refineFactor
     refineParams.seed = params.seed
     let refineStart = Date()
-    let fine = Refine.refine(island.height, drainageArea: island.drainageArea, seaLevel: sea, params: refineParams)
+    let fine = Refine.refine(island.unshelved, drainageArea: island.drainageArea, seaLevel: sea, params: refineParams,
+                             seaFloor: island.height)
     print(String(format: "refined to %d² at %.1f m in %.1f s", fine.width, fine.cellSize, Date().timeIntervalSince(refineStart)))
     try Preview.writeRaw(fine, to: out.appendingPathComponent("height-fine.r32"))
     bundleHeight = fine
