@@ -87,6 +87,9 @@ final class Coordinator: NSObject, MTKViewDelegate {
     var rWasDown = false
     /// Where R puts the walker: the `airstrip` snapshot view, read from the bundle once.
     lazy var airstripView = Snapshots.structureViews().first { $0.name == "airstrip" }
+    /// The buildings' walls, which the walker can't walk through.
+    lazy var buildingWalls: [(structure: Structure, walls: [BuildingWall])] =
+        IslandSource.structures().compactMap { s in Hangar(s).map { (s, $0.walls()) } }
     var savedParallax: Float = 1
     /// Local solar time of day and day of year; the sun follows them.
     var hour = 9.5
@@ -158,6 +161,14 @@ final class Coordinator: NSObject, MTKViewDelegate {
 
     func ground(_ x: Double, _ y: Double) -> Double {
         renderer?.groundHeight(x: x, y: y) ?? 0
+    }
+
+    /// Within a body's half width (0.3 m) of a building's wall.
+    func blocked(_ x: Double, _ y: Double) -> Bool {
+        buildingWalls.contains { b in
+            let q = b.structure.local(x: x, y: y)
+            return b.walls.contains { $0.distance(u: q.u, v: q.v) < $0.halfThickness + 0.3 }
+        }
     }
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
@@ -241,7 +252,7 @@ final class Coordinator: NSObject, MTKViewDelegate {
             flyHeight = Swift.max(flyHeight, ground(w.x, w.y) + 2)
             w.z = flyHeight
         } else {
-            w.update(forward: forward, strafe: strafe, running: view.shift, dt: dt, ground: ground)
+            w.update(forward: forward, strafe: strafe, running: view.shift, dt: dt, ground: ground, blocked: blocked)
         }
         walker = w
 

@@ -9,6 +9,7 @@ import IslandCore
 /// Built once at load from the bundle's structures into one GPU buffer:
 ///
 ///     header (32 B) | zones (64 B each) | bins (uint2 offset, count) | zone indices (uint)
+///     | buildings (from a 16 B aligned offset the header gives: a count, then 48 B each)
 ///
 /// A zone is an oriented box with what the ground is, what grows on it and whether it is
 /// graded. Every structure's zones are listed smallest first (IslandCore.StructureMap.zoneOrder:
@@ -69,6 +70,19 @@ public struct StructureLookup: Sendable {
     public private(set) var zones: [Zone] = []
     public private(set) var bins: [SIMD2<UInt32>] = []
     public private(set) var indices: [UInt32] = []
+    /// The structures that stand up off the ground (Buildings.swift), for the light under
+    /// their roofs and the ground cover kept out of them (BuildingGPU in MSL).
+    public private(set) var buildings: [Building] = []
+
+    /// One building as the GPU reads it (BuildingGPU, three float4).
+    public struct Building: Sendable, Equatable {
+        /// Centre x, y (m); unit +u axis x, y.
+        public var a: SIMD4<Float>
+        /// Half span (along u), half depth (along v), floor height at the centre, eaves height above it (m).
+        public var b: SIMD4<Float>
+        /// The arch's rise above the eaves, the side its door faces (±1 along v), the door's half width and height (m).
+        public var c: SIMD4<Float>
+    }
     public private(set) var origin = SIMD2<Float>(0, 0)
     public private(set) var binsX = 0, binsY = 0
     public let binSize: Float
@@ -97,6 +111,13 @@ public struct StructureLookup: Sendable {
         }
         for (k, s) in structures.enumerated() where s.embankment > 0 && s.gradedHalfLength > 0 {
             zones.append(zone(k, s.gradedHalfLength + s.embankment, s.gradedHalfWidth + s.embankment, .natural, .grassOnly, false))
+        }
+        for s in structures {
+            guard let h = Hangar(s) else { continue }
+            let axis = s.axis
+            buildings.append(Building(a: SIMD4(Float(s.x), Float(s.y), Float(axis.x), Float(axis.y)),
+                                      b: SIMD4(Float(h.span / 2), Float(h.depth / 2), Float(s.elevation), Float(h.eaves)),
+                                      c: SIMD4(Float(h.rise), Float(h.doorSide), Float(h.doorWidth / 2), Float(h.doorHeight))))
         }
         guard !zones.isEmpty else { return }
         // Each zone's bounding box, grown by the margin.
@@ -154,11 +175,18 @@ public struct StructureLookup: Sendable {
         var out = [UInt8]()
         out.reserveCapacity(Self.headerBytes + zones.count * 64 + bins.count * 8 + indices.count * 4)
         func put<T>(_ value: T) { withUnsafeBytes(of: value) { out += $0 } }
-        put(UInt32(zones.count)); put(UInt32(binsX)); put(UInt32(binsY)); put(UInt32(0))
+        let tail = Self.headerBytes + zones.count * 64 + bins.count * 8 + indices.count * 4
+        let buildingOffset = buildings.isEmpty ? 0 : (tail + 15) / 16 * 16
+        put(UInt32(zones.count)); put(UInt32(binsX)); put(UInt32(binsY)); put(UInt32(buildingOffset))
         put(origin.x); put(origin.y); put(binSize); put(margin)
         for z in zones { put(z.a); put(z.b); put(z.c); put(z.d) }
         for b in bins { put(b) }
         for i in indices { put(i) }
+        if !buildings.isEmpty {
+            out += [UInt8](repeating: 0, count: buildingOffset - out.count)
+            put(UInt32(buildings.count)); put(UInt32(0)); put(UInt32(0)); put(UInt32(0))
+            for b in buildings { put(b.a); put(b.b); put(b.c) }
+        }
         return out
     }
 
@@ -246,7 +274,7 @@ struct StructureMapHeader {
     uint zoneCount;
     uint binsX;
     uint binsY;
-    uint pad;
+    uint buildings;     // byte offset of the building table, 0 for none
     float2 origin;
     float binSize;
     float margin;
@@ -548,6 +576,66 @@ float structureClearance(const device uchar *sm, float2 xy) {
         best = min(best, structureBoxDistance(structureLocal(z, xy), z.b.xy));
     }
     return best;
+}
+
+// ---- Buildings (Buildings.swift): what stands on a structure's ground ----
+struct BuildingGPU {
+    float4 a;   // centre xy, +u axis xy
+    float4 b;   // half span (u), half depth (v), floor height, eaves height above the floor
+    float4 c;   // arch rise above the eaves, door side (±1 along v), door half width, door height
+};
+
+uint structureBuildingCount(const device uchar *sm) {
+    const device StructureMapHeader &h = *(const device StructureMapHeader *)sm;
+    return h.buildings == 0u ? 0u : *(const device uint *)(sm + h.buildings);
+}
+
+BuildingGPU structureBuilding(const device uchar *sm, uint i) {
+    const device StructureMapHeader &h = *(const device StructureMapHeader *)sm;
+    return ((const device BuildingGPU *)(sm + h.buildings + 16u))[i];
+}
+
+// (along, across) metres from a building's centre.
+float2 buildingLocal(BuildingGPU g, float2 xy) {
+    float2 d = xy - g.a.xy;
+    return float2(dot(d, g.a.zw), d.x * g.a.w - d.y * g.a.z);
+}
+
+// The barrel roof's height above the floor `s` metres across the span from its middle.
+float buildingRoof(BuildingGPU g, float s) {
+    float h = g.b.x, rise = g.c.x;
+    float r = (h * h + rise * rise) / (2.0 * rise);
+    return g.b.w + rise - r + sqrt(max(r * r - s * s, 0.0));
+}
+
+// True inside a building's walls (xy only).
+bool buildingCovers(const device uchar *sm, float2 xy) {
+    uint n = structureBuildingCount(sm);
+    for (uint i = 0u; i < n; i++) {
+        BuildingGPU g = structureBuilding(sm, i);
+        float2 q = buildingLocal(g, xy);
+        if (abs(q.x) < g.b.x && abs(q.y) < g.b.y) return true;
+    }
+    return false;
+}
+
+// How much of the sky and of the lit ground around reaches a point (1 in the open): under a
+// roof, what the door lets in, falling off with the distance in from it, and a little more
+// through the windows and the gaps in the roof.
+float buildingShelter(const device uchar *sm, float3 p) {
+    uint n = structureBuildingCount(sm);
+    for (uint i = 0u; i < n; i++) {
+        BuildingGPU g = structureBuilding(sm, i);
+        float2 q = buildingLocal(g, p.xy);
+        if (abs(q.x) > g.b.x - 0.01 || abs(q.y) > g.b.y - 0.01) continue;
+        if (p.z - g.b.z > buildingRoof(g, q.x) - 0.01) continue;
+        float inward = max(g.b.y - g.c.y * q.y, 0.0);
+        // Beside the door's edges the piers shade a little more.
+        float edge = smoothstep(g.c.z - 2.0, g.c.z + 1.0, abs(q.x));
+        float door = 1.0 / (1.0 + (inward / 6.0) * (inward / 6.0) + 2.0 * edge * saturate(inward / 3.0));
+        return max(door, 0.07);
+    }
+    return 1.0;
 }
 
 """

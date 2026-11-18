@@ -181,6 +181,32 @@ final class StructureMapTests: XCTestCase {
         XCTAssertGreaterThan(lookup.clearance(x: Float(s.x + 5000), y: Float(s.y)), 30)
     }
 
+    /// A hangar's record follows the bins at a 16-byte boundary the header points to.
+    func testBuildingTableFollowsTheBins() {
+        let runway = structures[0]
+        let (x, y) = runway.world(u: 300, v: 95)
+        let hangar = Structure(id: "hangar-1", kind: "hangar", x: x, y: y, heading: 61, elevation: 26, slope: 0.0141,
+                               zones: [StructureZone(name: "hangar floor", halfLength: 14, halfWidth: 18, surface: .concrete,
+                                                     plants: .none, graded: true)],
+                               properties: ["door": "-1", "upkeep": "0.8"])
+        let lookup = StructureLookup(structures: structures + [hangar])
+        XCTAssertEqual(lookup.buildings.count, 1)
+        XCTAssertEqual(lookup.buildings[0].b, SIMD4(14, 18, 26, 4.8))
+        XCTAssertEqual(lookup.buildings[0].c.y, -1)
+        let bytes = lookup.bytes()
+        let offset = bytes.withUnsafeBytes { $0.load(fromByteOffset: 12, as: UInt32.self) }
+        XCTAssertEqual(offset % 16, 0)
+        XCTAssertGreaterThanOrEqual(Int(offset), StructureLookup.headerBytes + lookup.zones.count * 64
+                                    + lookup.bins.count * 8 + lookup.indices.count * 4)
+        XCTAssertEqual(bytes.count, Int(offset) + 16 + 48)
+        XCTAssertEqual(bytes.withUnsafeBytes { $0.load(fromByteOffset: Int(offset), as: UInt32.self) }, 1)
+        // Without buildings the header says none.
+        XCTAssertEqual(StructureLookup(structures: structures).bytes().withUnsafeBytes {
+            $0.load(fromByteOffset: 12, as: UInt32.self) }, 0)
+        // The hangar's floor (smaller) wins over the apron's concrete, kept better.
+        XCTAssertEqual(lookup.sample(x: Float(x), y: Float(y)).upkeep, 0.8, accuracy: 1e-6)
+    }
+
     /// How kept a structure is (0 abandoned … 1 maintained): its "upkeep" or "condition"
     /// property, else the lookup's default; every sample carries it, with the designators.
     func testUpkeepAndDesignators() {

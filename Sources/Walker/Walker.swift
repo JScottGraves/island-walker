@@ -51,18 +51,25 @@ public struct Walker: Sendable {
         return eye
     }
 
-    /// Moves the walker. `forward` and `strafe` are in [-1, 1].
+    /// Moves the walker. `forward` and `strafe` are in [-1, 1]. `blocked` says where the
+    /// walker may not stand (a building's walls); against one it slides along it.
     public mutating func update(forward: Double, strafe: Double, running: Bool, dt: Double,
-                                ground: (Double, Double) -> Double) {
+                                ground: (Double, Double) -> Double,
+                                blocked: ((Double, Double) -> Bool)? = nil) {
         let speed = running ? runSpeed : walkSpeed
         let dx = (sin(yaw) * forward + cos(yaw) * strafe) * speed * dt
         let dy = (cos(yaw) * forward - sin(yaw) * strafe) * speed * dt
-        let distance = (dx * dx + dy * dy).squareRoot()
-        guard distance > 0 else { return }
-        let target = ground(x + dx, y + dy)
-        if (target - z) / distance > maxSlope { return } // too steep to climb
-        x += dx
-        y += dy
-        z = target
+        // The whole step, else only its east or north part (sliding along a wall).
+        for (sx, sy) in [(dx, dy), (dx, 0), (0, dy)] {
+            let distance = (sx * sx + sy * sy).squareRoot()
+            guard distance > 0 else { continue }
+            if let blocked, blocked(x + sx, y + sy) { continue }
+            let target = ground(x + sx, y + sy)
+            if (target - z) / distance > maxSlope { return } // too steep to climb
+            x += sx
+            y += sy
+            z = target
+            return
+        }
     }
 }

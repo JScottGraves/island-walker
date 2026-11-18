@@ -113,6 +113,39 @@ final class StructureTests: XCTestCase {
         }
     }
 
+    /// A hangar at the back of the apron, its door towards the runway, its floor concrete on
+    /// the apron's grade line, and every bit of it on the apron.
+    func testHangarAtTheBackOfTheApronFacingTheRunway() throws {
+        var p = Airstrip.Params()
+        p.spacing = 300
+        p.refineCount = 8
+        let (structures, _) = SitePlanner.plan(context(), kinds: [Airstrip(params: p)], log: { _ in })
+        let runway = structures.first { $0.kind == "airstrip" }!
+        let apron = try XCTUnwrap(structures.first { $0.kind == "apron" })
+        let shed = try XCTUnwrap(structures.first { $0.kind == "hangar" })
+        XCTAssertEqual(shed.id, "hangar-1")
+        let hangar = try XCTUnwrap(Hangar(shed))
+        // Every corner on the apron.
+        for (u, v) in [(-1.0, -1.0), (-1, 1), (1, -1), (1, 1)] {
+            let c = shed.world(u: u * hangar.span / 2, v: v * hangar.depth / 2)
+            let q = apron.local(x: c.x, y: c.y)
+            XCTAssertLessThan(abs(q.u), apron.zones[0].halfLength)
+            XCTAssertLessThan(abs(q.v), apron.zones[0].halfWidth)
+        }
+        // The door's side is the one nearer the runway's centreline.
+        let door = shed.world(u: 0, v: hangar.doorSide * hangar.depth / 2)
+        let back = shed.world(u: 0, v: -hangar.doorSide * hangar.depth / 2)
+        XCTAssertLessThan(abs(runway.local(x: door.x, y: door.y).v), abs(runway.local(x: back.x, y: back.y).v))
+        // Its floor: concrete, nothing growing, on the runway's grade line.
+        let map = StructureMap(structures)
+        let floor = map.sample(x: shed.x, y: shed.y)
+        XCTAssertEqual(floor.surface, .concrete)
+        XCTAssertEqual(floor.plants, .none)
+        XCTAssertEqual(floor.structure.map { structures[$0].kind }, "hangar")
+        let along = runway.local(x: shed.x, y: shed.y).u
+        XCTAssertEqual(floor.gradeHeight ?? -999, runway.gradeHeight(u: along), accuracy: 1e-6)
+    }
+
     func testRunwayRunsCloseToTheTradeWind() {
         var p = Airstrip.Params()
         p.spacing = 300

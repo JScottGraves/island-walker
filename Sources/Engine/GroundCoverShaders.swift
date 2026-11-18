@@ -178,7 +178,8 @@ kernel void coverGenerate(constant Uniforms &u [[buffer(0)]],
     float neglect = built.structure >= 0 ? 1.0 - built.upkeep : 0.0;
     float weeds = 0.0;
     if (built.plants == kPlantsNone) {
-        if (neglect <= 0.0) return;
+        // Nothing grows under a building's roof.
+        if (neglect <= 0.0 || buildingCovers(structures, p)) return;
         StructureZoneGPU z = structureZones(structures)[built.zone];
         float2 q = built.uv + structureSeed(z);
         if (built.surface == kSurfaceConcrete) {

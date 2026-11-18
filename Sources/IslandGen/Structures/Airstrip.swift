@@ -42,6 +42,13 @@ public struct Airstrip: StructureKind {
         public var taxiwayWidth = 15.0
         /// Deepest cut or fill the apron may need; past it there is no apron.
         public var apronMaxCut = 10.0
+        /// A block hangar with a barrel roof at the back of the apron, its door facing the
+        /// runway: its span across the door, its depth, and how far it stands in from the
+        /// apron's back edge and from its end.
+        public var hangarSpan = 28.0
+        public var hangarDepth = 36.0
+        public var hangarSetback = 8.0
+        public var hangarEndMargin = 18.0
         public init() {}
     }
 
@@ -172,7 +179,39 @@ public struct Airstrip: StructureKind {
                             halfLength: p.taxiwayWidth / 2, halfWidth: (outer - inner) / 2, edges: "sides")
         let apron = piece("apron", u: pick.u, v: pick.side * (stripHalfWidth + p.apronDepth / 2),
                           halfLength: p.apronLength / 2, halfWidth: p.apronDepth / 2, edges: nil)
-        return [taxiway, apron]
+        return [taxiway, apron] + hangar(on: apron, runway: runway, side: pick.side, u: pick.u)
+    }
+
+    /// The hangar at the back of the apron, towards its −u end (clear of the taxiway, which
+    /// meets the apron's middle), its door facing the runway across the apron. Its floor is
+    /// the apron's concrete on the same grade line, kept a little better under the roof.
+    func hangar(on apron: Structure, runway: Structure, side: Double, u apronU: Double) -> [Structure] {
+        let p = params
+        guard let slab = apron.zones.first, slab.halfLength > p.hangarSpan / 2 + 2,
+              slab.halfWidth > p.hangarDepth / 2 + 2 else { return [] }
+        let along = -slab.halfLength + p.hangarEndMargin + p.hangarSpan / 2
+        let across = side * (slab.halfWidth - p.hangarSetback - p.hangarDepth / 2)
+        let u = apronU + along
+        let (x, y) = apron.world(u: along, v: across)
+        // The door faces the runway: towards −v on a +v apron.
+        let door = -side
+        return [Structure(id: "hangar", kind: "hangar", x: x, y: y, heading: runway.heading,
+                          elevation: runway.gradeHeight(u: u), slope: runway.slope,
+                          zones: [StructureZone(name: "hangar floor", halfLength: p.hangarSpan / 2,
+                                                halfWidth: p.hangarDepth / 2, surface: .concrete, plants: .none,
+                                                graded: true)],
+                          properties: [
+                            "condition": apron.properties["condition"] ?? "abandoned",
+                            // Out of the weather: few weeds in the joints and little lichen.
+                            "upkeep": "0.8",
+                            "span": String(format: "%.1f", p.hangarSpan),
+                            "depth": String(format: "%.1f", p.hangarDepth),
+                            "eaves": "4.8",
+                            "rise": "6.0",
+                            "door": String(format: "%.0f", door),
+                            "doorWidth": String(format: "%.1f", p.hangarSpan - 2.4),
+                            "doorHeight": "5.0",
+                          ])]
     }
 
     /// The best site under `rules`, or nil when none passes them.

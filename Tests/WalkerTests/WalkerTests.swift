@@ -41,4 +41,17 @@ final class WalkerTests: XCTestCase {
         XCTAssertGreaterThan(hypot(w.x, w.y), 2.5)
         XCTAssertEqual(w.eyeZ(ground: bumps), w.z + w.eyeHeight, accuracy: 1e-9)
     }
+
+    func testSlidesAlongABlockingWall() {
+        // A wall along x = 1: walking north-east into it, the walker stops short of it and
+        // slides north.
+        let flat: (Double, Double) -> Double = { _, _ in 0 }
+        var w = Walker(x: 0, y: 0, ground: flat)
+        w.yaw = .pi / 4
+        for _ in 0..<120 {
+            w.update(forward: 1, strafe: 0, running: false, dt: 1.0 / 60, ground: flat, blocked: { x, _ in x > 0.7 })
+        }
+        XCTAssertLessThanOrEqual(w.x, 0.7)
+        XCTAssertGreaterThan(w.y, 1.0)
+    }
 }

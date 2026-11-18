@@ -15,6 +15,8 @@ using namespace raytracing;
 constant bool kRayTraced [[function_constant(0)]];
 // True: the native trees cast shadows through their cascaded shadow maps (FloraRenderer).
 constant bool kTreeShadows [[function_constant(1)]];
+// True: buildings stand on the island (BuildingRenderer) and the sun rays trace them too.
+constant bool kBuildingShadows [[function_constant(2)]];
 
 // The streamed heightfield (TerrainStreamer) and the CDLOD layout (TerrainQuadtree).
 struct TerrainParams {
@@ -277,10 +279,11 @@ float horizonMargin(float4 h0, float4 h1, float4 h2, float4 h3, float3 l, thread
     return elevation - horizonAngle;
 }
 
-// The traced sun (sunShadow): terrain visibility (r) times what the trees let through (g).
+// The traced sun (sunShadow): terrain visibility (r) times what the trees (g) and the
+// buildings (a) let through.
 float tracedSunAt(texture2d<float, access::read> traced, uint2 pixel) {
     float4 v = traced.read(pixel);
-    return v.x * v.y;
+    return v.x * v.y * v.w;
 }
 
 // Sun visibility from the horizon map, with the same soft edge as the CPU bake.
@@ -1593,7 +1596,9 @@ fragment float4 terrainFragment(VOut in [[stage_in]], constant Uniforms &u [[buf
     sunVisibility *= cloudSun * groundSun;
     // Sunflecks get through gaps in the crowns; the sky is half hidden by them.
     sunVisibility *= 1.0 - 0.85 * sunCover;
-    float3 color = litSurface(u, albedo, n, nDotL, sunVisibility, skyVisibility, 1.0 - 0.5 * underCanopy, cloudSun);
+    // Under a building's roof, only the light its door lets in.
+    float shelter = buildingShelter(structures, in.world + float3(0.0, 0.0, 0.2));
+    float3 color = litSurface(u, albedo, n, nDotL, sunVisibility, skyVisibility, (1.0 - 0.5 * underCanopy) * shelter, cloudSun);
     if (forest > 0.0) {
         // Foliage colour: the community's canopy, and on pali the fern green outright,
         // whatever soil the far albedo shows beneath; hue drifting over tens of metres.
@@ -1813,6 +1818,38 @@ float sunWithoutRays(constant Uniforms &u, SunSurface s, bool crown, float3 l,
     return -1.0;
 }
 
+// Sun through the buildings (BuildingRenderer's acceleration structure), for a pixel whose
+// way to the sun could pass one: within the reach of the tallest building's shadow at this
+// sun. Two rays across the sun's disc, like the terrain's, leaving 2 cm off the surface.
+float buildingSun(const device uchar *structures, primitive_acceleration_structure buildings, SunSurface s,
+                  float3 l, float2 pixel) {
+    uint count = structureBuildingCount(structures);
+    bool close = false;
+    float run = length(l.xy) / max(l.z, 0.03);
+    for (uint i = 0u; i < count && !close; i++) {
+        BuildingGPU g = structureBuilding(structures, i);
+        float top = g.b.z + g.b.w + g.c.x;
+        float reach = min(max(top - s.p.z, 0.0) * run, 800.0);
+        float2 q = buildingLocal(g, s.p.xy);
+        close = length(max(abs(q) - g.b.xy - 1.0, 0.0)) <= reach + 1.0;
+    }
+    if (!close) return 1.0;
+    float3 t = normalize(cross(l, abs(l.z) < 0.9 ? float3(0.0, 0.0, 1.0) : float3(1.0, 0.0, 0.0)));
+    float3 b = cross(l, t);
+    float spin = 6.2831853 * fract(52.9829189 * fract(dot(pixel, float2(0.06711056, 0.00583715))));
+    float3 origin = s.p + s.n * 0.02;
+    intersector<triangle_data> isect;
+    isect.accept_any_intersection(true);
+    float lit = 0.0;
+    for (int k = 0; k < 2; k++) {
+        float a = float(k) * M_PI_F + spin;
+        float3 d = normalize(l + (t * cos(a) + b * sin(a)) * kSunConeRadius);
+        ray shadowRay(origin, d, 0.005, 2000.0);
+        if (isect.intersect(shadowRay, buildings).type == intersection_type::none) lit += 1.0;
+    }
+    return 0.5 * lit;
+}
+
 // Two passes over the prepass surface. Pass 0 traces the terrain at one pixel per 2×2
 // block (crowns per 4×4). Pass 1 fills in the rest: where the traced pixels around one agree (all lit
 // or all shadowed, on the same surface) it takes their answer, crowns among tree pixels
@@ -1832,6 +1869,8 @@ kernel void sunShadow(constant Uniforms &u [[buffer(0)]],
                       texture2d<float, access::read> meshHeights [[texture(5)]],
                       constant TreeShadows &trees [[buffer(3), function_constant(kTreeShadows)]],
                       depth2d_array<float> treeMaps [[texture(6), function_constant(kTreeShadows)]],
+                      primitive_acceleration_structure buildings [[buffer(4), function_constant(kBuildingShadows)]],
+                      const device uchar *structures [[buffer(20), function_constant(kBuildingShadows)]],
                       uint2 gid [[thread_position_in_grid]]) {
     uint2 g = pass == 0u ? gid * 2u : gid;
     uint2 size = uint2(out.get_width(), out.get_height());
@@ -1848,7 +1887,7 @@ kernel void sunShadow(constant Uniforms &u [[buffer(0)]],
     // map can't tell, every crown pixel needs rays, and crowns cover much of a forest view.
     // Foliage is noisy anyway; the rest take their 4×4 neighbours' mean in pass 1.
     if (visibility < 0.0 && crown && pass == 0u && any((g & 3u) != 0u)) {
-        out.write(float4(0.0, 1.0, 1.0, 0.0), g);
+        out.write(float4(0.0, 1.0, 1.0, 1.0), g);
         return;
     }
     if (visibility < 0.0 && crown && pass == 1u) {
@@ -1904,7 +1943,12 @@ kernel void sunShadow(constant Uniforms &u [[buffer(0)]],
     if (kTreeShadows && visibility > 0.0 && !s.sky && !s.impostor) {
         leaves = treeSunlight(u, trees, treeMaps, s.p, s.tree ? l : s.n, distance, float2(g) + 0.5);
     }
-    out.write(float4(visibility, leaves, 0.0, 0.0), g);
+    // The buildings' own shadows, per pixel (pass 1 never averages them).
+    float built = 1.0;
+    if (kBuildingShadows && visibility > 0.0 && !s.sky) {
+        built = buildingSun(structures, buildings, s, l, float2(g) + 0.5);
+    }
+    out.write(float4(visibility, leaves, 0.0, built), g);
 }
 
 // Night sky: procedural stars and a Milky Way (not real star positions), on a celestial
