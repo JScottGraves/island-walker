@@ -2203,9 +2203,22 @@ kernel void motionVectors(constant MotionParams &m [[buffer(0)]],
 }
 
 // The upscaled frame into the drawable (or a snapshot's target), which applies its sRGB
-// encoding on write.
+// encoding on write. Dithered by about one 8-bit step first, so dark smooth gradients
+// (night clouds and sky) don't break into flat bands.
+float3 toSrgb(float3 c) {
+    return select(1.055 * pow(c, 1.0 / 2.4) - 0.055, 12.92 * c, c <= 0.0031308);
+}
+float3 fromSrgb(float3 c) {
+    return select(pow((c + 0.055) / 1.055, 2.4), c / 12.92, c <= 0.04045);
+}
 fragment float4 presentFragment(SkyOut in [[stage_in]], texture2d<float, access::read> frame [[texture(0)]]) {
-    return float4(frame.read(uint2(in.position.xy)).rgb, 1.0);
+    float3 c = max(frame.read(uint2(in.position.xy)).rgb, 0.0);
+    // Triangular noise (−1…1 steps) from two interleaved-gradient patterns.
+    float2 p = in.position.xy;
+    float a = fract(52.9829189 * fract(dot(p, float2(0.06711056, 0.00583715))));
+    float b = fract(52.9829189 * fract(dot(p + float2(47.0, 17.0), float2(0.06711056, 0.00583715))));
+    float3 srgb = saturate(toSrgb(c) + (a + b - 1.0) / 255.0);
+    return float4(fromSrgb(srgb), 1.0);
 }
 // Temporal antialiasing at the output size (TerrainRenderer.Antialiasing.temporal): the
 // jittered frame blended into the history at the place each pixel's motion says it was.
