@@ -79,6 +79,85 @@ final class IslandGenTests: XCTestCase {
         XCTAssertEqual(h[30, 4], 30, accuracy: 0.01, "full lift beyond the flexure distance")
     }
 
+    /// A cone island ringed by a 3 km wave-cut platform just below sea level, as erosion
+    /// leaves it, over a steep flank beyond. Shelving re-imposes a sea floor that deepens
+    /// from the shore like Oahu's: shallow in the first few hundred metres, tens of metres
+    /// at 2 km, and the original flank kept far out. Land is untouched.
+    func testShelfDeepensTheWaveCutPlatform() {
+        let n = 640, cell = 50.0
+        var g = Grid(width: n, height: n, cellSize: cell)
+        for y in 0..<n {
+            for x in 0..<n {
+                let r = (pow(Double(x - n / 2) + 0.5, 2) + pow(Double(y - n / 2) + 0.5, 2)).squareRoot() * cell
+                let off = r - 4000
+                g[x, y] = Float(off < 0 ? 300 * -off / 4000 : off < 3000 ? -0.3 : -0.3 - 0.2 * (off - 3000))
+            }
+        }
+        let before = g
+        Island.shelve(&g, seaLevel: 0, seed: 1)
+        for i in 0..<g.count where before.values[i] > 0 { XCTAssertEqual(g.values[i], before.values[i]) }
+        for i in 0..<g.count where before.values[i] <= 0 { XCTAssertLessThan(g.values[i], 0, "sea stays sea") }
+        let shelf = ShelfProfile.measure(g, seaLevel: 0).all
+        let median = { (d: Double) in shelf.depth[ShelfProfile.distances.firstIndex(of: d)!][1] }
+        XCTAssertLessThan(median(100), 6, "shallows next to the shore")
+        XCTAssertGreaterThan(median(100), 0.5)
+        XCTAssertLessThan(median(500), 15)
+        XCTAssertGreaterThan(median(1000), 8)
+        XCTAssertGreaterThan(median(2000), 30, "no kilometres-wide flat at sea level")
+        XCTAssertGreaterThan(median(3000), 70)
+        XCTAssertLessThan(shelf.bandArea[0], 2, "almost no sea shallower than 1 m")
+        // Far out, the original flank (deeper than the shelf) is kept.
+        let far = n / 2 + Int(4000 / cell) + Int(10_500 / cell)
+        XCTAssertEqual(g[far, n / 2], before[far, n / 2], accuracy: 1e-3)
+        var again = before
+        Island.shelve(&again, seaLevel: 0, seed: 1)
+        XCTAssertEqual(again.values, g.values, "deterministic")
+    }
+
+    /// Refining with a separate sea floor: land and coastline come from the unshelved grid
+    /// alone, so they are the same as without the shelf, and the water still deepens from
+    /// nothing at the waterline (the surf's foam and swash need its first decimetres).
+    func testRefineTakesTheSeaFloorFromTheShelf() {
+        // Sea west of x = 8 on a 0.3 m platform, a plain rising 2 m per 100 m east of it.
+        var coarse = Grid(width: 48, height: 16, cellSize: 78.125)
+        for y in 0..<16 { for x in 0..<48 { coarse[x, y] = x < 8 ? -0.3 : Float(Double(x - 7) * 78.125 * 0.02) } }
+        var shelved = coarse
+        Island.shelve(&shelved, seaLevel: 0, seed: 3)
+        let area = Realism.drainageArea(coarse, seaLevel: 0)
+        var p = Refine.Params()
+        p.factor = 8
+        let plain = Refine.refine(coarse, drainageArea: area, seaLevel: 0, params: p)
+        let fine = Refine.refine(coarse, drainageArea: area, seaLevel: 0, params: p, seaFloor: shelved)
+        var shallow = 0, sea = 0
+        for i in 0..<fine.count {
+            if plain.values[i] > 0 {
+                XCTAssertEqual(fine.values[i], plain.values[i], "land is unchanged")
+            } else {
+                XCTAssertLessThan(fine.values[i], 0)
+                sea += 1
+                if fine.values[i] > -0.4 { shallow += 1 }
+            }
+        }
+        XCTAssertGreaterThan(shallow, 0, "the water deepens from the waterline, not in a step")
+        // 300 m out the shelf's depth, not the platform's.
+        let x = 8 * 8 - Int(300 / fine.cellSize), y = 8 * 8
+        XCTAssertLessThan(fine[x, y], -4)
+        XCTAssertGreaterThan(fine[x, y], -15)
+    }
+
+    func testGeneratedIslandHasNoShallowPlatform() {
+        var p = Island.Params()
+        p.seed = 42
+        p.size = 256
+        p.steps = 200
+        let h = Island.generate(p).height
+        let shelf = ShelfProfile.measure(h, seaLevel: 0).all
+        XCTAssertGreaterThan(shelf.depth[ShelfProfile.distances.firstIndex(of: 1000)!][1], 8)
+        XCTAssertGreaterThan(shelf.depth[ShelfProfile.distances.firstIndex(of: 2000)!][1], 30)
+        XCTAssertLessThan(shelf.bandArea[0], 40, "Oahu has 27 km² of sea shallower than 1 m")
+        XCTAssertEqual(Realism.measure(h).pits, 0)
+    }
+
     func testRefineAddsDetailWithoutPits() {
         var p = Island.Params()
         p.size = 64
