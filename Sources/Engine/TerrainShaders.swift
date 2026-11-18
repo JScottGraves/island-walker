@@ -1920,8 +1920,9 @@ constant float3 kGalacticPole = float3(0.426442, 0.782330, 0.453991);
 constant float kGalaxyLatitude = 48.0 * M_PI_F / 180.0;
 // Radiance of the glow's brightest parts per baked unit, of a magnitude 0 star (as a
 // pixel's sum), and of airglow at the zenith: at night's exposure the band comes out
-// near linear 0.03 and the galactic centre brighter and a magnitude 6 star's centre near 0.03.
-constant float kGalaxyRadiance = 0.0065;
+// near linear 0.015, the galactic centre brighter (Scott: half of the first tuning), and a
+// magnitude 6 star's centre near 0.03.
+constant float kGalaxyRadiance = 0.00325;
 constant float kStarFlux = 1.7;
 constant float kAirglow = 0.0004;
 
