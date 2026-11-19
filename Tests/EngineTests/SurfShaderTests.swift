@@ -14,10 +14,9 @@ final class SurfShaderTests: XCTestCase {
         float arrival = probe.x + float(i) * probe.y;
         float2 xy = probe.zw;
         float front, n, age, wave;
-        float2 slope;
         // A wave train breaking on and off from wave to wave (Hs/h about the set's threshold).
-        float foam = surfBreakers(o, arrival, 60.0, 1.0, 2.0, o.waves.x, xy, 0.0, 0.01, 0.0, 1.0, front, age, wave);
-        float z = surfCrest(o, arrival, 60.0, float2(0.0, 1.0), 1.0, 2.0, o.waves.x, xy, 0.01, o.time.x, 0.0, 1.0, slope);
+        float foam = surfBreakers(o, arrival, 60.0, 1.0, 2.0, 0.03, o.waves.x, xy, 0.0, 0.01, 0.0, 1.0, front, age, wave);
+        float z = surfCrest(o, arrival, 60.0, 1.0, 2.0, 0.03, o.waves.x, xy, 0.01, o.time.x, 0.0, 1.0).z;
         float phase = swashPhase(arrival, o.waves.x, xy, o.time.x, n);
         out[i] = float4(foam, front, z, phase);
     }
@@ -77,9 +76,11 @@ final class SurfShaderTests: XCTestCase {
     func testCrestHeightIsContinuous() throws {
         for xy in spots {
             let s = try probe(at: xy)
-            // The steepest face (a / 0.05 per period, a ≤ 0.45 m) moves under 1 mm per probe.
+            // The steepest face moves a few millimetres per probe (6 mm of travel): a breaking crest
+            // ~1 m high (0.55 of its ~2.5 m break depth) over a face ~2 m long (surfShape's 0.7 of
+            // 0.05 × 60 m) is a slope of ~0.5. A seam would jump by centimetres.
             let worst = (1..<s.count).map { abs(s[$0].z - s[$0 - 1].z) }.max()!
-            XCTAssertLessThan(worst, 0.002, "a step in the surf's crests at \(xy)")
+            XCTAssertLessThan(worst, 0.004, "a step in the surf's crests at \(xy)")
         }
     }
 

@@ -277,7 +277,7 @@ public final class TerrainRenderer {
         let options = MTLCompileOptions()
         options.preserveInvariance = true  // the depth prepass and shading pass must agree
         let library = try device.makeLibrary(source: terrainShaderSource + floraShaderSource + groundCoverShaderSource
-                                                 + oceanShaderSource + buildingShaderSource, options: options)
+                                                 + oceanShaderSource + surfLipShaderSource + buildingShaderSource, options: options)
         let constants = MTLFunctionConstantValues()
         var rayTraced = shadows == .rayTraced
         constants.setConstantValue(&rayTraced, type: .bool, index: 0)
@@ -788,6 +788,7 @@ public final class TerrainRenderer {
             encode([cmd], color: color, eye: eye, forward: forward)
             cmd.commit()
             cmd.waitUntilCompleted()
+            if ProcessInfo.processInfo.environment["ISLAND_LIP_DEBUG"] != nil { print(ocean.lip.debugSummary()) }
             frames.append(rgb(color))
         }
         return frames
@@ -1059,6 +1060,7 @@ public final class TerrainRenderer {
         // The sea's waves for this moment, its nodes and the sky it reflects.
         ocean.update(cmd, uniforms: &u, eye: eye, viewProjection: viewProjection, time: clock, skyView: skyView, cloudMap: cloudMap)
         stats.oceanNodes = ocean.drawnNodes
+        ocean.updateLip(cmd, uniforms: &u, terrainParams: terrainParams, eye: eye, time: clock)
 
         // 1. Terrain depth.
         let depthPass = MTLRenderPassDescriptor()
@@ -1201,6 +1203,8 @@ public final class TerrainRenderer {
         if let sun = targets.sun { shade.setFragmentTexture(sun, index: 5) }
         bindTerrain(shade, frame: frameTerrain)
         ocean.drawShading(shade, uniforms: &u, terrainParams: terrainParams, pages: frameTerrain.pages, tiles: streamer.tiles)
+        // Then the breakers' lips and spray over it.
+        ocean.drawLip(shade, uniforms: &u)
         shade.endEncoding()
 
 

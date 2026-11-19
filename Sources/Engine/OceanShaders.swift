@@ -27,6 +27,7 @@ struct OceanParams {
     float4 surfFrom;        // where the swell comes from (xy) and the wind sea (zw), unit vectors (unused)
     float4 waves;           // the surf's systems (the refraction texture's): trade swell and north
                             // swell periods (s), breaker index (Hs/h), waves per set
+    float4 breaking;        // breaking waves: Iribarren scale, lip on (1/0), impact foam cell (m) and side (cells)
 };
 
 constant float kWaterIndex = 1.333;
@@ -629,6 +630,9 @@ struct OceanOut {
     float4 crests;          // each system's arrival (periods) and crest spacing (m)
     float4 heading;         // each system's direction of travel
     float drift;            // the sets' timing (surfSetDrift)
+    float2 beta;            // the bed's slope along each system's heading (surfSetting)
+    float filter;           // metres the vertex's displacement was filtered over (OceanPoint)
+    float3 surfShape;       // the surf's slope (xy) and stretch (z) there (surfWave)
     float4 shelter;         // OceanPoint's
     float calm;
 };
@@ -844,11 +848,12 @@ float foamRafts(float2 q, float open, float aa) {
 // sets' timing (surfSetDrift). Far from any shallows
 // (deeper than 8 m, fading in from there) there is none.
 float4 surfSetting(constant Uniforms &u, constant OceanParams &o, constant TerrainParams &t, texture2d<float> shore,
-                   texture2d<float> waves, float2 xy, float depth, thread float4 &crests, thread float4 &heading,
-                   thread float &drift) {
+                   texture2d<float> waves, texture2d<float> slopes, float2 xy, float depth, thread float4 &crests,
+                   thread float4 &heading, thread float &drift, thread float2 &beta) {
     crests = float4(0.0, 0.0, 1.0, 1.0);
     heading = float4(0.0, 1.0, 0.0, 1.0);
     drift = 0.0;
+    beta = 0.02;
     if (depth > 8.0 || any(xy < 0.0) || any(xy > float2(t.domainSize))) return float4(0.0, 0.0, 1e4, 0.0);
     constexpr sampler linear(filter::linear, address::clamp_to_edge);
     float4 setting = shore.sample(linear, xy / t.domainSize, level(0));
@@ -871,9 +876,89 @@ float4 surfSetting(constant Uniforms &u, constant OceanParams &o, constant Terra
     float hs = length(w.zw);
     float lace = max(saturate(hs / 1.0), 0.35) * inland;
     drift = surfSetDrift(xy);
+    // The bed's slope along each system's heading (its breakers' progress and type), baked at
+    // load (SurfLip.bedSlopes) from the depth the surf breaks against.
+    beta = slopes.sample(linear, xy / t.domainSize, level(0)).xy;
     // Breaking against the shallower of the smoothed depth and the bake's (~40 m): the bake held
     // the heights to its own, and the shore break and the reef's knolls are where it is less.
     return float4(w.z * inland, w.w * inland, min(setting.a, local), lace);
+}
+
+// ---- Breaking waves (research/waves.md, item 4): face, lip and plunge ----
+// Each wave's break progress p on its way in: 0 where it starts to break (the whitewater's own
+// onset, H ≈ 0.78 h, jittered along the shore and wave to wave), ~0.3 with its face standing
+// vertical, 0.5–0.8 throwing its crest forward, 1 collapsed into the bore. It is measured as the
+// metres past the break line, (h_b − h) / tan β over the bed's slope along the wave's heading,
+// in units of the distance a breaker takes to collapse (2.5–5 breaking heights, plunging to
+// spilling). The breaker's type from the Iribarren number ξ = tan β / √(H_b / L0): spilling
+// (the crest only crumbles) under ~0.3, plunging (a lip thrown ahead) over ~0.6.
+// (Malan, Horizon Forbidden West, SIGGRAPH 2022; Thürey et al. 2007 for the lip.)
+
+// The break line's ratio of the surf's own test (smoothstep(0.7, 0.9) of the set's H over h).
+constant float kBreakRatio = 0.8;
+
+// The break line's jitter for wave `index` at xy (tens of metres along the shore, every wave
+// its own): 0.9…1.1.
+float surfOnset(float2 xy, float index) {
+    float2 r = float2(0.866 * xy.x - 0.5 * xy.y, 0.5 * xy.x + 0.866 * xy.y);
+    return 0.9 + 0.2 * groundNoise(r / 35.0 + index * 0.71 + 2.9);
+}
+
+// Depth (m) a wave of its set's share `set` of the local significant height `hs` starts to break at.
+float surfBreakDepth(constant OceanParams &o, float hs, float set, float onset) {
+    return onset * hs * (0.6 + 0.5 * set) / (o.waves.z * kBreakRatio);
+}
+
+// The breaker's type, 0 spilling … 1 plunging, for a wave breaking `hb` metres deep on a bed
+// sloping `beta` along its heading (o.breaking.x scales ξ for tuning).
+float surfPlunge(constant OceanParams &o, float hb, float beta, float period) {
+    float l0 = 9.81 * period * period / 6.2831853;
+    float xi = clamp(beta, 0.0, 0.3) / sqrt(max(0.78 * hb, 0.05) / l0);
+    return smoothstep(0.3, 0.6, xi * o.breaking.x);
+}
+
+// Break progress of a wave breaking `hb` metres deep (type `plunge`) whose crest is `ahead`
+// metres shoreward of a point `h` metres deep on a bed sloping `beta`.
+float surfProgress(float hb, float h, float beta, float plunge, float ahead) {
+    float b = max(beta, 0.01);
+    float span = mix(5.0, 2.5, plunge) * max(0.78 * hb, 0.3);
+    return ((hb - max(h, 0.0)) / b + ahead) / span;
+}
+
+// How far a wave has risen from its shoaling height to its breaking one (0…1) at progress p.
+float surfRise(float p) {
+    return smoothstep(-0.6, 0.3, p);
+}
+
+// A breaker's shape at progress p (type `plunge`): its height's gain over the shoaling wave's (x;
+// it peaks up as it breaks, then falls to the bore's), its face's width as a share of the
+// shoaling one's (y), and how far forward its crest is thrown, in face widths (z: 0.5 stands
+// the face vertical, more folds it under an overhanging lip; back to 0 as it collapses).
+float3 surfShape(float p, float plunge) {
+    float rise = surfRise(p);
+    float collapse = smoothstep(0.55, 1.05, p);
+    float gain = (1.0 + 0.15 * plunge * rise) * mix(1.0, mix(0.6, 0.45, plunge), collapse);
+    float face = mix(1.0, mix(0.7, 0.4, plunge), rise);
+    float over = 0.5 * smoothstep(0.0, 0.3, p) + mix(0.12, 1.8, plunge) * smoothstep(0.3, 0.7, p);
+    return float3(gain, face, over * (1.0 - smoothstep(0.75, 1.05, p)));
+}
+
+// One crest's profile at ξ metres ahead of it along its heading (behind: negative), `a` high
+// with a back `wb` and a face `wf` metres long (e-folding), its crest thrown `throwF` face widths
+// forward: the height (x) and its slope dz/dξ (y), the forward displacement d (z: the higher the
+// more, (z/a)² of the throw, so the face stands up, then folds under the crest) and dd/dξ (w).
+float4 surfCrestProfile(float a, float xi, float wb, float wf, float throwF) {
+    if (a <= 0.0) return 0.0;
+    float z, dz;
+    if (xi < 0.0) {
+        z = a * exp(xi / wb);
+        dz = z / wb;
+    } else {
+        z = a * exp(-xi / wf);
+        dz = -z / wf;
+    }
+    float r = z / a;
+    return float4(z, dz, throwF * wf * r * r, 2.0 * throwF * wf * r * dz / a);
 }
 
 // One system's breakers at xy: a wave train coming in with crests `spacing` metres apart, each
@@ -882,7 +967,7 @@ float4 surfSetting(constant Uniforms &u, constant OceanParams &o, constant Terra
 // is its set's share of the local significant height `hs` (surfSet) and breaks where that
 // nears the breaker depth over the smoothed depth `h`: the sets' big waves further out, the
 // small ones only on the inside. Returns its foam cover; through `front`, how much is the roller.
-float surfBreakers(constant OceanParams &o, float arrival, float spacing, float hs, float h, float period,
+float surfBreakers(constant OceanParams &o, float arrival, float spacing, float hs, float h, float beta, float period,
                    float2 xy, float ragged, float footprint, float drift, float weight, thread float &front,
                    thread float &age, thread float &wave) {
     front = 0.0;
@@ -905,9 +990,15 @@ float surfBreakers(constant OceanParams &o, float arrival, float spacing, float 
     // whitewater thickens over some metres from it: a crisp line along the (smooth) heights'
     // contour would cut each wave's trail off in a straight edge across it.
     float depthHs = o.waves.z * max(h, 0.5);
-    float2 r = float2(0.866 * xy.x - 0.5 * xy.y, 0.5 * xy.x + 0.866 * xy.y);
-    float onset = 0.9 + 0.2 * groundNoise(r / 35.0 + index * 0.71 + 2.9);
-    float breaking = smoothstep(0.7, 0.9, onset * hs * (0.6 + 0.5 * set) / depthHs) * smoothstep(0.15, 0.3, hs * set);
+    // The whitewater starts where the breaker lands (surfProgress): at once for a spilling one,
+    // its crest crumbling, and for a plunging one ~0.85 of the way, where its lip hits the water
+    // ahead of it (SurfLip's sheet lands there too). Judged where this wave's crest passed this
+    // point, so its trail starts at the landing, not along the whole crest behind it.
+    float hb = surfBreakDepth(o, hs, set, surfOnset(xy, index));
+    float plunge = surfPlunge(o, hb, beta, period);
+    float land = mix(0.05, 0.85, plunge);
+    float breaking = smoothstep(land - 0.15, land + 0.05, surfProgress(hb, h, beta, plunge, 0.0))
+                     * smoothstep(0.15, 0.3, hs * set);
     // A solid roller 4–10 m wide.
     float width = clamp(4.0 * hs * set, 4.0, 10.0) / spacing;
     float f = 1.0 - smoothstep(0.6 * width, 1.4 * width, u0);
@@ -942,17 +1033,20 @@ float2 surfWeights(float4 setting) {
     return smoothstep(0.3, 0.5, setting.xy / top);
 }
 
-float surfFoam(constant OceanParams &o, float4 setting, float4 crests, float2 heading, float2 xy, float depth,
-               float footprint, float drift, thread float &roller) {
+float surfFoam(constant OceanParams &o, float4 setting, float4 crests, float2 heading, float2 beta, float2 xy, float depth,
+               float footprint, float drift, float impact, thread float &roller) {
     roller = 0.0;
     // The leading edge, a metre or two ragged.
     float ragged = groundNoise(xy / 2.5 + 4.1) - 0.5;
     float2 weight = surfWeights(setting);
     float f1, f2, age1, age2, wave1, wave2;
-    float b1 = surfBreakers(o, crests.x, crests.z, setting.x, setting.z, o.waves.x, xy, ragged, footprint, drift, weight.x, f1,
-                            age1, wave1);
-    float b2 = surfBreakers(o, crests.y, crests.w, setting.y, setting.z, o.waves.y, xy, ragged, footprint, drift, weight.y, f2,
-                            age2, wave2);
+    float b1 = surfBreakers(o, crests.x, crests.z, setting.x, setting.z, beta.x, o.waves.x, xy, ragged, footprint, drift, weight.x,
+                            f1, age1, wave1);
+    float b2 = surfBreakers(o, crests.y, crests.w, setting.y, setting.z, beta.y, o.waves.y, xy, ragged, footprint, drift, weight.y,
+                            f2, age2, wave2);
+    // Where plunging lips hit the water (SurfLip's impact foam): fresh whitewater, as the roller's.
+    b1 = max(b1, impact);
+    f1 = max(f1, impact);
     // In world axes, wrapped every 4 km and turned off the noise's lattice.
     float2 local = xy - floor(xy / 4096.0) * 4096.0;
     float2 rs = float2(0.8 * local.x - 0.6 * local.y, 0.6 * local.x + 0.8 * local.y);
@@ -1076,58 +1170,100 @@ float oceanFoamCover(constant OceanParams &o, texture2d_array<float> foam, float
 }
 
 // ---- Surf waves: the swell's crests shoaling in under the breakers ----
-// One wave's height in surfCrest: its set's share of the local significant height, taller
-// where its section breaks, faded out where `filter` (m) can't resolve the face.
-float surfCrestHeight(constant OceanParams &o, float hs, float h, float n, float section, float spacing, float filter,
+// One wave's height in surfCrest before it breaks: its set's share of the local significant
+// height, lower where its section won't break, faded out where `filter` (m) can't resolve the
+// face. (Its break, surfShape, raises and then collapses it.)
+float surfCrestHeight(constant OceanParams &o, float hs, float n, float section, float spacing, float filter,
                       float drift, float weight) {
     float on = smoothstep(0.3, 0.45, section);
     float set = surfSet(o, n, drift);
-    float breaking = smoothstep(0.75, 0.85, hs * (0.6 + 0.5 * set) / (o.waves.z * max(h, 0.5)));
-    return weight * o.time.z * 0.45 * hs * set * mix(0.55, 1.0, on) * (0.6 + 0.4 * breaking)
+    return weight * o.time.z * 0.45 * 0.7 * hs * set * mix(0.55, 1.0, on)
            // Faded where the grid (or a pixel) is too coarse for the face (~3 m).
            * (1.0 - smoothstep(0.08, 0.2, filter / spacing));
 }
 
+// One system's crests at xy, from its arrival and its setting (surfSetting): its height about
+// the mean sea (z), the forward displacement of the water along the heading (d), and their
+// derivatives along it (dz, dd: the face's slope and the stretch or fold of the surface).
+struct SurfCrestOut {
+    float z;
+    float d;
+    float dz;
+    float dd;
+};
+
 // One system's crests (surfBreakers' clock): a wave its set's share of the local significant
-// height, with a long gentle back behind the crest and a steep face ahead of it, taller where a
-// section breaks, faded out where `filter` (m) can't resolve it. Its height (m, about the mean
-// sea) at xy at `time`, and through `slope` its gradient (`heading` the way it travels).
-float surfCrest(constant OceanParams &o, float arrival, float spacing, float2 heading, float hs, float h, float period,
-                float2 xy, float filter, float time, float drift, float weight, thread float2 &slope) {
-    slope = 0.0;
-    if (hs < 0.05 || weight <= 0.0) return 0.0;
+// height, with a long gentle back behind the crest and a steep face ahead of it, faded out where
+// `filter` (m) can't resolve it. As it breaks (surfProgress, surfShape) it peaks up, its face
+// steepens and stands up, a plunging one's crest is thrown forward over it, and it collapses
+// into the bore. `beta` is the bed's slope along the heading.
+SurfCrestOut surfCrest(constant OceanParams &o, float arrival, float spacing, float hs, float h, float beta, float period,
+                       float2 xy, float filter, float time, float drift, float weight) {
+    SurfCrestOut r = {0.0, 0.0, 0.0, 0.0};
+    if (hs < 0.05 || weight <= 0.0) return r;
     // The crest the point is behind (surfClock), u0 periods back from it: its long gentle back;
     // and the next one's, v periods ahead: that wave's steep face, at its own height.
     float wave = time / period - arrival;
     float section, u0, next;
     float n = surfClock(xy, wave, period, section, u0, next);
     float v = max(n + 1.0 - 0.08 * next - wave, 0.0);
-    float a0 = surfCrestHeight(o, hs, h, n, section, spacing, filter, drift, weight);
-    float a1 = surfCrestHeight(o, hs, h, n + 1.0, next, spacing, filter, drift, weight);
-    float back = a0 * exp(-u0 / 0.16), face = a1 * exp(-v / 0.05);
-    // Less the profile's mean (∫f ≈ 0.16 + 0.05 of the height), so the sea keeps its level,
-    // going over from one wave's height to the next's between their crests.
+    // Each crest's break: n's crest is u0 periods ahead (shoreward), n + 1's v behind.
+    float hb0 = surfBreakDepth(o, hs, surfSet(o, n, drift), surfOnset(xy, n));
+    float hb1 = surfBreakDepth(o, hs, surfSet(o, n + 1.0, drift), surfOnset(xy, n + 1.0));
+    float plunge0 = surfPlunge(o, hb0, beta, period), plunge1 = surfPlunge(o, hb1, beta, period);
+    float p0 = surfProgress(hb0, h, beta, plunge0, u0 * spacing), p1 = surfProgress(hb1, h, beta, plunge1, -v * spacing);
+    float3 s0 = surfShape(p0, plunge0), s1 = surfShape(p1, plunge1);
+    // Its height: the shoaling wave's (kept low, the cascades carry the swell's height out
+    // there), rising as it nears its break to a breaker's crest, ~0.7 of its height H_b = 0.78 h_b
+    // over the mean sea (as tall in a set's lull where its section won't break: those don't
+    // reach their break line), then the shape's gain (peaking, collapsing).
+    float f0 = surfCrestHeight(o, hs, n, section, spacing, filter, drift, weight);
+    float f1 = surfCrestHeight(o, hs, n + 1.0, next, spacing, filter, drift, weight);
+    float scale = o.time.z / 1.5 * (1.0 - smoothstep(0.08, 0.2, filter / spacing)) * weight;
+    float a0 = mix(f0, 0.55 * hb0 * scale * smoothstep(0.3, 0.45, section), surfRise(p0)) * s0.x;
+    float a1 = mix(f1, 0.55 * hb1 * scale * smoothstep(0.3, 0.45, next), surfRise(p1)) * s1.x;
+    // The back ~0.16 of the spacing; the face 0.05, narrowing as it breaks, but never finer
+    // than the grid resolves (or the throw is left out).
+    float wb = 0.16 * spacing;
+    float wf0 = max(max(0.05 * spacing * s0.y, 1.2 * filter), 0.25);
+    float wf1 = max(max(0.05 * spacing * s1.y, 1.2 * filter), 0.25);
+    float t0 = s0.z * (1.0 - smoothstep(0.4, 1.0, filter / wf0)), t1 = s1.z * (1.0 - smoothstep(0.4, 1.0, filter / wf1));
+    float4 back = surfCrestProfile(a0, -u0 * spacing, wb, wf0, t0);
+    float4 face = surfCrestProfile(a1, v * spacing, wb, wf1, t1);
+    // The higher of the two crests' heights (and its slope); their forward displacements summed
+    // (each continuous, and next to nothing away from its own crest), so none tears where the
+    // height goes over from one wave to the next.
+    float4 c = back.x > face.x ? back : face;
+    c.zw = back.zw + face.zw;
+    // Less the profile's mean (∫f: a·wb + a·wf), so the sea keeps its level, going over from one
+    // wave's to the next's between their crests (u0 falls by 1/spacing a metre along the heading).
     float gap = max(u0 + v, 1e-3);
-    float mean = 0.21 * mix(a0, a1, u0 / gap);
-    float dz = (back > face ? -back / 0.16 : face / 0.05) - 0.21 * (a1 - a0) / gap;
-    // u0 grows against the heading by 1/spacing per metre (and v shrinks).
-    slope = dz * (-heading / spacing);
-    return max(back, face) - mean;
+    float m0 = a0 * (0.16 + wf0 / spacing), m1 = a1 * (0.16 + wf1 / spacing);
+    r.z = c.x - mix(m0, m1, u0 / gap);
+    r.dz = c.y + (m1 - m0) / (gap * spacing);
+    r.d = c.z;
+    r.dd = c.w;
+    return r;
 }
 
 // Both systems' surf crests (surfCrest), none deeper than ~6 m (the cascades carry the sea
-// there) or in pockets of sea inland of the shoreline.
-float surfWave(constant OceanParams &o, float4 setting, float4 crests, float4 heading, float drift, float2 xy, float depth,
-               float filter, float time, thread float2 &slope) {
+// there) or in pockets of sea inland of the shoreline: the height (m), and through `shift` the
+// water's horizontal displacement, `slope` the height's gradient and `stretch` d(shift)/d(heading)
+// summed over the systems (1 + stretch < 0 where a thrown crest folds the surface over).
+float surfWave(constant OceanParams &o, float4 setting, float4 crests, float4 heading, float2 beta, float drift, float2 xy,
+               float depth, float filter, float time, thread float2 &shift, thread float2 &slope, thread float &stretch) {
+    shift = 0.0;
     slope = 0.0;
+    stretch = 0.0;
     if (setting.x + setting.y <= 0.0 || o.time.z <= 0.0) return 0.0;
     float2 weight = surfWeights(setting);
-    float2 s1, s2;
-    float z = surfCrest(o, crests.x, crests.z, heading.xy, setting.x, setting.z, o.waves.x, xy, filter, time, drift, weight.x, s1)
-            + surfCrest(o, crests.y, crests.w, heading.zw, setting.y, setting.z, o.waves.y, xy, filter, time, drift, weight.y, s2);
+    SurfCrestOut c1 = surfCrest(o, crests.x, crests.z, setting.x, setting.z, beta.x, o.waves.x, xy, filter, time, drift, weight.x);
+    SurfCrestOut c2 = surfCrest(o, crests.y, crests.w, setting.y, setting.z, beta.y, o.waves.y, xy, filter, time, drift, weight.y);
     float fade = (1.0 - smoothstep(4.0, 6.0, depth)) * saturate(setting.w / 0.35);
-    slope = (s1 + s2) * fade;
-    return z * fade;
+    shift = (heading.xy * c1.d + heading.zw * c2.d) * fade;
+    slope = (heading.xy * c1.dz + heading.zw * c2.dz) * fade;
+    stretch = (c1.dd + c2.dd) * fade;
+    return (c1.z + c2.z) * fade;
 }
 
 // The water's displacement at a sea grid point at `time`: the cascades' (from `maps`) and the
@@ -1135,11 +1271,18 @@ float surfWave(constant OceanParams &o, float4 setting, float4 crests, float4 he
 // dry in the swash), nor a crest heap up over the beach (water a few centimetres deep over the
 // sand). Every pass that draws the water works it out the same way.
 float3 oceanWater(constant OceanParams &o, texture2d_array<float> maps, OceanPoint p, float4 setting, float4 crests,
-                  float4 heading, float drift, float time) {
+                  float4 heading, float2 beta, float drift, float time, thread float3 &surfDerivatives) {
     float3 d = oceanDisplacement(o, maps, p);
-    float2 slope;
-    d.z += surfWave(o, setting, crests, heading, drift, p.plane, p.depth, p.filter, time, slope);
-    d.z = clamp(d.z, -0.9 * max(p.depth, 0.0), 0.5 * max(p.depth - 0.3, 0.0));
+    float2 shift, slope;
+    float stretch;
+    surfDerivatives = 0.0;
+    d.z += surfWave(o, setting, crests, heading, beta, drift, p.plane, p.depth, p.filter, time, shift, slope, stretch);
+    d.xy += shift;
+    surfDerivatives = float3(slope, stretch);
+    // (A breaker's crest stands up to ~0.8 of the depth over the bar: the deeper of the vertex's
+    // own depth and the surf's smooth breaking depth, so the crest doesn't follow the floor's
+    // bumps; both run out at the waterline.)
+    d.z = clamp(d.z, -0.9 * max(p.depth, 0.0), 0.8 * max(max(p.depth, setting.z) - 0.3, 0.0));
     return d;
 }
 
@@ -1166,13 +1309,15 @@ vertex OceanOut oceanVertex(uint vid [[vertex_id]], uint iid [[instance_id]],
                             texture2d_array<float> displacement [[texture(4)]],
                             texture2d<float> shore [[texture(6)]],
                             texture2d<float> waves [[texture(7)]],
-                            texture2d<float> shelter [[texture(8)]]) {
+                            texture2d<float> shelter [[texture(8)]],
+                            texture2d<float> slopes [[texture(9)]]) {
     OceanPoint p = oceanPoint(u, o, t, nodes[iid], vid, pages, tiles, shelter, shore);
     OceanOut out;
     out.shelter = p.shelter;
     out.calm = p.calm;
-    out.surf = surfSetting(u, o, t, shore, waves, p.plane, p.depth, out.crests, out.heading, out.drift);
-    float3 d = oceanWater(o, displacement, p, out.surf, out.crests, out.heading, out.drift, o.time.x);
+    out.surf = surfSetting(u, o, t, shore, waves, slopes, p.plane, p.depth, out.crests, out.heading, out.drift, out.beta);
+    out.filter = p.filter;
+    float3 d = oceanWater(o, displacement, p, out.surf, out.crests, out.heading, out.beta, out.drift, o.time.x, out.surfShape);
     out.world = float3(p.plane + d.xy, u.seaLevel + d.z);
     out.position = oceanClip(u, out.world);
     out.plane = p.plane;
@@ -1198,14 +1343,17 @@ vertex OceanMotionOut oceanMotionVertex(uint vid [[vertex_id]], uint iid [[insta
                                         texture2d_array<float> previous [[texture(5)]],
                                         texture2d<float> shore [[texture(6)]],
                                         texture2d<float> waves [[texture(7)]],
-                                        texture2d<float> shelter [[texture(8)]]) {
+                                        texture2d<float> shelter [[texture(8)]],
+                                        texture2d<float> slopes [[texture(9)]]) {
     OceanPoint p = oceanPoint(u, o, t, nodes[iid], vid, pages, tiles, shelter, shore);
     float4 crests, heading;
     float drift;
-    float4 setting = surfSetting(u, o, t, shore, waves, p.plane, p.depth, crests, heading, drift);
-    float3 d = oceanWater(o, displacement, p, setting, crests, heading, drift, o.time.x);
+    float2 beta;
+    float4 setting = surfSetting(u, o, t, shore, waves, slopes, p.plane, p.depth, crests, heading, drift, beta);
+    float3 unused;
+    float3 d = oceanWater(o, displacement, p, setting, crests, heading, beta, drift, o.time.x, unused);
     float3 world = float3(p.plane + d.xy, u.seaLevel + d.z);
-    float3 d0 = oceanWater(o, previous, p, setting, crests, heading, drift, o.time.y);
+    float3 d0 = oceanWater(o, previous, p, setting, crests, heading, beta, drift, o.time.y, unused);
     float3 before = float3(p.plane + d0.xy, u.seaLevel + d0.z);
     OceanMotionOut out;
     out.world = world;
@@ -1244,6 +1392,25 @@ fragment void oceanMotion(OceanMotionOut in [[stage_in]], constant Uniforms &u [
 
 fragment uint4 oceanSurface(OceanOut in [[stage_in]]) {
     return oceanSurfaceTexel(in.world);
+}
+
+// Foam where plunging lips hit the water (SurfLip, lipCollide): a world-fixed grid wrapped
+// every o.breaking.w cells of o.breaking.z metres (fixed point, 1/4096), bilinear; none past the
+// window around the camera it holds.
+float lipFoamAt(constant OceanParams &o, const device uint *foam, float2 camera, float2 xy) {
+    float cell = o.breaking.z;
+    int side = int(o.breaking.w);
+    if (any(abs(xy - camera) > 0.5 * cell * float(side) - 4.0 * cell)) return 0.0;
+    float2 q = xy / cell - 0.5;
+    float2 i = floor(q), f = q - i;
+    int2 c = int2(i);
+    float v[4];
+    for (int k = 0; k < 4; k++) {
+        int2 g = c + int2(k & 1, k >> 1);
+        int2 w = ((g % side) + side) % side;
+        v[k] = float(foam[w.y * side + w.x]) / 4096.0;
+    }
+    return saturate(mix(mix(v[0], v[1], f.x), mix(v[2], v[3], f.x), f.y));
 }
 
 // The sea floor seen from the water surface at `p` along the refracted view `t`: where that ray
@@ -1305,7 +1472,8 @@ fragment float4 oceanFragment(OceanOut in [[stage_in]], constant Uniforms &u [[b
                               constant TerrainParams &t [[buffer(3)]],
                               const device int *pages [[buffer(5)]],
                               texture2d_array<ushort, access::read> tiles [[texture(9)]],
-                              device atomic_uint *used [[buffer(8)]]) {
+                              device atomic_uint *used [[buffer(8)]],
+                              const device uint *lipFoam [[buffer(9)]]) {
     constexpr sampler aniso(filter::linear, mip_filter::linear, address::repeat, max_anisotropy(4));
     float3 toEye = u.cameraPosition - in.world;
     float dist = length(toEye);
@@ -1343,15 +1511,19 @@ fragment float4 oceanFragment(OceanOut in [[stage_in]], constant Uniforms &u [[b
         atomic_fetch_or_explicit(used, group, memory_order_relaxed);
     }
     float2 s = slope / max(1.0 + stretch, 0.2);
-    // The surf's waves (the vertices lift the water by them, oceanWater).
+    // The surf's waves (the vertices lift the water by them, oceanWater), filtered as the
+    // vertices were: a breaker's face stands up and a plunging crest folds over it (1 + its
+    // stretch under 0), the normal then facing forward and down under the lip.
     float4 heading = float4(length(in.heading.xy) > 1e-3 ? normalize(in.heading.xy) : float2(0.0, 1.0),
                             length(in.heading.zw) > 1e-3 ? normalize(in.heading.zw) : float2(0.0, 1.0));
-    if (in.surf.x + in.surf.y > 0.0) {
-        float2 surfSlope;
-        surfWave(o, in.surf, in.crests, heading, in.drift, in.plane, in.depth, oceanFootprint(u, dist), o.time.x, surfSlope);
-        s += surfSlope;
-    }
     float3 n = normalize(float3(-s, 1.0));
+    if (in.surf.x + in.surf.y > 0.0) {
+        // From the vertices (a face is never narrower than the grid resolves, surfCrest).
+        float nz = 1.0 + in.surfShape.z;
+        n = normalize(float3(-(in.surfShape.xy + s * saturate(nz)), nz));
+        // Under a folded crest the eye may see the sheet's other side: light it as the side seen.
+        if (nz < 0.3 && dot(n, v) < 0.0) n = -n;
+    }
     float3 l = normalize(u.sunDirection);
 
     float cloudSun = cloudSunlight(u, cloudShadows, in.world);
@@ -1377,17 +1549,21 @@ fragment float4 oceanFragment(OceanOut in [[stage_in]], constant Uniforms &u [[b
         float3 c = o.absorption.rgb + o.scattering.rgb + o.scattering.w;
         floorLight = f.light * exp(-kd * f.below - c * path);
     }
-    float3 color = oceanShade(u, o, environment, n, -n.xy / n.z, variance, v, floorLight, path, sunLight, in.crest);
+    float3 color = oceanShade(u, o, environment, n, -n.xy / max(n.z, 0.05), variance, v, floorLight, path, sunLight, in.crest);
     // Foam over the shallows (its own white: albedo ~0.8, lit by sun and sky, in the sun's and
     // the clouds' shadows), hiding the glint and the water beneath where it's dense.
     if (in.surf.x + in.surf.y > 0.05 || waterDepth < 0.12) {
         float roller;
-        float foam = surfFoam(o, in.surf, in.crests, in.surf.y > in.surf.x ? heading.zw : heading.xy, in.plane, waterDepth,
-                              oceanFootprint(u, dist), in.drift, roller);
+        float impact = o.breaking.y > 0.0 ? lipFoamAt(o, lipFoam, u.cameraPosition.xy, in.plane) : 0.0;
+        float foam = surfFoam(o, in.surf, in.crests, in.surf.y > in.surf.x ? heading.zw : heading.xy, in.beta, in.plane, waterDepth,
+                              oceanFootprint(u, dist), in.drift, impact, roller);
         if (foam > 0.0) {
             // The roller's churned water brighter (0.88) than the foam it leaves (0.75).
             float albedo = mix(0.75, 0.88, roller) * (0.92 + 0.12 * swashNoise(in.plane / 1.7 + 3.1));
-            float3 white = albedo * (u.sunRadiance * (saturate(l.z) * sunLight) + skyIrradiance(u, float3(0.0, 0.0, 1.0)));
+            // Lit by the surface it rides on: a breaker's face turned from the sun reads as a face
+            // (on flat water this is the sun's cosine and the whole sky, as before).
+            float3 white = albedo * (u.sunRadiance * (saturate(dot(n, l)) * sunLight)
+                                     + skyIrradiance(u, float3(0.0, 0.0, 1.0)) * (0.6 + 0.4 * n.z));
             color = mix(color, white, foam);
         }
     }

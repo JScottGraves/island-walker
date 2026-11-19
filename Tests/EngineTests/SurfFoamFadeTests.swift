@@ -13,7 +13,7 @@ final class SurfFoamFadeTests: XCTestCase {
                            constant float4 &probe [[buffer(2)]], uint i [[thread_position_in_grid]]) {
         float arrival = probe.x + float(i) * probe.y;
         float front, age, wave;
-        float foam = surfBreakers(o, arrival, probe.z, 1.0, 2.0, o.waves.x, float2(66480.0, 31367.0), 0.0, 0.01, 0.0,
+        float foam = surfBreakers(o, arrival, probe.z, 1.0, 2.0, 0.03, o.waves.x, float2(66480.0, 31367.0), 0.0, 0.01, 0.0,
                                   1.0, front, age, wave);
         out[i] = float4(foam, front, age, wave);
     }
@@ -25,9 +25,9 @@ final class SurfFoamFadeTests: XCTestCase {
         // Waves that all break (Hs well over the breaker depth), 60 m apart.
         float4 setting = float4(2.0, 0.0, 1.5, 1.0);
         float4 crests = float4(probe.x, 0.0, 60.0, 60.0);
-        float foam = surfFoam(o, setting, crests, float2(0.0, 1.0), xy, 1.5, 0.05, 0.0, roller);
+        float foam = surfFoam(o, setting, crests, float2(0.0, 1.0), float2(0.03), xy, 1.5, 0.05, 0.0, 0.0, roller);
         float front, age, wave;
-        surfBreakers(o, probe.x, 60.0, 2.0, 1.5, o.waves.x, xy, groundNoise(xy / 2.5 + 4.1) - 0.5, 0.05, 0.0, 1.0,
+        surfBreakers(o, probe.x, 60.0, 2.0, 1.5, 0.03, o.waves.x, xy, groundNoise(xy / 2.5 + 4.1) - 0.5, 0.05, 0.0, 1.0,
                      front, age, wave);
         out[i] = float4(foam, roller, age, wave);
     }

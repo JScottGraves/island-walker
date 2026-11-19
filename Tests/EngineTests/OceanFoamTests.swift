@@ -80,7 +80,7 @@ final class OceanFoamTests: XCTestCase {
             invPatch: SIMD4(spectrum.patchSizes.map { Float(1 / $0) }), meanK: .zero, slopeXX: .zero, slopeYY: .zero,
             slopeXY: .zero, remainder: .zero, origin: (.zero, .zero), morphStart: (.zero, .zero, .zero, .zero),
             morphEnd: (.zero, .zero, .zero, .zero), grid: SIMD4(0.5, 1, 1, Float(spectrum.choppiness)), time: .zero,
-            absorption: .zero, scattering: .zero, sss: .zero, surf: .zero, surfFrom: .zero, waves: .zero)
+            absorption: .zero, scattering: .zero, sss: .zero, surf: .zero, surfFrom: .zero, waves: .zero, breaking: .zero)
         for c in 0..<OceanSpectrum.cascadeCount {
             let m = spectrum.modes(cascade: c, seed: 0x0A11_0CEA)
             p.slopeXX[c] = Float(m.slopeXX)
